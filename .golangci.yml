@@ -1,0 +1,36 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - gochecknoglobals
+  settings:
+    depguard:
+      rules:
+        # 这份 allowlist 就是「谁能碰 syscall」的完整清单，共三处，不再增加：
+        #   authority —— 特权操作（改变系统状态），经 Gate 审计
+        #   scheduler —— 自有机制（sched_setattr，需 CAP_SYS_NICE）
+        #   sysprobe  —— 纯观察（不改变任何状态），准入标准见其 doc.go
+        syscall-boundary:
+          files:
+            - "$all"
+            - "!**/internal/authority/**"
+            - "!**/internal/scheduler/**"
+            - "!**/internal/sysprobe/**"
+            - "!**/main.go"
+          deny:
+            - pkg: "syscall"
+              desc: "Only authority/scheduler/sysprobe are allowed (main.go signal constants exception)"
+            - pkg: "golang.org/x/sys"
+              desc: "Only authority/scheduler/sysprobe are allowed"
+            # os/exec 刻意【不】放行 sysprobe：起进程是权力行使，不是观察。
+            - pkg: "os/exec"
+              desc: "Only authority is allowed"
+        no-testing-in-prod:
+          files:
+            - "$all"
+            - "!$test"
+          deny:
+            - pkg: "testing"
+              desc: "Production code must not import testing (no testing.Testing() branches / test hooks in the shipped binary)"
