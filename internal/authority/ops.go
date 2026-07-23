@@ -67,12 +67,35 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 	}
 	defer func() { _ = unix.Close(parentFD) }()
 
-	// mkdirat 对末段不跟随 symlink：若 leaf 已是链接则 EEXIST，天然安全
+	// mkdirat 对末段不跟随 symlink：若 leaf 已是链接则 EEXIST，天然安全。
+	// mkdirat 成功 = 本调用【创建】了这个目录（若已存在会 EEXIST），因此后续
+	// 任一步失败时，回滚删除它是安全的——我们删的一定是自己刚建的
 	if err := unix.Mkdirat(parentFD, leaf, req.Perm); err != nil {
 		return DirHandle{}, fmt.Errorf("mkdirat %s: %w", leaf, err)
 	}
 
-	// 重新以 fd 打开刚建的目录，后续 chown/chmod 全部对 fd 做，杜绝 TOCTOU
+	dh, err := g.finishDataDir(parentFD, leaf, req)
+	if err != nil {
+		// 回滚：把刚建的空目录删掉。不回滚会留下 root 所有/权限不完整的半成品，
+		// 而重试又会在 mkdirat 处撞 EEXIST，从此永远修不好
+		//
+		// AT_REMOVEDIR 只删【空目录】：若 leaf 在这中间被替换成文件或非空目录
+		// （并发攻击），rmdir 会安全失败、绝不误删。相对 parentFD 操作，
+		// 与创建同一路径解析口径，不跟随 symlink
+		if rmErr := unix.Unlinkat(parentFD, leaf, unix.AT_REMOVEDIR); rmErr != nil {
+			// 回滚也失败：两个错误都带出去，别让回滚失败掩盖主因
+			return DirHandle{}, fmt.Errorf("%w (rollback rmdir %s failed: %v)", err, leaf, rmErr)
+		}
+		return DirHandle{}, err
+	}
+	return dh, nil
+}
+
+// finishDataDir 打开刚建的目录并设定属主与权限
+//
+// 拆成独立函数是为了让 osCreateDataDir 有一个单一的失败出口去做回滚：这里返回
+// error，那里就删目录。全部对 fd 操作（Openat2 后 Fchown/Fchmod），杜绝 TOCTOU
+func (g *Gate) finishDataDir(parentFD int, leaf string, req CreateDataDirRequest) (DirHandle, error) {
 	how := unix.OpenHow{
 		Flags:   unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,

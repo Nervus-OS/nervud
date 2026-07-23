@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/kernel"
+	"github.com/nervus-os/nervud/internal/logging"
 	"github.com/nervus-os/nervud/internal/scheduler"
 )
 
@@ -27,7 +29,7 @@ func main() {
 		"[DEV] Allow real-time priority setting failure to downgrade to normal priority")
 	flag.Parse()
 
-	logger := newLogger(*logLevel)
+	logger, closeLog := newLogger(*logLevel)
 	slog.SetDefault(logger)
 
 	// 根 context：绑定 SIGINT/SIGTERM。收到信号 -> ctx 取消 -> Kernel 反序关闭
@@ -35,25 +37,62 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 第一次信号触发优雅停机后，恢复默认信号行为，让【第二次】信号能强制终止
+	// 进程。否则若优雅停机卡住，后续 SIGTERM/SIGINT 仍被 NotifyContext 接管而
+	// 无任何效果，运维只剩 SIGKILL 一条路。这给一个 收尾卡死时的逃生口
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
 	// 把逻辑放进 run() 是为了能用 return error —— main 里一旦 os.Exit，defer 不会执行
-	if err := run(ctx, *sockPath, *allowSchedDegrade, logger); err != nil {
+	err := run(ctx, *sockPath, *allowSchedDegrade, logger)
+	if err != nil {
 		logger.Error("nervud exited", "err", err)
+	} else {
+		logger.Info("nervud stopped")
+	}
+
+	// 在 os.Exit 之前排空异步日志。closeLog 自带 flush 超时：即便 stderr 已经
+	// 完全卡死，它也会在上限内返回，退出路径不会被日志二次卡住。
+	// 这两条日志都在 closeLog 之前写入（异步入队），关闭时一并排空
+	if n := closeLog(); n > 0 {
+		// 用同步的裸 handler 补记一笔丢弃计数：此刻异步 writer 已停，
+		// 这行必须走一条不依赖它的路径，否则自己就被丢掉了
+		slog.New(slog.NewTextHandler(os.Stderr, nil)).
+			Warn("nervud: some log lines were dropped under back-pressure", "dropped", n)
+	}
+
+	if err != nil {
 		os.Exit(1)
 	}
-	logger.Info("nervud stopped")
 }
 
-// 日志解析器
-// 函数名：newLogger
-// 参数：level，类型 string
-// 返回：*slog.Logger
-func newLogger(level string) *slog.Logger {
+// logQueueDepth 是异步日志队列能暂存的条数
+//
+// 512 条足以吸收突发（启动期各模块一起打日志、fatal 时的密集记录），
+// 又不至于占太多内存。超过即丢弃并计数，绝不阻塞写日志的一方
+const logQueueDepth = 512
+
+// newLogger 构造异步、非阻塞的日志器
+//
+// 返回的第二个值是关闭函数：它排空并停掉后台 writer，返回被丢弃的日志条数。
+// 必须在进程退出前调用一次。TextHandler 底层的 writer 是 AsyncWriter，因此
+// 任何路径（RT Lane、fatal、停机）写日志都不会被慢 stderr 阻塞（见 internal/logging）
+func newLogger(level string) (*slog.Logger, func() uint64) {
 	var lv slog.Level
 	if err := lv.UnmarshalText([]byte(level)); err != nil {
 		lv = slog.LevelInfo
 	}
-	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lv})
-	return slog.New(h)
+	aw := logging.NewAsyncWriter(os.Stderr, logQueueDepth)
+	h := slog.NewTextHandler(aw, &slog.HandlerOptions{Level: lv})
+	closeFn := func() uint64 {
+		// 先 Close 再读计数：Close 关掉 stop 通道后，Write 不再走丢弃分支
+		// （改为同步直写），因此关闭后的计数才是最终值
+		_ = aw.Close()
+		return aw.Dropped()
+	}
+	return slog.New(h), closeFn
 }
 
 // laneStopTimeout 是等待全部实时 Lane 退出的上限时间
@@ -78,21 +117,26 @@ const laneStopTimeout = 2 * time.Second
 // 否则 Lane 与 Kernel 会被同一个信号并行唤醒，谁先退出不确定，Lane 的收尾
 // 逻辑（撤权、刹停确认、审计落盘）可能在进程结束时被截断
 // Lane 是最底层基建，因此在所有模块停完之后才回收
-func run(ctx context.Context, sockPath string, allowSchedDegrade bool, logger *slog.Logger) error {
+func run(ctx context.Context, sockPath string, allowSchedDegrade bool, logger *slog.Logger) (err error) {
 	sched := scheduler.New(logger, allowSchedDegrade)
 
-	// defer 保证无论装配失败还是正常停机，Lane 都会被取消并等待回收
+	// defer 保证无论装配失败还是正常停机，Lane 都会被取消并等待回收。
+	// Lane 回收失败（撤权/刹停确认/审计落盘没跑完）必须反映到退出码，
+	// 否则 systemd 看到 exit 0、以为一切干净——用命名返回值 err 把它带出去
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), laneStopTimeout)
 		defer cancel()
-		if err := sched.Shutdown(sctx); err != nil {
-			logger.Error("scheduler: lane not exited within timeout", "err", err)
+		if serr := sched.Shutdown(sctx); serr != nil {
+			logger.Error("scheduler: lane not exited within timeout", "err", serr)
+			if err == nil {
+				err = fmt.Errorf("scheduler shutdown: %w", serr)
+			}
 		}
 	}()
 
-	k, err := assemble(ctx, sched, sockPath, logger)
-	if err != nil {
-		return err
+	k, aerr := assemble(ctx, sched, sockPath, logger)
+	if aerr != nil {
+		return aerr
 	}
 
 	// Run 阻塞：依次 Start 全部模块，任一失败即反序 Stop 已启动的并返回错误
