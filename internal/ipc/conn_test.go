@@ -1,9 +1,11 @@
 package ipc
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -120,6 +122,24 @@ func TestHandshake_Success(t *testing.T) {
 	if lim.GetIdleTimeoutMs() != wantIdle {
 		t.Fatalf("idle_timeout_ms = %d, want %d", lim.GetIdleTimeoutMs(), wantIdle)
 	}
+	// 其余预算必须是有意义的非零值——proto3 缺省 0 会被 SDK 读成「不允许任何
+	// in-flight 请求 / 订阅 / timeout」。逐字段锁死约定值
+	for _, f := range []struct {
+		name string
+		got  uint64
+		want uint64
+	}{
+		{"max_inflight_requests", uint64(lim.GetMaxInflightRequests()), maxInflightRequests},
+		{"max_inflight_payload_bytes", lim.GetMaxInflightPayloadBytes(), maxInflightPayloadBytes},
+		{"max_outbound_queue_bytes", lim.GetMaxOutboundQueueBytes(), maxOutboundQueueBytes},
+		{"max_subscriptions", uint64(lim.GetMaxSubscriptions()), maxSubscriptions},
+		{"default_timeout_ms", uint64(lim.GetDefaultTimeoutMs()), defaultMethodTimeoutMs},
+		{"max_timeout_ms", uint64(lim.GetMaxTimeoutMs()), maxMethodTimeoutMs},
+	} {
+		if f.got != f.want {
+			t.Fatalf("%s = %d, want %d", f.name, f.got, f.want)
+		}
+	}
 
 	// 握手后 Ping→Pong
 	if err := WriteFrame(c, mustMarshal(t, pingEnv(99))); err != nil {
@@ -174,7 +194,8 @@ func TestHandshake_VersionMismatchSendsFailureThenCloses(t *testing.T) {
 	waitFor(t, "连接被回收", func() bool { return s.connCount() == 0 })
 }
 
-// 客户端 max major 高于 nervud：nervud 选自己的 major，minor 取自己的上限
+// 客户端 max major 高于 nervud：nervud 选自己的 major，minor 落到保证下限 0
+// （Hello 只为最高 major 声明了 minor，对更低的 major 无信息）
 func TestHandshake_ClientSupportsHigherMajor(t *testing.T) {
 	inv := selfUIDInvariants(t)
 	_, sock, _ := newTestServer(t, inv, DefaultLimits())
@@ -194,6 +215,42 @@ func TestHandshake_ClientSupportsHigherMajor(t *testing.T) {
 		t.Fatalf("协商 = %d.%d, want %d.%d",
 			s.GetProtocolMajor(), s.GetProtocolMinor(), protocolMajor, protocolMinorMax)
 	}
+}
+
+// Component 核对不可用（未开发降级开关）时 fail closed：回 UNAUTHENTICATED Failure
+// HelloAck 再关闭，绝不让未确认 Component 的连接进入 Ready
+func TestHandshake_FailsClosedWhenComponentUnverifiable(t *testing.T) {
+	inv := selfUIDInvariants(t)
+	sock := filepath.Join(t.TempDir(), "nervud.sock")
+	// 关键：不带 AllowUnverifiedComponent
+	s, err := New(Config{
+		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
+		Invariants: inv, Identity: selfRegistry(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.Stop(ctx)
+	})
+
+	c := dial(t, sock)
+	if err := WriteFrame(c, mustMarshal(t, helloEnv())); err != nil {
+		t.Fatal(err)
+	}
+	ack := readEnv(t, c).GetHelloAck()
+	if ack == nil || ack.GetFailure() == nil {
+		t.Fatalf("want Failure HelloAck, got %+v", ack)
+	}
+	if code := ack.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED {
+		t.Fatalf("failure code = %v, want UNAUTHENTICATED", code)
+	}
+	expectClosed(t, c)
 }
 
 // --- 握手后分派 -----------------------------------------------------------
@@ -287,28 +344,111 @@ func TestReady_UnsupportedBodyClosesConnection(t *testing.T) {
 		hasAudit(rec, "ipc.UnsupportedBody", errUnsupportedBody))
 }
 
+// Pong 是合法入站（协议允许任一侧 Ping）：接受并忽略，连接保持存活
+func TestReady_PongAccepted(t *testing.T) {
+	inv := selfUIDInvariants(t)
+	s, sock, _ := newTestServer(t, inv, DefaultLimits())
+
+	c := dial(t, sock)
+	handshake(t, c)
+
+	// 未预期的 Pong 不该关连接
+	pong := &ipcv1.Envelope{Body: &ipcv1.Envelope_Pong{Pong: &ipcv1.Pong{Nonce: 5}}}
+	if err := WriteFrame(c, mustMarshal(t, pong)); err != nil {
+		t.Fatal(err)
+	}
+	// 随后 Ping→Pong 仍能打通，证明连接存活且忽略了那个 Pong
+	if err := WriteFrame(c, mustMarshal(t, pingEnv(6))); err != nil {
+		t.Fatal(err)
+	}
+	if got := readEnv(t, c).GetPong().GetNonce(); got != 6 {
+		t.Fatalf("pong nonce = %d, want 6", got)
+	}
+	if n := s.connCount(); n != 1 {
+		t.Fatalf("Pong 不该关连接，connCount=%d", n)
+	}
+}
+
+// Dispatch 是 nervud→Service 方向（§10.7），nervud 永不接收：收到即协议违规
+func TestReady_DispatchIsProtocolViolation(t *testing.T) {
+	inv := selfUIDInvariants(t)
+	s, sock, rec := newTestServer(t, inv, DefaultLimits())
+
+	c := dial(t, sock)
+	handshake(t, c)
+
+	d := &ipcv1.Envelope{Body: &ipcv1.Envelope_Dispatch{Dispatch: &ipcv1.Dispatch{RouteId: 1}}}
+	if err := WriteFrame(c, mustMarshal(t, d)); err != nil {
+		t.Fatal(err)
+	}
+	expectClosed(t, c)
+	waitFor(t, "连接被回收", func() bool { return s.connCount() == 0 })
+	waitFor(t, "Dispatch 被审计为协议违规",
+		hasAudit(rec, "ipc.ProtocolViolation", errUnexpectedBody))
+}
+
+// DispatchResult 是 Service→nervud 方向（§10.7）：方向合法但 route 追踪未落地，
+// 归为 UnsupportedBody 而非协议违规（否则会阻碍将来的 ServiceHost 接入）
+func TestReady_DispatchResultIsUnsupported(t *testing.T) {
+	inv := selfUIDInvariants(t)
+	s, sock, rec := newTestServer(t, inv, DefaultLimits())
+
+	c := dial(t, sock)
+	handshake(t, c)
+
+	dr := &ipcv1.Envelope{Body: &ipcv1.Envelope_DispatchResult{DispatchResult: &ipcv1.DispatchResult{RouteId: 1}}}
+	if err := WriteFrame(c, mustMarshal(t, dr)); err != nil {
+		t.Fatal(err)
+	}
+	expectClosed(t, c)
+	waitFor(t, "连接被回收", func() bool { return s.connCount() == 0 })
+	waitFor(t, "DispatchResult 被审计为 UnsupportedBody",
+		hasAudit(rec, "ipc.UnsupportedBody", errUnsupportedBody))
+}
+
+// Request 带保留的 request_id 0（§10.6）：在生成任何 Response 之前按协议违规关闭
+func TestReady_RequestZeroIDIsViolation(t *testing.T) {
+	inv := selfUIDInvariants(t)
+	s, sock, rec := newTestServer(t, inv, DefaultLimits())
+
+	c := dial(t, sock)
+	handshake(t, c)
+
+	req := &ipcv1.Envelope{Body: &ipcv1.Envelope_Request{Request: &ipcv1.Request{RequestId: 0}}}
+	if err := WriteFrame(c, mustMarshal(t, req)); err != nil {
+		t.Fatal(err)
+	}
+	expectClosed(t, c)
+	waitFor(t, "连接被回收", func() bool { return s.connCount() == 0 })
+	waitFor(t, "request_id 0 被审计为协议违规",
+		hasAudit(rec, "ipc.ProtocolViolation", errZeroRequestID))
+}
+
 // --- 版本协商（纯函数） ----------------------------------------------------
 
 func TestNegotiateVersion(t *testing.T) {
+	// 用 srvMinorMax=3（而非生产的 0）才能观察到 minor 的 cap-vs-floor 区别
+	const srvMajor, srvMinorMax = 1, 3
 	for _, tc := range []struct {
 		name                 string
 		min, max, maxMinor   uint32
 		wantMajor, wantMinor uint32
 		wantOK               bool
 	}{
-		{"精确匹配", 1, 1, 0, 1, 0, true},
-		{"客户端 minor 上限更高被裁到我们的上限", 1, 1, 5, 1, 0, true},
-		{"客户端 max major 更高则用我们的 major 和 minor 上限", 1, 3, 9, 1, 0, true},
-		{"min 为 0 也覆盖我们的 major", 0, 1, 0, 1, 0, true},
-		{"整段高于我们的 major", 2, 2, 0, 0, 0, false},
-		{"整段低于我们的 major", 0, 0, 0, 0, 0, false},
+		{"精确匹配，客户端 minor 0", 1, 1, 0, 1, 0, true},
+		{"同 major，客户端 minor 低于服务端被采用", 1, 1, 2, 1, 2, true},
+		{"同 major，客户端 minor 高于服务端被裁到服务端上限", 1, 1, 5, 1, 3, true},
+		{"选定 major 低于客户端最高 major：minor 落到保证下限 0，而非服务端上限", 1, 3, 9, 1, 0, true},
+		{"min 为 0 也覆盖服务端 major", 0, 1, 1, 1, 1, true},
+		{"整段高于服务端 major", 2, 2, 0, 0, 0, false},
+		{"整段低于服务端 major", 0, 0, 0, 0, 0, false},
 		{"颠倒范围（max<min）无交集", 1, 0, 0, 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &ipcv1.Hello{
 				MinProtocolMajor: tc.min, MaxProtocolMajor: tc.max, MaxProtocolMinor: tc.maxMinor,
 			}
-			major, minor, ok := negotiateVersion(h)
+			major, minor, ok := negotiateVersion(h, srvMajor, srvMinorMax)
 			if ok != tc.wantOK || major != tc.wantMajor || minor != tc.wantMinor {
 				t.Fatalf("negotiateVersion = (%d,%d,%v), want (%d,%d,%v)",
 					major, minor, ok, tc.wantMajor, tc.wantMinor, tc.wantOK)

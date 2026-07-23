@@ -96,6 +96,9 @@ func newTestServerWith(
 		Invariants: inv,
 		Identity:   id,
 		Limits:     lim,
+		// Component 核对尚未落地；测试显式走开发降级，否则握手会 fail closed。
+		// 专门验证 fail-closed 的用例自己构造不带此开关的 Server
+		AllowUnverifiedComponent: true,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

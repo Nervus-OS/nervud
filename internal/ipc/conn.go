@@ -29,11 +29,6 @@ import (
 const (
 	protocolMajor    = 1
 	protocolMinorMax = 0
-
-	// defaultMethodPayloadBytes 是普通方法默认 request/response 额度（架构 10.3）。
-	// 逐方法额度在 Registry 中声明，最终取「方法额度、profile 额度、128 KiB 硬上限」
-	// 三者最小值——这里下发的是那条链的默认起点，不是最终裁决
-	defaultMethodPayloadBytes = 16 << 10
 )
 
 // 握手/分派阶段发现的、需要关闭连接的情形。分成两类哨兵是为了让离线审计规则
@@ -54,6 +49,10 @@ var (
 	// errUnsupportedBody：客户端合法发出、但本 build 尚未实现的控制/调用 body。
 	// 不是违规，是能力缺口
 	errUnsupportedBody = errors.New("ipc: body not implemented in this build")
+
+	// errZeroRequestID：Request 带保留的 request_id 0（架构 10.6：0 永久保留，
+	// 合法请求从 1 起）。协议违规
+	errZeroRequestID = errors.New("ipc: Request uses reserved request_id 0")
 )
 
 // phase 是连接状态机的阶段
@@ -134,7 +133,7 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 		return false
 	}
 
-	major, minor, ok := negotiateVersion(hello)
+	major, minor, ok := negotiateVersion(hello, protocolMajor, protocolMinorMax)
 	if !ok {
 		// 架构 10.2：版本谈不拢时【先发 Failure HelloAck 再关闭】，不要裸关。
 		// 裸关会让客户端无法区分「版本不兼容」和「socket 坏了」，而这两者的
@@ -148,18 +147,19 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 		return false
 	}
 
-	// 架构 10.2：验证声明，而不是相信声明。客户端在 declared_component_id 里
-	// 自报的 Component 只是待验证线索，必须用 PID、systemd unit/cgroup 与启动
-	// 记录核对。verifyComponent 目前是 stub（见其注释），既不信任自报值也无法
-	// 否证它，因此确认到的 ComponentID 暂为空
+	// 架构 10.2：验证声明，而不是相信声明。客户端在 declared_component_id 里自报的
+	// Component 只是待验证线索，必须用 PID、systemd unit/cgroup 与启动记录核对，
+	// 【核对通过才完成握手】。核对基础设施未落地时 verifyComponent 默认 fail closed
+	// （除非显式开发降级），见其实现
 	componentID, err := co.s.verifyComponent(co.caller, hello.GetDeclaredComponentId())
 	if err != nil {
-		// 自报 Component 与内核事实不符：身份不成立，按架构 10.12 回
-		// UNAUTHENTICATED Failure HelloAck 再关闭，并审计（可能是伪装尝试）。
-		// stub 永不走到这里；此分支为真正核对落地后预留
-		co.log.Warn("ipc: declared component verification failed",
+		// 无法核对（能力缺口），或将来：核对到声明与事实不符（潜在伪装）。两者
+		// 都是身份不成立，按架构 10.12 回 UNAUTHENTICATED Failure HelloAck 再关闭。
+		// 当前 err 只可能是「核对基础设施未落地」，属能力缺口而非攻击，不审计为
+		// 违规——避免 IPC 注册前的 fail-closed 把每条连接都刷成安全告警；真正核对
+		// 落地后，对「声明与事实不符」再补违规审计
+		co.log.Warn("ipc: component not verified, rejecting handshake",
 			"declared", hello.GetDeclaredComponentId(), "err", err)
-		co.s.auditViolation(co.caller, err)
 		co.sendHelloFailure(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED)
 		return false
 	}
@@ -192,19 +192,29 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 
 // handleReady 在握手完成后按 body 分派（架构 10.7）
 //
-// 本 build 只打通 Ping→Pong 与 Request→UNAVAILABLE：请求管线（Resolve/Permission/
-// Lane/Dispatch）尚未落地。其余 body 分两类处理，都【不静默丢】：
-//   - 只应由服务端产生的响应/推送 → 协议违规，关闭并审计
-//   - 客户端合法但未实现的控制/调用 body → 关闭并审计为 UnsupportedBody
+// 分派先看方向，再看是否实现——方向错的直接是违规，方向对但没实现的是能力缺口：
+//   - Ping→Pong、Pong 接受忽略、Request→UNAVAILABLE 已打通（请求管线尚未落地）
+//   - nervud→对端方向的 body（响应/推送/派发给 Service 的 Dispatch）被对端发来 →
+//     协议违规，关闭并审计
+//   - 对端→nervud 方向合法、但本 build 未实现的 body → 关闭并审计为 UnsupportedBody
+//
+// 三条都【不静默丢】。方向依据见架构 10.4 的字段表与各消息在 schema 里的方向注释
 func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 	switch body := env.GetBody().(type) {
 	case *ipcv1.Envelope_Ping:
+		// 保活：任一侧都可发起 Ping，服务端回 Pong（架构 10.4）
 		return co.handlePing(body.Ping)
 
+	case *ipcv1.Envelope_Pong:
+		// 保活回复。协议允许任一侧发起 Ping，故 nervud 也是合法的 Pong 接收方。
+		// nervud 目前尚不主动 Ping，收到的 Pong 都属未预期；但 Pong 不承载请求、
+		// 也不要求回复，取「接受并忽略」而非按违规关闭——它不是「只应由服务端发出
+		// 的 body」。等 nervud 发起 Ping 并记录 nonce 后，可收紧为「未匹配即违规」
+		co.log.Debug("ipc: unsolicited Pong ignored")
+		return true
+
 	case *ipcv1.Envelope_Request:
-		// 请求管线未落地。按架构 10.12 回一个以 request_id 归位的 UNAVAILABLE
-		// Response，而不是静默丢或裸关连接
-		return co.sendRequestUnavailable(body.Request)
+		return co.handleRequest(body.Request)
 
 	case *ipcv1.Envelope_Hello:
 		// 握手已完成，再来一个 Hello 是非法握手状态（架构 10.11）
@@ -214,7 +224,6 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 
 	case *ipcv1.Envelope_HelloAck,
 		*ipcv1.Envelope_Response,
-		*ipcv1.Envelope_Pong,
 		*ipcv1.Envelope_ResolveEndpointResult,
 		*ipcv1.Envelope_RegisterEndpointResult,
 		*ipcv1.Envelope_UnregisterEndpointResult,
@@ -224,11 +233,13 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		*ipcv1.Envelope_SubscriptionClosed,
 		*ipcv1.Envelope_EndpointDied,
 		*ipcv1.Envelope_EndpointRevoked,
-		*ipcv1.Envelope_DispatchResult:
-		// 这些都是服务端→客户端的响应或推送，客户端永远不该主动发出，收到即协议
-		// 违规。（Dispatch/DispatchResult 属于 nervud↔Service 方向；Service 连接
-		// 语义落地后 DispatchResult 会迁到那条路径，在此之前它在 App 连接上非法）
-		co.log.Warn("ipc: server-originated body received from client, closing", "body", bodyName(env))
+		*ipcv1.Envelope_Dispatch,
+		*ipcv1.Envelope_CancelDispatch:
+		// 全是 nervud→对端方向的 body：响应（HelloAck/*Result/Response）、推送
+		// （Event/EndpointDied/EndpointRevoked/SubscriptionClosed）、以及 nervud 派发
+		// 给 Service 的 Dispatch/CancelDispatch（§10.7：只能由 nervud 发给 Service）。
+		// nervud 永远不【接收】它们，收到即协议违规
+		co.log.Warn("ipc: server-originated body received from peer, closing", "body", bodyName(env))
 		co.s.auditViolation(co.caller, errUnexpectedBody)
 		return false
 
@@ -238,12 +249,13 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		*ipcv1.Envelope_Cancel,
 		*ipcv1.Envelope_Subscribe,
 		*ipcv1.Envelope_Unsubscribe,
-		*ipcv1.Envelope_Dispatch,
-		*ipcv1.Envelope_CancelDispatch:
-		// 客户端合法但本 build 未实现。它们各自需要专属的 *Result 回复，凭空造一个
-		// 未经权威 method schema 校验的回复违反架构 10.4/10.7；因此现在关闭并审计
-		// 为 UnsupportedBody（与协议违规分开，避免污染安全信号）。每个 body 的专属
-		// handler 随对应模块（endpoint/subscription/dispatch）落地后从这里迁出
+		*ipcv1.Envelope_DispatchResult:
+		// 对端→nervud 方向合法、但本 build 未实现的 body。ResolveEndpoint/Register/
+		// Unregister/Cancel/Subscribe/Unsubscribe 来自 App/Service；DispatchResult 由
+		// Service 连接回给 nervud（§10.7，route 追踪落地前无从匹配）。它们各自需要专属
+		// 回复或路由，凭空造回复违反架构 10.4/10.7，故关闭并审计为 UnsupportedBody
+		// ——与协议违规分开，既不污染安全信号，也不把未来的 ServiceHost 接入误判成
+		// 攻击。各自的 handler 随对应模块（endpoint/subscription/dispatch）落地后迁出
 		return co.unsupported(env)
 
 	default:
@@ -264,13 +276,24 @@ func (co *conn) handlePing(ping *ipcv1.Ping) bool {
 	return true
 }
 
-// sendRequestUnavailable 对一个尚无 handler 的 Request 回终结 Response
+// handleRequest 处理一个 Request
 //
-// 用 UNAVAILABLE 而不是断开：Request 携带 request_id，能以它归位一个合法的失败
-// 终结响应（架构 10.12：断线时 SDK 把 pending 完成为 UNAVAILABLE，这里等价于在
-// 连接仍存活时直接告诉它「当前不可用」）。public_message 留空——架构 10.4 禁止
-// 透传自由文本，本端也没有可归因的模板文本要加
-func (co *conn) sendRequestUnavailable(req *ipcv1.Request) bool {
+// 请求管线（Resolve/Permission/Lane/Dispatch）尚未落地。校验 request_id 后回一个以
+// 它归位的 UNAVAILABLE Response，而不是静默丢或裸关连接
+func (co *conn) handleRequest(req *ipcv1.Request) bool {
+	// request_id 0 永久保留（架构 10.6：合法请求从 1 起）。在生成任何 Response 之前
+	// 按协议违规关闭——回一个 request_id=0 的 Response 等于承认了一个不该存在的
+	// 关联键，SDK 侧也永远不会为 0 登记 pending
+	if req.GetRequestId() == 0 {
+		co.log.Warn("ipc: Request with reserved request_id 0, closing")
+		co.s.auditViolation(co.caller, errZeroRequestID)
+		return false
+	}
+
+	// 用 UNAVAILABLE 而不是断开：Request 携带 request_id，能以它归位一个合法的失败
+	// 终结响应（架构 10.12：断线时 SDK 把 pending 完成为 UNAVAILABLE，这里等价于在
+	// 连接仍存活时直接告诉它「当前不可用」）。public_message 留空——架构 10.4 禁止
+	// 透传自由文本，本端也没有可归因的模板文本要加
 	resp := &ipcv1.Envelope{Body: &ipcv1.Envelope_Response{Response: &ipcv1.Response{
 		RequestId: req.GetRequestId(),
 		Outcome: &ipcv1.Response_Failure{Failure: &ipcv1.Failure{
@@ -327,29 +350,35 @@ func (co *conn) writeEnvelope(env *ipcv1.Envelope) error {
 	return co.w.Flush()
 }
 
-// negotiateVersion 在 nervud 支持的版本与客户端 Hello 声明的范围间求交集，选出即刻
-// 生效的 (major, minor)。无交集返回 ok=false（架构 10.2、10.12）
-func negotiateVersion(h *ipcv1.Hello) (major, minor uint32, ok bool) {
-	// nervud 只实现 protocolMajor 这一个 major，它必须落在客户端闭区间
+// negotiateVersion 在服务端支持的版本 (srvMajor, 该 major 下 minor 上限 srvMinorMax)
+// 与客户端 Hello 声明的范围间求交集，选出即刻生效的 (major, minor)。无交集返回
+// ok=false（架构 10.2、10.12）
+//
+// 取 srvMajor/srvMinorMax 为参数而非直接读常量，是为了把「越界」这条逻辑单测到位
+func negotiateVersion(h *ipcv1.Hello, srvMajor, srvMinorMax uint32) (major, minor uint32, ok bool) {
+	// 服务端只实现 srvMajor 这一个 major，它必须落在客户端闭区间
 	// [min_protocol_major, max_protocol_major] 内，否则无从协商。范围本身颠倒
 	// （max < min）时该判断自然不成立，一并落到「无交集」
-	if h.GetMinProtocolMajor() > protocolMajor || h.GetMaxProtocolMajor() < protocolMajor {
+	if h.GetMinProtocolMajor() > srvMajor || h.GetMaxProtocolMajor() < srvMajor {
 		return 0, 0, false
 	}
-	major = protocolMajor
+	major = srvMajor
 
-	// minor 只增不减：只有当选定 major 恰是客户端的最高 major 时，才受客户端
-	// max_protocol_minor 约束；若客户端最高 major 比我们高，说明它对我们这个较低
-	// major 支持到任意 minor，取我们自己的上限即可
-	clientMinorCeil := uint32(protocolMinorMax)
-	if h.GetMaxProtocolMajor() == protocolMajor {
-		clientMinorCeil = h.GetMaxProtocolMinor()
+	if h.GetMaxProtocolMajor() == srvMajor {
+		// 选定的 major 恰是客户端的最高 major：Hello 的 max_protocol_minor 就是
+		// 客户端对本 major 的 minor 上限，取它与服务端上限的较小值
+		minor = srvMinorMax
+		if cm := h.GetMaxProtocolMinor(); cm < minor {
+			minor = cm
+		}
+		return major, minor, true
 	}
-	minor = protocolMinorMax
-	if clientMinorCeil < minor {
-		minor = clientMinorCeil
-	}
-	return major, minor, true
+
+	// 选定的 major 低于客户端最高 major：Hello 只为最高 major 声明了 minor，对更低
+	// 的 major 没有任何 minor 信息。minor 0 是任一实现对某个 major 的保证下限，因此
+	// 只能给 0——不能假设「客户端支持更高 major」就等于「它支持我们这个 major 的更高
+	// minor」，那会在服务端 minor 抬高后选出客户端从未声明支持的版本
+	return major, 0, true
 }
 
 // bodyName 返回 Envelope body 的具体类型名，仅用于诊断日志

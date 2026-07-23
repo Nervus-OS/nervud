@@ -137,6 +137,12 @@ type Config struct {
 
 	// Limits 为零值时使用 DefaultLimits()
 	Limits Limits
+
+	// AllowUnverifiedComponent 显式放行「Component 核对尚未落地」时的握手，仅供
+	// 开发/测试。默认 false = fail closed：核对不可用即拒绝握手，绝不让未确认
+	// Component 的连接进入 Ready（架构 10.2：核对 Component 后才完成握手）。
+	// 生产镜像永不置 true——同 ND内核介绍「开发机需显式开关才允许降级运行」的规矩
+	AllowUnverifiedComponent bool
 }
 
 // PeerResolver 把 SO_PEERCRED 凭证解析成可信身份
@@ -160,6 +166,9 @@ type Server struct {
 	inv      *authority.Invariants
 	identity PeerResolver
 	limits   Limits
+
+	// allowUnverifiedComponent 见 Config.AllowUnverifiedComponent
+	allowUnverifiedComponent bool
 
 	ln *net.UnixListener
 
@@ -215,18 +224,19 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		sockPath:     cfg.SockPath,
-		log:          cfg.Log,
-		auditor:      cfg.Auditor,
-		inv:          cfg.Invariants,
-		identity:     cfg.Identity,
-		limits:       normalizeLimits(cfg.Limits),
-		quit:         make(chan struct{}),
-		fatal:        make(chan error, 1),
-		conns:        make(map[*net.UnixConn]struct{}),
-		perUID:       make(map[uint32]int),
-		rejectLog:    newRateLimiter(10, time.Second),
-		violationLog: newRateLimiter(10, time.Second),
+		sockPath:                 cfg.SockPath,
+		log:                      cfg.Log,
+		auditor:                  cfg.Auditor,
+		inv:                      cfg.Invariants,
+		identity:                 cfg.Identity,
+		limits:                   normalizeLimits(cfg.Limits),
+		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
+		quit:                     make(chan struct{}),
+		fatal:                    make(chan error, 1),
+		conns:                    make(map[*net.UnixConn]struct{}),
+		perUID:                   make(map[uint32]int),
+		rejectLog:                newRateLimiter(10, time.Second),
+		violationLog:             newRateLimiter(10, time.Second),
 	}, nil
 }
 
@@ -299,6 +309,11 @@ func (s *Server) Start(context.Context) error {
 	ok = true
 	s.log.Info("ipc: listening", "sock", s.sockPath, "mode", socketMode.String(),
 		"max_conns", s.limits.MaxConns, "max_conns_per_uid", s.limits.MaxConnsPerUID)
+	if s.allowUnverifiedComponent {
+		// 降级模式必须显眼：未核对 Component 就放行握手只允许在开发/测试出现，
+		// 生产镜像绝不置此开关（架构 10.2）
+		s.log.Warn("ipc: component verification DISABLED (AllowUnverifiedComponent) — dev/test only, never production")
+	}
 	return nil
 }
 
@@ -646,36 +661,61 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	}
 }
 
+// errComponentUnverifiable：无法核对客户端自报的 Component（核对基础设施尚未落地）。
+// 与「核对到不一致」不同——后者是潜在伪装、要审计；本错误只是能力缺口，fail closed
+var errComponentUnverifiable = errors.New("ipc: component verification unavailable")
+
 // verifyComponent 是架构 10.2「验证声明而不是相信声明」的落点：把客户端在 Hello
 // 里自报的 declared_component_id 与内核事实（PID、systemd unit/cgroup、启动记录、
 // manifest）核对，返回【核对确认】的 Component ID
 //
-// 现在是 stub：internal/service 尚未暴露 PID→Component 反查，internal/identity 也
-// 还没有 Component 级索引，因此无法核对。stub 返回空字符串（Component 未知）而
-// 【不】回退成信任自报值——信任自报等于把身份决策权交给对端，正是 §10.2 禁止的。
-// 返回的 error 恒为 nil：既然无法核对，也就无从否证，不能凭空判为不一致
+// 核对基础设施尚未落地：internal/service 还没暴露 PID→Component 反查，
+// internal/identity 也没有 Component 级索引。因此本函数【默认 fail closed】——返回
+// errComponentUnverifiable，握手随即回 UNAUTHENTICATED 并关闭，绝不让未确认 Component
+// 的连接进入 Ready。只有显式开发/测试开关（AllowUnverifiedComponent）才放行，且即便
+// 放行也只返回空 Component（未确认），【绝不】回退成信任自报值——信任自报等于把身份
+// 决策权交给对端，正是 §10.2 禁止的
 //
-// TODO(component-verify): service/identity 就位后改为真正核对，不一致时返回错误，
-// 调用方据此回 UNAUTHENTICATED Failure HelloAck
+// TODO(component-verify): service/identity 就位后改为真正核对，声明与事实不符时返回
+// 错误并由调用方审计为潜在伪装；届时删除 AllowUnverifiedComponent 开关
 func (s *Server) verifyComponent(_ identity.Caller, _ string) (string, error) {
+	if !s.allowUnverifiedComponent {
+		return "", errComponentUnverifiable
+	}
 	return "", nil
 }
 
-// connectionLimits 把服务端强制的预算投影成下发给 SDK 的 ConnectionLimits
-// （架构 10.11 的 wire 投影）。SDK 据此自律；服务端不因告知过就放松执法
+// ConnectionLimits 下发给 SDK 的预算取值（架构 10.11 的 wire 投影）
 //
-// 只填【当前真正强制】的项与 schema 冻结的固定常量：
-//   - max_frame_bytes         frame.go 已强制（§10.3 硬上限 128 KiB）
-//   - idle_timeout_ms         serve 的空闲 deadline 已强制
-//   - default_method_payload  §10.3 冻结的 16 KiB 默认额度
+// §10.11 固定了 in-flight 请求数、in-flight payload、outbound queue 三项默认；method
+// payload 默认见 §10.3。订阅数与方法 timeout 无 §级固定数值（方法 timeout 逐方法在
+// Registry 声明），取保守默认，待按设备 profile 收紧（§10.11 允许按 profile 调）
 //
-// in-flight / outbound / subscription / method-timeout 预算随 Envelope 执行层落地
-// 再填——现在下发一个没人强制的数字，只会让 SDK 以为它已经生效（与 Limits 结构体
-// 刻意不预定义未强制字段同理）
+// 全部字段都下发非零值：proto3 标量缺省是 0，而协议【没有】定义「0 = 尚未实现」，
+// 漏填会被 SDK 读成「不允许任何 in-flight 请求 / 订阅 / timeout」。执行层对这些预算的
+// 强制随 Envelope 层落地，但下发的数值现在就必须是有意义的自律依据
+const (
+	defaultMethodPayloadBytes = 16 << 10  // §10.3 普通方法默认 request/response
+	maxInflightRequests       = 64        // §10.11
+	maxInflightPayloadBytes   = 1 << 20   // §10.11：1 MiB
+	maxOutboundQueueBytes     = 512 << 10 // §10.11：512 KiB
+	maxSubscriptions          = 64        // 暂定默认，无 §级固定值，待 profile 调优
+	defaultMethodTimeoutMs    = 5_000     // Request.timeout_ms=0 时采用（方法 Registry 再细化）
+	maxMethodTimeoutMs        = 30_000    // nervud 收紧调用者 timeout 的上限
+)
+
+// connectionLimits 组装本连接下发的 ConnectionLimits。idle_timeout_ms 取自实际强制的
+// Limits.IdleTimeout，其余取上面按 §10.11/§10.3 固定或保守约定的常量
 func (s *Server) connectionLimits() *ipcv1.ConnectionLimits {
 	return &ipcv1.ConnectionLimits{
 		MaxFrameBytes:             MaxFrameBytes,
 		DefaultMethodPayloadBytes: defaultMethodPayloadBytes,
+		MaxInflightRequests:       maxInflightRequests,
+		MaxInflightPayloadBytes:   maxInflightPayloadBytes,
+		MaxOutboundQueueBytes:     maxOutboundQueueBytes,
+		MaxSubscriptions:          maxSubscriptions,
+		DefaultTimeoutMs:          defaultMethodTimeoutMs,
+		MaxTimeoutMs:              maxMethodTimeoutMs,
 		IdleTimeoutMs:             uint32(s.limits.IdleTimeout / time.Millisecond),
 	}
 }
