@@ -10,6 +10,7 @@ import (
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/permission"
 )
 
 type fakeInstaller struct {
@@ -49,17 +50,44 @@ type fakeAuditor struct{ events []audit.Event }
 
 func (f *fakeAuditor) Record(_ context.Context, ev audit.Event) { f.events = append(f.events, ev) }
 
+// fakePermissionArbiter 默认放行全部请求权限（透传），镜像 Arbitrate 改造前
+// Decision.GrantedPerms 的直通行为，好让不关心权限裁决细节的既有测试不必
+// 改动断言；需要覆盖裁决细节的测试单独构造自己的 intersect 函数
+type fakePermissionArbiter struct {
+	intersect func(requested []string, trust identity.TrustProfile) (granted, denied []string)
+	replaced  [][]permission.Grant
+}
+
+func (f *fakePermissionArbiter) Intersect(requested []string, trust identity.TrustProfile) (granted, denied []string) {
+	if f.intersect != nil {
+		return f.intersect(requested, trust)
+	}
+	return requested, nil
+}
+
+func (f *fakePermissionArbiter) Replace(grants []permission.Grant) error {
+	f.replaced = append(f.replaced, grants)
+	return nil
+}
+
 func newTestInstaller(t *testing.T) (*Module, *fakeInstaller, *fakeIdentityUpdater, *fakeAuditor) {
+	t.Helper()
+	mod, auth, idReg, aud, _ := newTestInstallerWithPerm(t)
+	return mod, auth, idReg, aud
+}
+
+func newTestInstallerWithPerm(t *testing.T) (*Module, *fakeInstaller, *fakeIdentityUpdater, *fakeAuditor, *fakePermissionArbiter) {
 	t.Helper()
 	dir := t.TempDir()
 	auth := &fakeInstaller{}
 	idReg := &fakeIdentityUpdater{}
+	perm := &fakePermissionArbiter{}
 	aud := &fakeAuditor{}
 	registry := NewRegistry()
-	mod := New(auth, idReg, registry, aud, nil,
+	mod := New(auth, idReg, perm, registry, aud, nil,
 		filepath.Join(dir, "registry"), filepath.Join(dir, "system-packages"),
 		filepath.Join(dir, "packages"), filepath.Join(dir, "data"))
-	return mod, auth, idReg, aud
+	return mod, auth, idReg, aud, perm
 }
 
 // newValidStaging 构造一份内容与 manifest digest 一致的 staging 目录，
@@ -198,6 +226,57 @@ func TestInstall_PropagatesAuthorityFailure(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("want a denied pkgregistry.Install audit event, got %+v", aud.events)
+	}
+}
+
+// Install 必须把 permission.Intersect 的裁决结果（而不是请求权限的直通拷贝）
+// 写进 Entry.GrantedPermissions，并把被拒绝的部分记入审计——这是本次改造要
+// 补上的、此前被丢弃的那步计算（见 arbitrate.go 顶部注释）
+func TestInstall_ComputesGrantedPermissions(t *testing.T) {
+	mod, _, _, aud, perm := newTestInstallerWithPerm(t)
+	perm.intersect = func(requested []string, _ identity.TrustProfile) (granted, denied []string) {
+		return []string{"perm.granted"}, []string{"perm.denied"}
+	}
+
+	dir := t.TempDir()
+	staging := filepath.Join(dir, "staging")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+	content := "#!/bin/true"
+	if err := os.WriteFile(filepath.Join(staging, "bin"), []byte(content), 0o755); err != nil {
+		t.Fatalf("write staging file: %v", err)
+	}
+	manifestBytes := []byte(`{"package_id":"com.example.app","version":"1.0.0",` +
+		`"digests":{"bin":"` + hashOf(content) + `"},` +
+		`"permissions":["perm.granted","perm.denied"],` +
+		`"components":[{"id":"main","type":"app","entry":"bin"}]}`)
+
+	entry, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes, StagingDir: staging, Source: SourceDynamicInstall,
+	})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if len(entry.GrantedPermissions) != 1 || entry.GrantedPermissions[0] != "perm.granted" {
+		t.Fatalf("GrantedPermissions = %v, want [perm.granted]", entry.GrantedPermissions)
+	}
+
+	found := false
+	for _, ev := range aud.events {
+		if ev.Action == "pkgregistry.Intersect" && ev.Denied {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want a denied pkgregistry.Intersect audit event, got %+v", aud.events)
+	}
+
+	if len(perm.replaced) != 1 || len(perm.replaced[0]) != 1 {
+		t.Fatalf("permission 投影未被正确推送: %+v", perm.replaced)
+	}
+	if got := perm.replaced[0][0]; got.PackageID != "com.example.app" || len(got.Permissions) != 1 {
+		t.Fatalf("投影内容 = %+v", got)
 	}
 }
 

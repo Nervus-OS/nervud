@@ -25,6 +25,13 @@ type Entry struct {
 	UID           uint32
 	Trust         identity.TrustProfile
 	Source        Source
+
+	// GrantedPermissions 是 permission.Intersect 对 Manifest.Permissions 的裁决
+	// 结果（"请求 ∩ 已注册权限 ∩ trust 门槛"），取代此前被 Install() 算出后
+	// 直接丢弃的 Decision.GrantedPerms（见 arbitrate.go 的注释）。动态安装
+	// 路径在 Install 时算一次并持久化，重启只读回、不重新裁决（见 module.go
+	// 的 commit 与 scan.go 的 scanDynamicInstalls）
+	GrantedPermissions []string
 }
 
 // Registry 是 pkgregistry 的权威内存态：Package ID -> Entry

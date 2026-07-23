@@ -280,6 +280,10 @@ func (co *conn) handlePing(ping *ipcv1.Ping) bool {
 //
 // 请求管线（Resolve/Permission/Lane/Dispatch）尚未落地。校验 request_id 后回一个以
 // 它归位的 UNAVAILABLE Response，而不是静默丢或裸关连接
+//
+// co.s.permission（PermissionChecker）已经可用，但本函数尚不调用它：还没有
+// 从 endpoint_id/method_id 推导 permission ID 的手段（internal/endpoint 是空
+// 实现）。真正的 Allowed(...) 调用点要等 endpoint 落地后才能加，不在这里空转
 func (co *conn) handleRequest(req *ipcv1.Request) bool {
 	// request_id 0 永久保留（架构 10.6：合法请求从 1 起）。在生成任何 Response 之前
 	// 按协议违规关闭——回一个 request_id=0 的 Response 等于承认了一个不该存在的

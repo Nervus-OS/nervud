@@ -15,6 +15,7 @@ import (
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/permission"
 
 	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
 )
@@ -95,6 +96,7 @@ func newTestServerWith(
 		Auditor:    rec,
 		Invariants: inv,
 		Identity:   id,
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 		Limits:     lim,
 		// Component 核对尚未落地；测试显式走开发降级，否则握手会 fail closed。
 		// 专门验证 fail-closed 的用例自己构造不带此开关的 Server
@@ -121,6 +123,7 @@ func newUnstartedServer(t *testing.T, sock string, inv *authority.Invariants) *S
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: inv, Identity: identity.NewRegistry(),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -172,6 +175,7 @@ func TestNew_Validation(t *testing.T) {
 		Auditor:    &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(),
 		Identity:   identity.NewRegistry(),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 	}
 	for _, tc := range []struct {
 		name   string
@@ -183,6 +187,7 @@ func TestNew_Validation(t *testing.T) {
 		{"缺 Auditor", func(c *Config) { c.Auditor = nil }},
 		{"缺 Invariants", func(c *Config) { c.Invariants = nil }},
 		{"缺 Identity", func(c *Config) { c.Identity = nil }},
+		{"缺 Permission", func(c *Config) { c.Permission = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base
@@ -200,8 +205,9 @@ func TestNew_PartialLimitsGetPerFieldDefaults(t *testing.T) {
 	s, err := New(Config{
 		SockPath: "/run/nervus/nervud.sock", Log: discardLog(),
 		Auditor: &fakeRecorder{}, Invariants: authority.DefaultInvariants(),
-		Identity: identity.NewRegistry(),
-		Limits:   Limits{MaxConns: 10}, // 只设一个字段
+		Identity:   identity.NewRegistry(),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Limits:     Limits{MaxConns: 10}, // 只设一个字段
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -226,6 +232,7 @@ func TestNew_ZeroLimitsGetsDefaults(t *testing.T) {
 		Auditor:    &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(),
 		Identity:   identity.NewRegistry(),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -274,6 +281,7 @@ func TestStart_RemovesStaleSocket(t *testing.T) {
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(), Identity: identity.NewRegistry(),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -363,6 +371,7 @@ func TestStart_RefusesNonSocketFile(t *testing.T) {
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(), Identity: identity.NewRegistry(),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 	})
 	if err != nil {
 		t.Fatal(err)
