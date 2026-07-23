@@ -188,3 +188,27 @@ func TestRebootRequest_RequiresReason(t *testing.T) {
 		t.Fatalf("valid reboot rejected: %v", err)
 	}
 }
+
+func TestInstallVerifiedPackageRequest_Validate(t *testing.T) {
+	inv := DefaultInvariants()
+
+	valid := InstallVerifiedPackageRequest{
+		StagingDir: "/var/lib/nervus/pkgmanagerd/staging/tx-1",
+		DestDir:    inv.PackageRoot + "/com.example.app/1.0.0",
+	}
+	if err := valid.Validate(inv); err != nil {
+		t.Fatalf("valid request rejected: %v", err)
+	}
+
+	outside := valid
+	outside.DestDir = "/etc/passwd"
+	if err := outside.Validate(inv); !errors.Is(err, ErrInvariantViolated) {
+		t.Fatalf("dest outside PackageRoot: err = %v, want ErrInvariantViolated", err)
+	}
+
+	noStaging := valid
+	noStaging.StagingDir = ""
+	if err := noStaging.Validate(inv); !errors.Is(err, ErrInvariantViolated) {
+		t.Fatalf("empty staging dir: err = %v, want ErrInvariantViolated", err)
+	}
+}

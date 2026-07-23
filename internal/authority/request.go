@@ -3,13 +3,14 @@
 //
 // 只落地调用者形状已经确定的操作：
 //
-//	CreatePrivateDataDirectory / SetOwner / Reboot
+//	CreatePrivateDataDirectory / SetOwner / Reboot / InstallVerifiedPackage
 //
-// 其余 5 个 Kind（PrepareAppIdentity、InstallVerifiedPackage、StartSandboxedProcess）
-// StopProcess、EnableFsVerity）的请求形状由各自的第一个真实调用者（identity /
-// pkgregistry / service）落地时倒逼出来，现在定义只会是猜测。特别地 StopProcess
-// 必须等 service 定型：裸 PID 有复用竞态（PID 被回收后杀错进程），正解是 service
-// 在 spawn 时持有 pidfd、Authority 对 pidfd 发信号——那会直接改变请求字段
+// 其余 4 个 Kind（PrepareAppIdentity、StartSandboxedProcess、StopProcess、
+// EnableFsVerity）的请求形状由各自的第一个真实调用者（identity / service）
+// 落地时倒逼出来，现在定义只会是猜测。特别地 StopProcess 必须等 service 定型：
+// 裸 PID 有复用竞态（PID 被回收后杀错进程），正解是 service 在 spawn 时持有
+// pidfd、Authority 对 pidfd 发信号——那会直接改变请求字段。EnableFsVerity
+// 同样推迟：fs-verity 属于加固而非 v1 装包主链路的阻断项
 package authority
 
 import (
@@ -110,5 +111,42 @@ func (r RebootRequest) Validate(*Invariants) error {
 
 func (g *Gate) Reboot(ctx context.Context, subj Subject, req RebootRequest) error {
 	_, err := do(ctx, g, subj, req, g.osReboot)
+	return err
+}
+
+// ---- InstallVerifiedPackage -------------------------------------------
+
+// InstallVerifiedPackageRequest 把 pkgregistry 已经独立复核过（签名/digest/
+// 裁决，见 internal/pkgregistry）的 staging 目录原子提交为最终只读代码目录
+//
+// 本请求只做"移动 + 收紧顶层属主"，不做压缩/展开/复核——压缩展开是
+// pkgmanagerd 的职责，复核是 pkgregistry 的职责，Authority 只负责这一步
+// 唯一有权跨越信任边界的落盘动作
+//
+// 故意不带 UID/GID 字段：最终代码目录的属主是 nervud 自身（见 ops.go 的
+// finishInstalledPackage），不是该 Package 的 App UID——只读代码目录必须
+// 让"谁也不能是自己代码的属主"这条底线成立，把属主设成 App UID 反而会让
+// 被攻破的 App 有能力 chmod 回可写、修改自己的可执行代码
+type InstallVerifiedPackageRequest struct {
+	StagingDir string // pkgmanagerd 产出、已被 pkgregistry 复核过的 staging 目录
+	DestDir    string // 必须位于 Invariants.PackageRoot 之下：<PackageRoot>/<id>/<version>
+}
+
+func (InstallVerifiedPackageRequest) Kind() Kind { return KindInstallVerifiedPackage }
+
+func (r InstallVerifiedPackageRequest) Detail() string { return r.DestDir }
+
+func (r InstallVerifiedPackageRequest) Validate(inv *Invariants) error {
+	if err := inv.CheckContained(r.DestDir, inv.PackageRoot); err != nil {
+		return err
+	}
+	if r.StagingDir == "" {
+		return fmt.Errorf("%w: empty staging dir", ErrInvariantViolated)
+	}
+	return nil
+}
+
+func (g *Gate) InstallVerifiedPackage(ctx context.Context, subj Subject, req InstallVerifiedPackageRequest) error {
+	_, err := do(ctx, g, subj, req, g.osInstallVerifiedPackage)
 	return err
 }

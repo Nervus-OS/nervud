@@ -11,7 +11,9 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 
 	"golang.org/x/sys/unix"
 
@@ -128,6 +130,96 @@ func (g *Gate) osSetOwner(_ context.Context, req SetOwnerRequest) (struct{}, err
 		return struct{}{}, fmt.Errorf("fchownat %s: %w", leaf, err)
 	}
 	return struct{}{}, nil
+}
+
+// osInstallVerifiedPackage 把 pkgregistry 已复核过的 staging 目录原子提交为
+// <PackageRoot>/<id>/<version>
+//
+// <id> 这一级只是版本分组的容器，不是权限意义上的独立对象——它没有自己的
+// 属主/权限语义，首次安装某个 Package 时按需 mkdirat（EEXIST 时忽略）即可，
+// 不必像 CreateDataDir 那样要求父目录必须显式预先存在
+func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPackageRequest) (struct{}, error) {
+	rel, err := containedRel(req.DestDir, g.inv.PackageRoot)
+	if err != nil {
+		// Validate 已经查过，到这还失败说明调用序被破坏
+		return struct{}{}, err
+	}
+	idDir, version := splitRel(rel)
+	if idDir == "" || version == "" {
+		return struct{}{}, fmt.Errorf("%w: dest dir %q must be <PackageRoot>/<id>/<version>",
+			ErrInvariantViolated, req.DestDir)
+	}
+
+	rootFD, err := unix.Open(g.inv.PackageRoot, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return struct{}{}, fmt.Errorf("open package root %s: %w", g.inv.PackageRoot, err)
+	}
+	defer func() { _ = unix.Close(rootFD) }()
+
+	if err := unix.Mkdirat(rootFD, idDir, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
+		return struct{}{}, fmt.Errorf("mkdirat %s: %w", idDir, err)
+	}
+
+	how := unix.OpenHow{
+		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
+	}
+	idFD, err := unix.Openat2(rootFD, idDir, &how)
+	if err != nil {
+		return struct{}{}, fmt.Errorf("resolve %s under %s: %w", idDir, g.inv.PackageRoot, err)
+	}
+	defer func() { _ = unix.Close(idFD) }()
+
+	// RENAME_NOREPLACE：目标版本目录已存在时整体失败、不静默覆盖——同一个
+	// <id>/<version> 出现第二次通常意味着重复提交或版本号复用，都不该被
+	// 无声吞掉。源端用绝对路径：renameat2(2) 里 pathname 为绝对路径时对应
+	// 的 dirfd 被忽略，staging 目录自身的隔离由 pkgmanagerd 的独立 UID/
+	// mount namespace 负责，不在本次调用的职责范围内
+	if err := unix.Renameat2(unix.AT_FDCWD, req.StagingDir, idFD, version, unix.RENAME_NOREPLACE); err != nil {
+		return struct{}{}, fmt.Errorf("renameat2 %s -> %s: %w", req.StagingDir, req.DestDir, err)
+	}
+
+	if err := g.finishInstalledPackage(idFD, version); err != nil {
+		// 回滚：把刚移入的目录 rename 回 staging 原路径。用 rename 而不是
+		// 递归删除——这已经是一整棵从 pkgmanagerd 移过来的目录树，递归删除
+		// 一个属主可能已经改了一半的目录风险更高；成功的 renameat2 保证了
+		// staging 原路径此刻必然空闲、可以直接 rename 回去
+		if rerr := unix.Renameat2(idFD, version, unix.AT_FDCWD, req.StagingDir, unix.RENAME_NOREPLACE); rerr != nil {
+			return struct{}{}, fmt.Errorf("%w (rollback rename to staging failed: %v)", err, rerr)
+		}
+		return struct{}{}, err
+	}
+	return struct{}{}, nil
+}
+
+// finishInstalledPackage 收紧刚提交的版本目录的顶层属主与权限
+//
+// 属主收紧为 nervud 自身（生产环境即运行 nervud 的账户，通常是 root），
+// 不是该 Package 的 App UID——只读代码目录必须让"谁也不能是自己代码的属主"
+// 这条底线成立（架构 §9："App 和 Service 都不能修改自己的可执行代码"），
+// 属主若是 App 自己的 UID，被攻破的 App 就能 chmod 回可写、篡改自己的代码
+//
+// 只收紧顶层：递归收紧树内每个文件的属主/权限是更完整的加固，但 pkgmanagerd
+// 本身尚未落地、staging 的隔离模型还是雏形，这条链路整体仍处于 v1 起步阶段，
+// 留 TODO 做深度加固而不是现在就仓促实现一个未经充分推敲的递归遍历
+func (g *Gate) finishInstalledPackage(parentFD int, leaf string) error {
+	how := unix.OpenHow{
+		Flags:   unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
+	}
+	fd, err := unix.Openat2(parentFD, leaf, &how)
+	if err != nil {
+		return fmt.Errorf("open installed dir %s: %w", leaf, err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+
+	if err := unix.Fchown(fd, os.Geteuid(), os.Getegid()); err != nil {
+		return fmt.Errorf("fchown: %w", err)
+	}
+	if err := unix.Fchmod(fd, 0o755); err != nil {
+		return fmt.Errorf("fchmod: %w", err)
+	}
+	return nil
 }
 
 func (g *Gate) osReboot(ctx context.Context, req RebootRequest) (struct{}, error) {

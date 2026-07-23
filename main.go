@@ -12,8 +12,10 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/kernel"
 	"github.com/nervus-os/nervud/internal/logging"
+	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/scheduler"
 )
 
@@ -201,13 +203,25 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	//   例：pkgregistry 只需要装包能力，就只定义并接收
 	//     type PackageInstaller interface {
 	//         InstallVerifiedPackage(context.Context, authority.Subject, ...) error
+	//     }
 	//
-	//
+	// identity.Registry 目前还没有 Module 外壳（没有 Name/Start/Stop），暂时
+	// 只作为一个可用的库直接 New 出来，传给 pkgregistry 做全量投影的接收方；
+	// 等 identity 自己的 Module 外壳落地后，这里改成从 Kernel 里取同一个实例
+	idReg := identity.NewRegistry()
+
+	// pkgregistry 自己的权威 Registry：装包/卸载/启动扫描的全量状态只有这一份，
+	// 不与 Module 分开持有（见 internal/pkgregistry/module.go 顶部说明）
+	pkgReg := pkgregistry.NewRegistry()
+
 	// TODO(rewrite): 按 sec 2 逐个接入，从最基础往上叠。IPC 放最后：对外开门之前
 	// Identity/Permission/Safety 须先就绪，避免出现 未受权限访问 的窗口期
 	//   k.Register(identity.New(...))       // SO_PEERCRED、UID -> Package 映射
 	//   k.Register(permission.New(...))     // capability 执法
-	//   k.Register(pkgregistry.New(auth, ...)) // Package Registry + 安装裁决
+	k.Register(pkgregistry.New(auth, idReg, pkgReg, aud, logger,
+		pkgregistry.DefaultRegistryStateDir, pkgregistry.DefaultSystemPackagesDir,
+		authority.DefaultInvariants().PackageRoot, authority.DefaultInvariants().DataRoot,
+	)) // Package Registry + 安装裁决
 	//   k.Register(service.New(auth, ...))  // App/Service 组件生命周期
 	//   k.Register(endpoint.New(...))       // Endpoint 注册/解析/路由
 	//   k.Register(resource.New(...))       // Resource Registry + Provider 绑定
@@ -215,7 +229,6 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	//   k.Register(safety.New(sched, ...))  // Safety Gate + StopProgress（用上面的 sched 起 Lane）
 	//   k.Register(ipc.New(sockPath, ...))  // 控制面 UDS，依赖上面全部就绪
 	_ = sockPath
-	_ = auth
 
 	return k, nil
 }

@@ -98,3 +98,105 @@ func TestCreateDataDir_SuccessLeavesDir(t *testing.T) {
 		t.Fatalf("perm = %o, want 700", fi.Mode().Perm())
 	}
 }
+
+// newStagingDir 构造一个模拟 pkgmanagerd 产出的 staging 目录，内含一个文件
+func newStagingDir(t *testing.T, root, name, content string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin"), []byte(content), 0o755); err != nil {
+		t.Fatalf("write staging file: %v", err)
+	}
+	return dir
+}
+
+func TestInstallVerifiedPackage_Success(t *testing.T) {
+	root := t.TempDir()
+	g := newFSGate(t, root)
+
+	staging := newStagingDir(t, root, "staging-1", "#!/bin/true")
+	destDir := filepath.Join(root, "com.example.app", "1.0.0")
+
+	err := g.InstallVerifiedPackage(context.Background(), SubjectKernel(),
+		InstallVerifiedPackageRequest{StagingDir: staging, DestDir: destDir})
+	if err != nil {
+		t.Fatalf("InstallVerifiedPackage: %v", err)
+	}
+
+	if _, err := os.Lstat(staging); !os.IsNotExist(err) {
+		t.Fatalf("staging 目录应已被移走: err=%v", err)
+	}
+	fi, err := os.Lstat(destDir)
+	if err != nil {
+		t.Fatalf("目标目录应存在: %v", err)
+	}
+	if fi.Mode().Perm() != 0o755 {
+		t.Fatalf("perm = %o, want 755", fi.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "bin")); err != nil {
+		t.Fatalf("staging 里的文件应随目录一起移动: %v", err)
+	}
+}
+
+// 同一个 <id>/<version> 提交两次必须整体失败、不能静默覆盖——重复提交或
+// 版本号复用都不该被无声吞掉
+func TestInstallVerifiedPackage_RejectsDestAlreadyExists(t *testing.T) {
+	root := t.TempDir()
+	g := newFSGate(t, root)
+
+	destDir := filepath.Join(root, "com.example.app", "1.0.0")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatalf("pre-create dest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "marker"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	staging := newStagingDir(t, root, "staging-2", "new")
+	err := g.InstallVerifiedPackage(context.Background(), SubjectKernel(),
+		InstallVerifiedPackageRequest{StagingDir: staging, DestDir: destDir})
+	if err == nil {
+		t.Fatal("已存在的目标版本目录必须拒绝覆盖")
+	}
+	if !strings.Contains(err.Error(), "renameat2") {
+		t.Fatalf("失败点应在 renameat2（RENAME_NOREPLACE），got: %v", err)
+	}
+
+	// 已存在的目标内容必须原封不动，staging 也不该被消耗掉
+	if _, err := os.Stat(filepath.Join(destDir, "marker")); err != nil {
+		t.Fatalf("既有目标内容被破坏: %v", err)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("失败时 staging 目录不该被移走: %v", err)
+	}
+}
+
+// 同一个 Package 装第二个版本时，<id> 目录已经存在——mkdirat 必须把
+// EEXIST 当成正常情况而不是错误
+func TestInstallVerifiedPackage_SecondVersionReusesIDDir(t *testing.T) {
+	root := t.TempDir()
+	g := newFSGate(t, root)
+
+	first := newStagingDir(t, root, "staging-v1", "v1")
+	if err := g.InstallVerifiedPackage(context.Background(), SubjectKernel(), InstallVerifiedPackageRequest{
+		StagingDir: first, DestDir: filepath.Join(root, "com.example.app", "1.0.0"),
+	}); err != nil {
+		t.Fatalf("install v1: %v", err)
+	}
+
+	second := newStagingDir(t, root, "staging-v2", "v2")
+	if err := g.InstallVerifiedPackage(context.Background(), SubjectKernel(), InstallVerifiedPackageRequest{
+		StagingDir: second, DestDir: filepath.Join(root, "com.example.app", "2.0.0"),
+	}); err != nil {
+		t.Fatalf("install v2 应当成功（<id> 目录已存在也不该报错）: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "com.example.app", "1.0.0", "bin")); err != nil {
+		t.Fatalf("v1 不该被 v2 的安装影响: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "com.example.app", "2.0.0", "bin")); err != nil {
+		t.Fatalf("v2 应已装好: %v", err)
+	}
+}
