@@ -55,7 +55,7 @@ func (inv *Invariants) CheckContained(p, root string) error {
 
 // containedRel 校验 p 严格位于 root 之内，并返回相对 root 的斜杠相对路径
 // 校验规则三重防线，缺一不可
-//：
+// ：
 //  1. 必须绝对路径——相对路径的含义取决于进程 cwd，而 cwd 可被 systemd 单元
 //     甚至运行期 chdir 改变，等于把安全边界交给外部状态
 //  2. Clean 后做前缀比较，且前缀必须以 "/" 结尾——否则 /var/lib/nervus/data-evil
