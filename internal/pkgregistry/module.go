@@ -11,6 +11,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/permission"
 )
 
 // Module 把 pkgregistry 接入 kernel.Module 生命周期，并编排安装事务
@@ -22,6 +23,7 @@ import (
 type Module struct {
 	auth     PackageInstaller
 	idReg    IdentityUpdater
+	perm     PermissionArbiter
 	registry *Registry
 	aud      audit.Recorder
 	log      *slog.Logger
@@ -40,11 +42,12 @@ type Module struct {
 // Register 之前就单独持有同一个 *Registry（例如给诊断端点只读访问），
 // 调用方与 Module 必须共享同一份状态，不能各自持有一份互不知情的副本
 func New(
-	auth PackageInstaller, idReg IdentityUpdater, registry *Registry, aud audit.Recorder, log *slog.Logger,
+	auth PackageInstaller, idReg IdentityUpdater, perm PermissionArbiter, registry *Registry,
+	aud audit.Recorder, log *slog.Logger,
 	stateDir, systemPackagesDir, packageRoot, dataRoot string,
 ) *Module {
 	return &Module{
-		auth: auth, idReg: idReg, registry: registry, aud: aud, log: log,
+		auth: auth, idReg: idReg, perm: perm, registry: registry, aud: aud, log: log,
 		stateDir: stateDir, systemPackagesDir: systemPackagesDir,
 		packageRoot: packageRoot, dataRoot: dataRoot,
 	}
@@ -73,7 +76,10 @@ func (m *Module) Start(_ context.Context) error {
 	if err := m.registry.Replace(result.Entries); err != nil {
 		return err
 	}
-	return m.idReg.Replace(projectIdentity(result.Entries))
+	if err := m.idReg.Replace(projectIdentity(result.Entries)); err != nil {
+		return err
+	}
+	return m.perm.Replace(projectGrants(result.Entries))
 }
 
 // Stop 纯内存态，没有需要释放的资源——记账文件在装包/卸载时已经原子落盘
@@ -88,6 +94,23 @@ func projectIdentity(entries []Entry) []identity.Package {
 	out := make([]identity.Package, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, identity.Package{ID: e.Manifest.PackageID, UID: e.UID, Trust: e.Trust})
+	}
+	return out
+}
+
+// projectGrants 把 Registry 的全量状态投影成 permission.Registry 需要的
+// 瘦视图：只留 ID 与已授予权限集合。与 projectIdentity 同一原则：GrantedPermissions
+// 只在 Install 时裁决一次（见 install.go），这里只是把已经算好的结果投影出去，
+// 不重新调用 Intersect
+//
+// 系统镜像来源的 Entry（scanSystemImage 产出）目前 GrantedPermissions 始终为
+// nil——scanSystemImage 不经过 Install/Arbitrate，本阶段也未给它接上 Intersect
+// （设计文档明确把"启动扫描本身不变"定为 Phase 1 边界），因此系统包在 v1 里
+// 还拿不到任何已注册权限，这是已知的后续工作，不是本函数的 bug
+func projectGrants(entries []Entry) []permission.Grant {
+	out := make([]permission.Grant, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, permission.Grant{PackageID: e.Manifest.PackageID, Permissions: e.GrantedPermissions})
 	}
 	return out
 }

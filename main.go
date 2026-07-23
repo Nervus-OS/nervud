@@ -15,6 +15,7 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/kernel"
 	"github.com/nervus-os/nervud/internal/logging"
+	"github.com/nervus-os/nervud/internal/permission"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/scheduler"
 )
@@ -214,14 +215,20 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// 不与 Module 分开持有（见 internal/pkgregistry/module.go 顶部说明）
 	pkgReg := pkgregistry.NewRegistry()
 
+	// permission.Registry 同时是 pkgregistry.PermissionArbiter（安装时 Intersect
+	// 裁决）与运行期 Allowed 查询的权威状态，二者共享同一份实例（见
+	// internal/permission/registry.go 顶部说明）。DefaultCatalog() 是编译期
+	// 硬编码的最小权限表，本阶段不支持外部可写的权限定义文件（见其文档）
+	permReg := permission.NewRegistry(permission.DefaultCatalog())
+
 	// TODO(rewrite): 按 sec 2 逐个接入，从最基础往上叠。IPC 放最后：对外开门之前
 	// Identity/Permission/Safety 须先就绪，避免出现 未受权限访问 的窗口期
 	//   k.Register(identity.New(...))       // SO_PEERCRED、UID -> Package 映射
-	//   k.Register(permission.New(...))     // capability 执法
-	k.Register(pkgregistry.New(auth, idReg, pkgReg, aud, logger,
+	k.Register(pkgregistry.New(auth, idReg, permReg, pkgReg, aud, logger,
 		pkgregistry.DefaultRegistryStateDir, pkgregistry.DefaultSystemPackagesDir,
 		authority.DefaultInvariants().PackageRoot, authority.DefaultInvariants().DataRoot,
 	)) // Package Registry + 安装裁决
+	k.Register(permission.New(permReg)) // capability 执法：Grant 投影由 pkgregistry 推送
 	//   k.Register(service.New(auth, ...))  // App/Service 组件生命周期
 	//   k.Register(endpoint.New(...))       // Endpoint 注册/解析/路由
 	//   k.Register(resource.New(...))       // Resource Registry + Provider 绑定

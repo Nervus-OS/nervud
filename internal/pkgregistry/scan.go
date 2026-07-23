@@ -175,11 +175,12 @@ func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entr
 			log.Info("pkgregistry: loaded dynamic package", "package_id", m.PackageID, "version", m.Version)
 		}
 		entries = append(entries, Entry{
-			Manifest:      m,
-			ActiveVersion: st.ActiveVersion,
-			UID:           st.UID,
-			Trust:         identity.TrustOrdinary,
-			Source:        SourceDynamicInstall,
+			Manifest:           m,
+			ActiveVersion:      st.ActiveVersion,
+			UID:                st.UID,
+			Trust:              identity.TrustOrdinary,
+			Source:             SourceDynamicInstall,
+			GrantedPermissions: st.GrantedPermissions,
 		})
 	}
 	return entries, skipped
@@ -229,6 +230,10 @@ type registryState struct {
 	UID           uint32 `json:"uid"`
 	Trust         string `json:"trust"`
 	Source        string `json:"source"`
+	// GrantedPermissions 是 Install 时 permission.Intersect 算出的授予集合，
+	// 随记账文件持久化；scanDynamicInstalls 启动时直接读回，不重新裁决
+	// （见 module.go 顶部"trust 和 grant 的裁决只在 Install 时做一次"）
+	GrantedPermissions []string `json:"granted_permissions,omitempty"`
 }
 
 func stateFilePath(dir, packageID string) string {

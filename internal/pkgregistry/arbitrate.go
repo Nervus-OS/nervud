@@ -35,11 +35,12 @@ func (s Source) String() string {
 type Decision struct {
 	Trust identity.TrustProfile
 
-	// GrantedPerms 是 manifest 请求权限的直通记录，供后续接入
-	// internal/permission 后做真正的“请求 ∩ 已注册权限”交集运算。
-	// v1 permission 模块还是骨架，没有可供交集的权限登记表，因此这里
-	// 只记录申请了什么，不代表运行期已经放行——真正的执法仍在
-	// Permission Manager（架构 §9 最后一步），不在这次裁决里
+	// GrantedPerms 是 manifest 请求权限的直通记录，只反映"申请了什么"，
+	// 不代表已经放行——真正的"请求 ∩ 已注册权限 ∩ trust 门槛"交集运算由
+	// internal/permission.Intersect 完成（见 install.go 的 Install()，它在
+	// Arbitrate 之后紧接着调用 m.perm.Intersect(manifest.Permissions,
+	// decision.Trust)，结果写进 Entry.GrantedPermissions，不是这个字段）。
+	// 真正的运行期执法在 permission.Registry.Allowed（架构 §9 最后一步）
 	GrantedPerms []string
 }
 
