@@ -15,7 +15,9 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/kernel"
 	"github.com/nervus-os/nervud/internal/logging"
+	"github.com/nervus-os/nervud/internal/motiongate"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
+	"github.com/nervus-os/nervud/internal/safety"
 	"github.com/nervus-os/nervud/internal/scheduler"
 )
 
@@ -182,16 +184,11 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// scheduler.SpawnDedicated() 封装了这两步（见 internal/scheduler）
 	// 实时调度是 Linux 独有。非Linux无法启动内核。allowSchedDegrade 后为了调试可以特殊允许
 
-	// TODO(rewrite): 换成 safety.Supervisor 的真实循环，并把这条 Lane 的所有权
-	//   移交给 safety 模块（由它在 Start 里 spawn、Stop 里停）
-	//   另外还要按 sec 6 起一条 PrioEmergencyStop(99) 的 Stop Lane（零堆分配热路径）
-	if err := sched.SpawnDedicated("safety-supervisor",
-		scheduler.PolicyFIFO, scheduler.PrioSafety,
-		func(ctx context.Context) {
-			<-ctx.Done() // 占位：收到停机信号即退出
-		}); err != nil {
-		return nil, err
-	}
+	// motion epoch 与 Safety latch 的共享原子核心（见 internal/motiongate）。
+	// main 构造一次并注入 safety；control 落地后注入【同一个】实例，二者共享同一撤销世代号。
+	// 两条 Safety RT Lane（Stop Lane FIFO 95 / Supervisor FIFO 90）由 safety 模块自持
+	// （在 Start 里 spawn、Stop 里停），不再在这里挂占位 Lane。
+	gate := motiongate.New()
 
 	// 模块。注册顺序 = 启动顺序，Kernel 关闭时反序执行
 	// 每个模块在 New(...) 时接收它需要的窄接口依赖（而不是全局单例）
@@ -225,9 +222,16 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	//   k.Register(service.New(auth, ...))  // App/Service 组件生命周期
 	//   k.Register(endpoint.New(...))       // Endpoint 注册/解析/路由
 	//   k.Register(resource.New(...))       // Resource Registry + Provider 绑定
-	//   k.Register(control.New(...))        // HUMAN/AI ControlLease + motion epoch
-	//   k.Register(safety.New(sched, ...))  // Safety Gate + StopProgress（用上面的 sched 起 Lane）
-	//   k.Register(ipc.New(sockPath, ...))  // 控制面 UDS，依赖上面全部就绪
+	//   k.Register(control.New(gate, ...))  // HUMAN/AI ControlLease（读/递增同一个 gate）
+
+	// Safety Gate + Stop Lane(FIFO 95) + Supervisor(FIFO 90)：模块自持两条 RT Lane。
+	// 必须在 IPC 之前就绪（对外开门前 Safety 须先武装）。v1：无真实 Provider，投递用
+	// NopPath、上报用 NopReports；LeaseRevoker 为 nil（靠 motion epoch 递增撤销）。
+	k.Register(safety.New(
+		sched, gate, aud, logger,
+		safety.DefaultContract(), safety.NopPath(), safety.NopReports(), nil,
+	))
+	//   k.Register(ipc.New(sockPath, ...))  // 控制面 UDS，依赖上面全部就绪（含 Safety）
 	_ = sockPath
 
 	return k, nil
