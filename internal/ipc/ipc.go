@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/identity"
@@ -557,14 +559,13 @@ func (s *Server) reject(c *net.UnixConn, uid uint32, reason string, err error) {
 	})
 }
 
-// serve 是单条连接的帧泵
+// serve 是单条连接的帧泵：分帧、超时、每帧准入复核，然后把每个良构 Envelope
+// 交给连接状态机（conn）。握手（Hello/HelloAck 协商版本、下发 ConnectionLimits）
+// 与握手后的 body 分派都在 conn.go
 //
-// 目前只做到分帧与超时，读出的 Envelope 字节被丢弃
-//
-// TODO(rewrite): 在下面标注的位置接入 Envelope 状态机（conn.go）——先
-// Hello/HelloAck 协商版本并下发 ConnectionLimits，之后才允许其它 body。在那
-// 之前本模块不应被注册进 Kernel：架构 2 要求对外开门前 Identity/Permission/
-// Safety 必须先就绪，否则会出现未受权限访问的窗口期
+// TODO(register): 本模块暂不应被注册进 Kernel。握手已就绪，但请求管线
+// （Permission/Policy 裁决、endpoint 解析、Dispatch）尚未落地，Request 目前只回
+// UNAVAILABLE。架构 2 要求对外开门前 Identity/Permission/Safety 必须先就绪
 func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	log := s.log.With("package", caller.PackageID, "uid", caller.UID, "pid", caller.PID)
 
@@ -575,8 +576,8 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	// 入站帧速率闸门，单连接一个（§10.11 第一道，见 Limits.MaxFramesPerConnPerSec）
 	frameRate := newRateLimiter(s.limits.MaxFramesPerConnPerSec, time.Second)
 
-	// 握手窗口比稳态空闲窗口短得多：连上不说话不该能长期占住连接槽
-	deadline := s.limits.HandshakeTimeout
+	// 连接状态机：第一帧必须是 Hello，握手完成前不接受其它 body（conn.go）
+	co := newConn(s, c, caller, log)
 
 	for {
 		select {
@@ -585,12 +586,14 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		default:
 		}
 
-		if err := c.SetReadDeadline(time.Now().Add(deadline)); err != nil {
+		// 读窗口由 conn 当前 phase 决定：握手期用短得多的 HandshakeTimeout，
+		// 握手后转入由 Ping/Pong 维持的 IdleTimeout（见 conn.readDeadline）
+		if err := c.SetReadDeadline(time.Now().Add(co.readDeadline())); err != nil {
 			return
 		}
 		n, err := ReadFrameHeader(c)
 		if err != nil {
-			s.logConnExit(log, caller, err)
+			s.logConnExit(log, co.caller, err)
 			return
 		}
 
@@ -600,7 +603,7 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		}
 		body, err := ReadFrameBody(c, buf, n)
 		if err != nil {
-			s.logConnExit(log, caller, err)
+			s.logConnExit(log, co.caller, err)
 			return
 		}
 
@@ -608,7 +611,7 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		if !frameRate.allow() {
 			log.Warn("ipc: inbound frame rate exceeded, closing connection",
 				"limit_per_sec", s.limits.MaxFramesPerConnPerSec)
-			s.auditViolation(caller, errFrameRateExceeded)
+			s.auditViolation(co.caller, errFrameRateExceeded)
 			return
 		}
 
@@ -620,9 +623,9 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		// 且只在客户端【发帧时】触发——一条一言不发的空闲连接要等 IdleTimeout
 		// 才被回收。细粒度的 Permission 撤权、以及对空闲连接的主动断开，属于
 		// permission 模块与 Envelope 层（EndpointRevoked），不在这里
-		if !s.identityStillValid(caller) {
+		if !s.identityStillValid(co.caller) {
 			log.Warn("ipc: caller identity revoked mid-connection, closing")
-			s.auditViolation(caller, errIdentityRevoked)
+			s.auditViolation(co.caller, errIdentityRevoked)
 			return
 		}
 
@@ -631,20 +634,49 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		// payload，以免未授权输入直接驱动业务解析器
 		env, err := parseEnvelope(body)
 		if err != nil {
-			s.logConnExit(log, caller, err)
+			s.logConnExit(log, co.caller, err)
 			return
 		}
 
-		// 连接状态机接入点（conn.go）：先 Hello/HelloAck 协商版本并下发
-		// ConnectionLimits，之后按 body 分派。
-		// 用 Enabled 守卫，避免 Debug 关闭时仍白白求值 fmt.Sprintf
-		if log.Enabled(context.Background(), slog.LevelDebug) {
-			log.Debug("ipc: envelope received (dispatch pending)",
-				"bytes", n, "body", fmt.Sprintf("%T", env.GetBody()))
+		// 连接状态机处理：握手协商、下发 ConnectionLimits、握手后按 body 分派。
+		// 返回 false 表示应关闭本连接（原因已由 co 审计/记录）
+		if !co.handle(env) {
+			return
 		}
+	}
+}
 
-		// 握手窗口只覆盖第一帧，之后转入稳态空闲窗口
-		deadline = s.limits.IdleTimeout
+// verifyComponent 是架构 10.2「验证声明而不是相信声明」的落点：把客户端在 Hello
+// 里自报的 declared_component_id 与内核事实（PID、systemd unit/cgroup、启动记录、
+// manifest）核对，返回【核对确认】的 Component ID
+//
+// 现在是 stub：internal/service 尚未暴露 PID→Component 反查，internal/identity 也
+// 还没有 Component 级索引，因此无法核对。stub 返回空字符串（Component 未知）而
+// 【不】回退成信任自报值——信任自报等于把身份决策权交给对端，正是 §10.2 禁止的。
+// 返回的 error 恒为 nil：既然无法核对，也就无从否证，不能凭空判为不一致
+//
+// TODO(component-verify): service/identity 就位后改为真正核对，不一致时返回错误，
+// 调用方据此回 UNAUTHENTICATED Failure HelloAck
+func (s *Server) verifyComponent(_ identity.Caller, _ string) (string, error) {
+	return "", nil
+}
+
+// connectionLimits 把服务端强制的预算投影成下发给 SDK 的 ConnectionLimits
+// （架构 10.11 的 wire 投影）。SDK 据此自律；服务端不因告知过就放松执法
+//
+// 只填【当前真正强制】的项与 schema 冻结的固定常量：
+//   - max_frame_bytes         frame.go 已强制（§10.3 硬上限 128 KiB）
+//   - idle_timeout_ms         serve 的空闲 deadline 已强制
+//   - default_method_payload  §10.3 冻结的 16 KiB 默认额度
+//
+// in-flight / outbound / subscription / method-timeout 预算随 Envelope 执行层落地
+// 再填——现在下发一个没人强制的数字，只会让 SDK 以为它已经生效（与 Limits 结构体
+// 刻意不预定义未强制字段同理）
+func (s *Server) connectionLimits() *ipcv1.ConnectionLimits {
+	return &ipcv1.ConnectionLimits{
+		MaxFrameBytes:             MaxFrameBytes,
+		DefaultMethodPayloadBytes: defaultMethodPayloadBytes,
+		IdleTimeoutMs:             uint32(s.limits.IdleTimeout / time.Millisecond),
 	}
 }
 
@@ -693,6 +725,24 @@ func (s *Server) auditViolation(caller identity.Caller, err error) {
 	}
 	s.auditor.Record(context.Background(), audit.Event{
 		Action:  "ipc.ProtocolViolation",
+		Subject: caller.String(),
+		Denied:  true,
+		Err:     err,
+	})
+}
+
+// auditUnsupported 记一条「收到本 build 尚未实现的 body」审计，限速并填 Subject
+//
+// 与 auditViolation 分开 Action 是为了让离线规则能把「能力缺口」（未实现）与
+// 「协议违规 / 潜在攻击」区分开——混进同一个 Action，真正的攻击迹象会被未实现
+// 路径的噪音淹没。共用 violationLog 令牌桶：两者都以「关闭连接」收场，一条连接
+// 至多产出一条，限速要挡的是「大量连接各刷一条」，共用即可
+func (s *Server) auditUnsupported(caller identity.Caller, err error) {
+	if !s.violationLog.allow() {
+		return
+	}
+	s.auditor.Record(context.Background(), audit.Event{
+		Action:  "ipc.UnsupportedBody",
 		Subject: caller.String(),
 		Denied:  true,
 		Err:     err,

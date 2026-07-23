@@ -502,14 +502,17 @@ func TestServe_ValidEnvelopeKeepsConnectionOpen(t *testing.T) {
 	s, sock, _ := newTestServer(t, inv, DefaultLimits())
 
 	c := dial(t, sock)
-	env := &ipcv1.Envelope{Body: &ipcv1.Envelope_Ping{Ping: &ipcv1.Ping{Nonce: 1}}}
-	if err := WriteFrame(c, mustMarshal(t, env)); err != nil {
+	handshake(t, c)
+
+	// 握手后 Ping → Pong，连接保持存活
+	if err := WriteFrame(c, mustMarshal(t, pingEnv(1))); err != nil {
 		t.Fatal(err)
 	}
-	// 连接应当保持存活（当前实现解出 Envelope 后尚未分派，但不关连接）
-	time.Sleep(50 * time.Millisecond)
+	if got := readEnv(t, c).GetPong().GetNonce(); got != 1 {
+		t.Fatalf("pong nonce = %d, want 1", got)
+	}
 	if n := s.connCount(); n != 1 {
-		t.Fatalf("合法 Envelope 不该导致断开，connCount=%d", n)
+		t.Fatalf("Ping/Pong 之后连接不该断开，connCount=%d", n)
 	}
 }
 
@@ -545,10 +548,13 @@ func TestServe_RevokedIdentityClosesConnection(t *testing.T) {
 	s, sock, rec := newTestServerWith(t, inv, reg, DefaultLimits())
 
 	c := dial(t, sock)
-	// 第一帧：身份仍在，连接正常
+	handshake(t, c)
+
+	// 握手后第一帧：身份仍在，Ping/Pong 正常
 	if err := WriteFrame(c, mustMarshal(t, pingEnv(1))); err != nil {
 		t.Fatal(err)
 	}
+	_ = readEnv(t, c) // Pong
 	waitFor(t, "首帧后连接存活", func() bool { return s.connCount() == 1 })
 
 	// 撤销身份：把 Package 从 Registry 移除（模拟卸载）
@@ -556,7 +562,7 @@ func TestServe_RevokedIdentityClosesConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 第二帧：服务端复核发现身份没了 -> 关连接
+	// 下一帧：服务端每帧复核发现身份没了 -> 关连接
 	_ = WriteFrame(c, mustMarshal(t, pingEnv(2)))
 	waitFor(t, "撤权后连接被回收", func() bool { return s.connCount() == 0 })
 	waitFor(t, "撤权被审计", func() bool {
@@ -577,6 +583,11 @@ func TestServe_FrameRateCapClosesConnection(t *testing.T) {
 	s, sock, rec := newTestServerWith(t, inv, selfRegistry(t), lim)
 
 	c := dial(t, sock)
+	// 握手本身占用一帧配额；随后狂刷 Ping 触发速率闸门。不读回 HelloAck/Pong：
+	// 服务端在触限前只写出寥寥几个小帧，塞不满 socket 发送缓冲，不会阻塞
+	if err := WriteFrame(c, mustMarshal(t, helloEnv())); err != nil {
+		t.Fatal(err)
+	}
 	frame := mustMarshal(t, pingEnv(1))
 	for range 50 { // 远多于 5
 		if err := WriteFrame(c, frame); err != nil {
