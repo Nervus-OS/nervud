@@ -12,10 +12,12 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/kernel"
 	"github.com/nervus-os/nervud/internal/logging"
-
+	"github.com/nervus-os/nervud/internal/motiongate"
+	"github.com/nervus-os/nervud/internal/permission"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/safety"
 	"github.com/nervus-os/nervud/internal/scheduler"
@@ -185,9 +187,10 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// 实时调度是 Linux 独有。非Linux无法启动内核。allowSchedDegrade 后为了调试可以特殊允许
 
 	// motion epoch 与 Safety latch 的共享原子核心（见 internal/motiongate）。
-	// main 构造一次并注入 safety；control 落地后注入【同一个】实例，二者共享同一撤销世代号。
-	// 两条 Safety RT Lane（Stop Lane FIFO 95 / Supervisor FIFO 90）由 safety 模块自持
-	// （在 Start 里 spawn、Stop 里停），不再在这里挂占位 Lane。
+	// main 构造一次，注入 safety 与 control【同一个】实例，二者共享同一撤销世代号：
+	// safety 在触发时锁存并递增，control 在 lease 生命周期事件上递增，谁都不「拥有」它。
+	// 三条 RT Lane（Stop FIFO 95 / Supervisor FIFO 90 / Control RR 40）由各自模块自持
+	// （在 Start 里 spawn、Stop 里停），不在这里挂占位 Lane。
 	gate := motiongate.New()
 
 	// 模块。注册顺序 = 启动顺序，Kernel 关闭时反序执行
@@ -228,14 +231,22 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	//   k.Register(service.New(auth, ...))  // App/Service 组件生命周期
 	//   k.Register(endpoint.New(...))       // Endpoint 注册/解析/路由
 	//   k.Register(resource.New(...))       // Resource Registry + Provider 绑定
-	//   k.Register(control.New(gate, ...))  // HUMAN/AI ControlLease（读/递增同一个 gate）
+
+	// HUMAN/AI ControlLease + deadman + Control Lane(RR 40)。读/递增与 safety 同一个 gate。
+	// 注册在 safety 之前 = 启动更早、关闭更晚：关停时 safety 先收工，control 最后撤租。
+	//
+	// 构造顺序也是依赖顺序：safety 需要它作为 LeaseRevoker，而 control 不依赖 safety
+	// （deadman 失效只撤租 + 递增 epoch，不锁存 Safety），因此装配单向无环。
+	ctl := control.New(sched, gate, aud, logger, control.DefaultPolicy())
+	k.Register(ctl)
 
 	// Safety Gate + Stop Lane(FIFO 95) + Supervisor(FIFO 90)：模块自持两条 RT Lane。
 	// 必须在 IPC 之前就绪（对外开门前 Safety 须先武装）。v1：无真实 Provider，投递用
-	// NopPath、上报用 NopReports；LeaseRevoker 为 nil（靠 motion epoch 递增撤销）。
+	// NopPath、上报用 NopReports；LeaseRevoker 接 control —— motion epoch 递增仍是主
+	// 撤销手段，ctl.RevokeAll 只负责清掉 lease 对象本身（它不再叠加递增 epoch）。
 	k.Register(safety.New(
 		sched, gate, aud, logger,
-		safety.DefaultContract(), safety.NopPath(), safety.NopReports(), nil,
+		safety.DefaultContract(), safety.NopPath(), safety.NopReports(), ctl,
 	))
 	//   k.Register(ipc.New(sockPath, ...))  // 控制面 UDS，依赖上面全部就绪（含 Safety）
 	_ = sockPath

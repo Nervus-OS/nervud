@@ -27,6 +27,8 @@ const (
 	drainInterval = 20 * time.Millisecond
 	// stopDrainTimeout Stop() 等待 auditDrain 收尾落盘的上限。
 	stopDrainTimeout = 500 * time.Millisecond
+	// laneExitTimeout Stop() 等两条 RT Lane 退出的上限（见 Module.Stop 的顺序说明）。
+	laneExitTimeout = 500 * time.Millisecond
 )
 
 // LaneSpawner 是 safety 需要的 scheduler 窄接口（消费者定义、*scheduler.Scheduler 隐式满足）。
@@ -52,7 +54,7 @@ type Module struct {
 
 	// 触发热路径（全部预分配）。
 	pendingReason atomic.Uint32 // 最新触发原因，供 Stop Lane 读取
-	phase         atomic.Uint32 // 当前 StopPhase，供 SafetySnapshot 读取
+	phase         atomic.Uint64 // [当前 StopPhase | 它所属的 halt epoch]，见 packPhase
 	wake          chan struct{} // 唤醒 Stop Lane（cap 1）
 	superWake     chan struct{} // 唤醒 Supervisor（cap 1）
 
@@ -60,9 +62,18 @@ type Module struct {
 	sup  *supervisor // 只在 Supervisor goroutine 内访问
 
 	// 生命周期。
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-	fatal     chan error // cap 1，FatalReporter
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	fatal    chan error // cap 1，FatalReporter
+
+	// laneWG 计两条 RT Lane 的在跑数；Stop 用它把「Lane 已退出」排在「审计收尾」
+	// 之前。没有这道序，Lane 可能在最后一次排空之后还往 ring 里写，那些事件就永远
+	// 落不了盘——恰恰是停机期间最该被看见的一类
+	laneWG sync.WaitGroup
+
+	// drainStop 由 Stop 在 Lane 全部退出后关闭，驱动 auditDrain 做最后一次排空。
+	// 它与 stopCh 分开，正是为了表达这个先后关系
+	drainStop chan struct{}
 	drainDone chan struct{}
 }
 
@@ -92,9 +103,10 @@ func New(
 		ring:      newAuditRing(auditRingSize),
 		stopCh:    make(chan struct{}),
 		fatal:     make(chan error, 1),
+		drainStop: make(chan struct{}),
 		drainDone: make(chan struct{}),
 	}
-	m.phase.Store(uint32(PhaseUnspecified))
+	m.phase.Store(packPhase(PhaseUnspecified, 0))
 	m.sup = &supervisor{
 		gate:     gate,
 		ring:     m.ring,
@@ -117,14 +129,21 @@ func (m *Module) Start(_ context.Context) error {
 	if err := m.contract.Validate(); err != nil {
 		return fmt.Errorf("safety: invalid contract: %w", err)
 	}
+	// laneWG.Add 必须 happen-before 对应的 Done（在 laneFn 里），因此在 spawn 前 Add；
+	// spawn 失败即回退计数。SpawnDedicated 返回 nil ⟺ fn 一定会被调用（scheduler 语义），
+	// 于是 Add 与 Done 恰好配对
+	m.laneWG.Add(1)
 	if err := m.spawner.SpawnDedicated("safety-stop",
 		scheduler.PolicyFIFO, scheduler.PrioSafetyLatch,
 		m.laneFn("safety-stop", m.runStopLane)); err != nil {
+		m.laneWG.Done()
 		return fmt.Errorf("safety: start stop lane: %w", err)
 	}
+	m.laneWG.Add(1)
 	if err := m.spawner.SpawnDedicated("safety-supervisor",
 		scheduler.PolicyFIFO, scheduler.PrioSafety,
 		m.laneFn("safety-supervisor", m.runSupervisor)); err != nil {
+		m.laneWG.Done()
 		return fmt.Errorf("safety: start supervisor lane: %w", err)
 	}
 	go m.runAuditDrain()
@@ -134,15 +153,43 @@ func (m *Module) Start(_ context.Context) error {
 	return nil
 }
 
-// Stop 关闭 stopCh 让两条 Lane 与 auditDrain 干净退出，并等审计收尾落盘。
-// RT Lane 的 goroutine 由 Scheduler 的 wg 统一 join（sched.Shutdown 在所有模块 Stop 之后）。
+// Stop 分两拍收尾：先让两条 RT Lane 退出，再让 auditDrain 做最后一次排空。
+//
+// 顺序是有意义的。Scheduler 对 Lane 的 join 发生在【所有模块 Stop 之后】
+// （sched.Shutdown），只靠它的话，本模块的审计排空早已结束，而 Stop Lane 可能还在
+// 投递并继续往 ring 里写——那些事件没有任何人再读，直接丢失。因此这里自己等一次
+// 自己的 Lane：等到（或超时放弃）之后才关 drainStop。
+//
+// 两段等待都有上限：一条卡死的 Lane 不能拖垮整条关闭序列（kernel 对单模块 Stop
+// 另有 5s 上限兜底）。超时即放弃并告警，退回到「可能少记几条」的旧行为。
 func (m *Module) Stop(_ context.Context) error {
-	m.stopOnce.Do(func() { close(m.stopCh) })
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+		m.waitLanes(laneExitTimeout)
+		close(m.drainStop)
+	})
 	select {
 	case <-m.drainDone:
 	case <-time.After(stopDrainTimeout):
 	}
 	return nil
+}
+
+// waitLanes 等本模块的 RT Lane 退出，最多等 d
+func (m *Module) waitLanes(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		m.laneWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		if m.log != nil {
+			m.log.Warn("safety: lanes did not exit before audit drain closed; some events may be lost",
+				"timeout", d)
+		}
+	}
 }
 
 // Fatal 实现 kernel.FatalReporter：任一 Lane 在 stopCh 未关时退出（异常或关闭序被打乱）
@@ -152,6 +199,11 @@ func (m *Module) Fatal() <-chan error { return m.fatal }
 // laneFn 包裹 Lane 主体，把「未经 Stop 就退出」识别为结构性故障并上报 Fatal。
 func (m *Module) laneFn(name string, body func(context.Context)) func(context.Context) {
 	return func(ctx context.Context) {
+		// laneWG 的 Add 在 Start 里、SpawnDedicated 成功之后做（那时才保证 fn 会跑），
+		// 这里只负责 Done。放在 goroutine 内 Add 会有 Start→Stop 立即竞态：Stop 的
+		// Wait 可能在 fn 尚未开跑、计数还是 0 时就返回
+		defer m.laneWG.Done()
+
 		body(ctx)
 		select {
 		case <-m.stopCh:
@@ -196,8 +248,10 @@ func (m *Module) runAuditDrain() {
 	for {
 		m.drainAll()
 		select {
-		case <-m.stopCh:
-			m.drainAll() // 收尾再排空一次
+		case <-m.drainStop:
+			// drainStop 在两条 Lane 都退出（或超时放弃）之后才关，因此此刻 ring 里
+			// 是 Lane 写入的【全部】事件，最后一次排空不会漏掉停机末尾的投递
+			m.drainAll()
 			m.reportDropped()
 			return
 		case <-ticker.C:
@@ -240,9 +294,17 @@ func (m *Module) reportDropped() {
 }
 
 // SafetySnapshot 实现 Observer：一致读取顶层状态、epoch 与当前停止相位。
+//
+// 相位只在它与当前 Gate epoch 属于同一轮锁存时才报告；否则它是上一轮的残留，报告
+// StopPhaseUnspecified（本轮 Supervisor 尚未开始跟踪）。这样观察面看到的 (epoch, phase)
+// 永远自洽。
 func (m *Module) SafetySnapshot() Snapshot {
 	st, ep := m.gate.Snapshot()
-	return Snapshot{State: st, Epoch: ep, StopPhase: StopPhase(m.phase.Load())}
+	ph, phEpoch := unpackPhase(m.phase.Load())
+	if phEpoch != ep {
+		ph = PhaseUnspecified
+	}
+	return Snapshot{State: st, Epoch: ep, StopPhase: ph}
 }
 
 // RequestRecovery 请求进入 OEM 恢复阶段（SAFETY_LATCHED → OEM_RECOVERY）。恢复动作
@@ -262,8 +324,54 @@ func (m *Module) RequireRearm() bool {
 }
 
 // Rearm 执行明确 re-arm（REARM_REQUIRED → NORMAL 并递增 epoch）。返回是否成功。
+//
+// 内核在这里只复核【不可绕过的硬前置】：停止进度必须已经落定——要么正常链已到
+// OUTPUT_DISABLED/STANDSTILL_CONFIRMED（输出确认关闭），要么已入 DELIVERY_FAULT/
+// STANDSTILL_TIMEOUT 这类终态旁支（已经必须人工处置）。停止还在途中
+// （REQUESTED/SENT/PROVIDER_ACCEPTED/MCU_ACKED）就解开 latch，等于在还不知道输出有没有
+// 关掉的情况下重新放行运动。
+//
+// 「此刻该不该 re-arm」本身是【策略】，不在内核：由系统服务聚合设备状态、风险与用户
+// 策略后决定，再来调本方法。机制在内核、策略在服务——与 §8.2 休息模式同一分工
+// （Agent 只能请求，Policy 检查后由 nervud Authority 执行固定类型化动作）。
 func (m *Module) Rearm() bool {
-	ok := m.gate.Rearm()
+	_, ep := m.gate.Snapshot()
+	ph, phEpoch := unpackPhase(m.phase.Load())
+
+	// 相位必须【属于当前这一轮锁存】（phEpoch == 当前 Gate epoch）且已落定。属于上一轮
+	// 的残留相位一律当作「未落定」拒绝——否则会出现：上一轮 OUTPUT_DISABLED → Rearm →
+	// 新 Trip → RequireRearm → Rearm 时，最后这次 Rearm 拿旧相位当凭据，把【新】latch
+	// 解回 NORMAL，而本轮 beginHalt/RevokeAll 可能都还没跑。绑定 epoch 正是为了堵死它。
+	if phEpoch != ep || !rearmSettled(ph) {
+		m.recordRearmRejected(ph, phEpoch, ep)
+		return false
+	}
+
+	if !m.gate.Rearm() {
+		// 硬前置通过，但状态迁移仍失败：当前非 REARM_REQUIRED 态，或并发 Trip 改写了
+		// 状态。决策基线「被拒的 re-arm 必须留审计」对这条路径同样成立
+		m.recordRearmRejected(ph, phEpoch, ep)
+		return false
+	}
 	wake(m.superWake)
-	return ok
+	return true
+}
+
+// recordRearmRejected 记一条被拒的 re-arm。带上相位与两个 epoch，便于离线区分
+// 「相位未落定」「相位属于旧一轮」「状态迁移失败」三种拒因。
+func (m *Module) recordRearmRejected(ph StopPhase, phEpoch, gateEpoch uint64) {
+	m.aud.Record(context.Background(), audit.Event{
+		Action:  "safety.rearm_rejected",
+		Subject: "kernel",
+		Denied:  true,
+		Detail:  fmt.Sprintf("phase=%s phase_epoch=%d gate_epoch=%d", ph, phEpoch, gateEpoch),
+	})
+}
+
+// rearmSettled 报告停止进度是否已经落定到允许 re-arm 的相位（见 Rearm 的说明）
+//
+// 注意 rank() 对终态旁支与 UNSPECIFIED 都返回 0，因此终态必须单独判断，
+// 不能只比大小
+func rearmSettled(p StopPhase) bool {
+	return p.rank() >= PhaseOutputDisabled.rank() || p.isTerminalFault()
 }

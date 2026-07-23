@@ -72,6 +72,44 @@ func TestBumpEpoch_PreservesState(t *testing.T) {
 	}
 }
 
+func TestBumpEpochIfNormal(t *testing.T) {
+	g := New() // (Normal, 1)
+
+	// Normal：递增并返回新 epoch + true。
+	if ne, ok := g.BumpEpochIfNormal(); !ok || ne != 2 {
+		t.Fatalf("BumpEpochIfNormal(Normal) = (%d,%v), want (2,true)", ne, ok)
+	}
+	if s, e := g.Snapshot(); s != StateNormal || e != 2 {
+		t.Fatalf("after = (%v,%d), want (NORMAL,2)", s, e)
+	}
+
+	// 锁存后：不递增、返回当前 epoch + false。这正是 control 需要的「锁存即拒发、
+	// 绝不把已锁存 Gate 又推进一代」的原子保证。
+	g.Trip() // (Latched, 3)
+	if ne, ok := g.BumpEpochIfNormal(); ok || ne != 3 {
+		t.Fatalf("BumpEpochIfNormal(Latched) = (%d,%v), want (3,false)", ne, ok)
+	}
+	if s, e := g.Snapshot(); s != StateSafetyLatched || e != 3 {
+		t.Fatalf("latched epoch must not advance: (%v,%d), want (SAFETY_LATCHED,3)", s, e)
+	}
+
+	// 其余非 Normal 态同样不递增。
+	g.RequireRearm() // (RearmRequired, 3)
+	if _, ok := g.BumpEpochIfNormal(); ok {
+		t.Fatal("BumpEpochIfNormal must fail in REARM_REQUIRED")
+	}
+	if _, e := g.Snapshot(); e != 3 {
+		t.Fatalf("epoch advanced in REARM_REQUIRED: %d, want 3", e)
+	}
+}
+
+func TestBumpEpochIfNormal_ZeroAlloc(t *testing.T) {
+	g := New()
+	if n := testing.AllocsPerRun(200, func() { g.BumpEpochIfNormal() }); n != 0 {
+		t.Fatalf("BumpEpochIfNormal allocated %v objects per run, want 0", n)
+	}
+}
+
 func TestRecoveryRearmCycle(t *testing.T) {
 	g := New() // (Normal, 1)
 

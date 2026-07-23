@@ -74,6 +74,24 @@ func (p StopPhase) isTerminalFault() bool {
 	return p == PhaseDeliveryFault || p == PhaseStandstillTimeout
 }
 
+// 相位必须连同「它属于哪一轮锁存」一起发布，否则上一轮的进度会被误当成本轮的证据。
+//
+// 打包成一个字（布局与 internal/motiongate 一致：高 8 位相位 | 低 56 位 epoch），
+// 这样 Supervisor 的一次 Store 就同时publish了相位与归属，读侧一次 Load 即得到自洽
+// 的二元组——分成两个原子量就又有了「读到新相位配旧 epoch」的撕裂窗口。
+const (
+	phaseEpochBits = 56
+	phaseEpochMask = (uint64(1) << phaseEpochBits) - 1
+)
+
+func packPhase(p StopPhase, epoch uint64) uint64 {
+	return uint64(p)<<phaseEpochBits | epoch&phaseEpochMask
+}
+
+func unpackPhase(word uint64) (StopPhase, uint64) {
+	return StopPhase(word >> phaseEpochBits), word & phaseEpochMask
+}
+
 // stopTracker 跟踪单个执行器 Resource（[REWRITE-v1] 只有 base.main）的停止进度。
 // 只在 Supervisor goroutine 内访问，无需同步。
 type stopTracker struct {

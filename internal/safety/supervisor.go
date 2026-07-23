@@ -17,7 +17,7 @@ type supervisor struct {
 	ring     *auditRing
 	contract Contract
 	revoker  LeaseRevoker   // 可为 nil：epoch 递增已是主撤销手段
-	phase    *atomic.Uint32 // 发布当前 StopPhase 供外部快照
+	phase    *atomic.Uint64 // 发布 [当前 StopPhase | 它所属的 halt epoch]
 	pending  *atomic.Uint32 // 读取最新触发原因（由 Trip 写入）
 
 	active    bool      // 当前是否在跟踪一次停机
@@ -52,7 +52,14 @@ func (s *supervisor) reconcile(now time.Time) {
 			s.push(evRearm, ReasonUnspecified, PhaseUnspecified, ep)
 		}
 	case motiongate.StateOEMRecovery, motiongate.StateRearmRequired:
-		// 仍在安全语义下：保持 active，不改停止跟踪。
+		// 仍在安全语义下。通常在 SafetyLatched 阶段就已开跟踪；但若操作序把
+		// latch→(OEMRecovery/RearmRequired) 抢在 Supervisor 处理这一轮之前完成，
+		// beginHalt 就从未跑过——这里补跟踪一次，保证 RevokeAll 与停机审计不因抢跑
+		// 而被整轮跳过。相位从 Requested 起（本轮物理进度未知，只能保守），其 re-arm
+		// 需由超时或 Provider 证据推进落定后才放行。
+		if !s.active || ep != s.haltEpoch {
+			s.beginHalt(ep, now)
+		}
 	}
 }
 
@@ -141,7 +148,9 @@ func (s *supervisor) onTick(now time.Time) {
 	}
 }
 
-func (s *supervisor) setPhase(p StopPhase) { s.phase.Store(uint32(p)) }
+// setPhase 发布相位，并把它绑定到当前正在跟踪的这一轮锁存（s.haltEpoch）。
+// 绑定的意义见 Module.Rearm：没有它，上一轮停稳留下的相位会成为解开新一轮 latch 的凭据。
+func (s *supervisor) setPhase(p StopPhase) { s.phase.Store(packPhase(p, s.haltEpoch)) }
 
 func (s *supervisor) push(kind eventKind, reason ReasonCode, phase StopPhase, epoch uint64) {
 	s.ring.push(eventRecord{kind: kind, reason: reason, phase: phase, epoch: epoch})

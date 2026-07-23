@@ -11,14 +11,15 @@ import (
 func newTestSupervisor(c Contract) (*supervisor, *motiongate.Gate, *auditRing, *atomic.Uint32) {
 	g := motiongate.New()
 	ring := newAuditRing(256)
-	phase := new(atomic.Uint32)
+	phase := new(atomic.Uint64)
 	pending := new(atomic.Uint32)
-	phase.Store(uint32(PhaseUnspecified))
+	phase.Store(packPhase(PhaseUnspecified, 0))
 	s := &supervisor{gate: g, ring: ring, contract: c, phase: phase, pending: pending}
 	return s, g, ring, pending
 }
 
-func publishedPhase(s *supervisor) StopPhase { return StopPhase(s.phase.Load()) }
+// publishedPhase 解出发布的相位（丢弃绑定的 epoch，测试只关心相位本身）。
+func publishedPhase(s *supervisor) StopPhase { p, _ := unpackPhase(s.phase.Load()); return p }
 
 func TestSupervisor_HappyPath(t *testing.T) {
 	s, g, ring, pending := newTestSupervisor(contractSupportingStandstill())
@@ -169,6 +170,40 @@ func TestSupervisor_RearmEndsTracking(t *testing.T) {
 	}
 	if !containsKind(drainKinds(ring), evRearm) {
 		t.Fatal("re-arm should be audited")
+	}
+}
+
+// countingRevoker 记录 RevokeAll 被调用了几次、最后的 epoch，供 reconcile 测试断言。
+type countingRevoker struct {
+	calls     int
+	lastEpoch uint64
+}
+
+func (r *countingRevoker) RevokeAll(epoch uint64) { r.calls++; r.lastEpoch = epoch }
+
+// TestSupervisor_ReconcileCatchesUpFromRearmRequired 锁住 reconcile 的健壮性：若操作序
+// 把 latch→RequireRearm 抢在 Supervisor 处理这一轮之前完成，reconcile 第一次看到的就是
+// REARM_REQUIRED——它仍必须补开跟踪并触发 RevokeAll，否则本轮撤租与审计会整轮跳过。
+func TestSupervisor_ReconcileCatchesUpFromRearmRequired(t *testing.T) {
+	s, g, _, pending := newTestSupervisor(contractSupportingStandstill())
+	rev := &countingRevoker{}
+	s.revoker = rev
+	pending.Store(uint32(ReasonOperatorEStop))
+
+	// 抢跑：Trip + RequireRearm 都发生在 Supervisor 的第一次 reconcile 之前。
+	g.Trip()
+	g.RequireRearm()
+	epoch := g.Epoch()
+
+	s.reconcile(time.Now())
+
+	if !s.active || s.haltEpoch != epoch {
+		t.Fatalf("reconcile did not begin tracking: active=%v haltEpoch=%d, want true/%d",
+			s.active, s.haltEpoch, epoch)
+	}
+	if rev.calls != 1 || rev.lastEpoch != epoch {
+		t.Fatalf("RevokeAll calls=%d lastEpoch=%d, want 1/%d — revocation skipped on raced round",
+			rev.calls, rev.lastEpoch, epoch)
 	}
 }
 

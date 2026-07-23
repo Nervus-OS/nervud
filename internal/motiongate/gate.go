@@ -88,6 +88,30 @@ func (g *Gate) BumpEpoch() {
 	}
 }
 
+// BumpEpochIfNormal 仅当前态为 Normal 时递增 epoch，返回递增后的 epoch 与是否成功；
+// 非 Normal 时不做任何改动，返回当前 epoch 与 false。
+//
+// 存在的理由是「检查 + 递增」必须原子。调用方先读一次 State 再调 BumpEpoch 的写法有
+// 一个致命窗口：两步之间插进一次 Trip，就会把【已锁存】的 Gate 又推进一代。此时 Safety
+// 的停机投递路径与状态机跟踪路径分别持有相邻的两个 epoch，Provider 的回报会被判为陈旧
+// 而丢弃，并进而假触发超时升级。
+//
+// 谁在用：control 的租约生命周期递增（签发/释放/到期/断连）。Safety 触发自身的递增走
+// Trip——那一步必须无条件生效，不能被本方法的前置挡掉。lock-free、零堆分配。
+func (g *Gate) BumpEpochIfNormal() (uint64, bool) {
+	for {
+		old := g.word.Load()
+		s, e := unpack(old)
+		if s != StateNormal {
+			return e, false
+		}
+		ne := incEpoch(e)
+		if g.word.CompareAndSwap(old, pack(s, ne)) {
+			return ne, true
+		}
+	}
+}
+
 // BeginRecovery：SafetyLatched → OEMRecovery（epoch 不变）。非该源态返回 false。
 // 进入 OEM 恢复阶段仍在安全语义下，不解除 latch。
 func (g *Gate) BeginRecovery() bool { return g.cas1(StateSafetyLatched, StateOEMRecovery, false) }

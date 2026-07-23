@@ -121,3 +121,61 @@ func TestObserverAndController(t *testing.T) {
 		t.Fatalf("after RequestStop snapshot = %+v, want SAFETY_LATCHED/epoch 2", snap)
 	}
 }
+
+// TestRearmRequiresSettledStopProgress 内核在 re-arm 上只守一条硬前置：停止进度必须
+// 已经落定。停止还在途中就解开 latch，等于在还不知道输出有没有关掉的情况下重新放行运动
+func TestRearmRequiresSettledStopProgress(t *testing.T) {
+	tests := []struct {
+		phase StopPhase
+		allow bool
+	}{
+		{phase: PhaseUnspecified},      // Supervisor 还没开始跟踪
+		{phase: PhaseRequested},        // 刚锁存，停止帧还没发
+		{phase: PhaseSent},             // 发了，没人确认
+		{phase: PhaseProviderAccepted}, // Provider 收了，设备未必停
+		{phase: PhaseMCUAcked},         // MCU 收了，输出未必关
+		{phase: PhaseOutputDisabled, allow: true},
+		{phase: PhaseStandstillConfirmed, allow: true},
+		{phase: PhaseDeliveryFault, allow: true},     // 终态：已经必须人工处置
+		{phase: PhaseStandstillTimeout, allow: true}, // 同上，不能永久锁死设备
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.phase.String(), func(t *testing.T) {
+			rec := &collectRecorder{}
+			m := New(&fakeSpawner{}, motiongate.New(), rec, nil,
+				DefaultContract(), NopPath(), NopReports(), nil)
+
+			m.Trip(ReasonOperatorEStop)
+			if !m.gate.RequireRearm() {
+				t.Fatal("RequireRearm should succeed from SAFETY_LATCHED")
+			}
+			// 相位必须绑定到当前这一轮的 halt epoch，否则 Rearm 会因 epoch 不符而拒绝
+			m.phase.Store(packPhase(tc.phase, m.gate.Epoch()))
+
+			if got := m.Rearm(); got != tc.allow {
+				t.Fatalf("Rearm() = %v, want %v (phase %s)", got, tc.allow, tc.phase)
+			}
+
+			wantState := motiongate.StateRearmRequired
+			if tc.allow {
+				wantState = motiongate.StateNormal
+			}
+			if got := m.gate.State(); got != wantState {
+				t.Fatalf("state = %v, want %v", got, wantState)
+			}
+
+			if !tc.allow {
+				found := false
+				for _, e := range rec.all() {
+					if e.Action == "safety.rearm_rejected" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("a refused re-arm must leave an audit record")
+				}
+			}
+		})
+	}
+}
