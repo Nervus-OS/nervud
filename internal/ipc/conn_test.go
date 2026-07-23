@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nervus-os/nervud/internal/permission"
+
 	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
 )
 
@@ -226,6 +228,7 @@ func TestHandshake_FailsClosedWhenComponentUnverifiable(t *testing.T) {
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: inv, Identity: selfRegistry(t),
+		Permission: permission.NewRegistry(permission.DefaultCatalog()),
 	})
 	if err != nil {
 		t.Fatal(err)

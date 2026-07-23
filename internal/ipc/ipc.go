@@ -135,6 +135,10 @@ type Config struct {
 	// *identity.Registry 隐式满足
 	Identity PeerResolver
 
+	// Permission 查询 Package 的已授予权限。接口由本包（消费者）定义，
+	// *permission.Registry 隐式满足
+	Permission PermissionChecker
+
 	// Limits 为零值时使用 DefaultLimits()
 	Limits Limits
 
@@ -154,18 +158,33 @@ type PeerResolver interface {
 	Resolve(cred sysprobe.Ucred) (identity.Caller, error)
 }
 
+// PermissionChecker 查询某个 Package 是否已被授予某项 permission
+//
+// 接口在消费者（ipc）这一侧定义，实现由 internal/permission 提供，同一套
+// 理由：ipc 只需要这一个方法，没有理由持有整个 Registry
+//
+// 当前请求管线还算不出"这个 Request 需要哪个 permission ID"（依赖 internal/
+// endpoint 把 endpoint_id/method_id 映射到 permission ID，而 endpoint 目前
+// 还是空实现），本接口现阶段只是装配期占位；真正的裁决调用点，以及
+// ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED 的使用，要等 endpoint 落地后
+// 才随请求管线一起加
+type PermissionChecker interface {
+	Allowed(packageID, permission string) bool
+}
+
 // Server 是控制面 UDS 的所有者
 //
 // 生命周期契约：Start 必须快速返回，后台循环的退出只听 Stop()，不听 Start(ctx)
 // 的 ctx。若后台循环也监听信号 ctx，它会与 Kernel.stopAll 被同一个信号并行唤醒，
 // 谁先退出不确定，停机顺序就不再由 Kernel 的反序 Stop 唯一决定
 type Server struct {
-	sockPath string
-	log      *slog.Logger
-	auditor  audit.Recorder
-	inv      *authority.Invariants
-	identity PeerResolver
-	limits   Limits
+	sockPath   string
+	log        *slog.Logger
+	auditor    audit.Recorder
+	inv        *authority.Invariants
+	identity   PeerResolver
+	permission PermissionChecker
+	limits     Limits
 
 	// allowUnverifiedComponent 见 Config.AllowUnverifiedComponent
 	allowUnverifiedComponent bool
@@ -222,6 +241,11 @@ func New(cfg Config) (*Server, error) {
 		// 那等于开着一个谁也连不上的 socket。装配阶段就该发现
 		return nil, errors.New("ipc: Identity is required")
 	}
+	if cfg.Permission == nil {
+		// 同 Identity：不给默认实现。缺权限查询没有安全的默认值可用，必须在
+		// 装配阶段就暴露出来，而不是留到运行期才发现权限查询从未真正生效
+		return nil, errors.New("ipc: Permission is required")
+	}
 
 	return &Server{
 		sockPath:                 cfg.SockPath,
@@ -229,6 +253,7 @@ func New(cfg Config) (*Server, error) {
 		auditor:                  cfg.Auditor,
 		inv:                      cfg.Invariants,
 		identity:                 cfg.Identity,
+		permission:               cfg.Permission,
 		limits:                   normalizeLimits(cfg.Limits),
 		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
 		quit:                     make(chan struct{}),
