@@ -1,10 +1,19 @@
 // 见 doc.go 的包说明
 //
-// 本文件是最终安装裁决的核心规则：由安装来源与已验证的签名信任，
-// 决定这个 Package 最终能拿到的信任 profile（架构 §7）
+// 本文件是最终安装裁决的核心规则：由安装来源与已验证的多角色签名，决定这个
+// Package 最终能拿到的信任 profile（应用层架构决策 §2.2）
 package pkgregistry
 
-import "github.com/nervus-os/nervud/internal/identity"
+import (
+	"errors"
+
+	"github.com/nervus-os/nervud/internal/identity"
+)
+
+// ErrInvalidSource 一次 Install 事务的 Source 不是合法来源（漏填/零值）。
+// 准入检查（developer 必签、OEM 副署）只对已知来源触发，未知来源必须整体拒绝，
+// 否则会绕过全部准入形成幽灵包（应用层架构决策 §4）
+var ErrInvalidSource = errors.New("pkgregistry: install transaction has invalid source")
 
 // Source 是 manifest 的来源，决定了它有没有资格拿到非 Ordinary 的信任
 type Source int
@@ -31,35 +40,27 @@ func (s Source) String() string {
 	}
 }
 
-// Decision 是一次安装裁决的结果
-type Decision struct {
-	Trust identity.TrustProfile
-
-	// GrantedPerms 是 manifest 请求权限的直通记录，只反映"申请了什么"，
-	// 不代表已经放行——真正的"请求 ∩ 已注册权限 ∩ trust 门槛"交集运算由
-	// internal/permission.Intersect 完成（见 install.go 的 Install()，它在
-	// Arbitrate 之后紧接着调用 m.perm.Intersect(manifest.Permissions,
-	// decision.Trust)，结果写进 Entry.GrantedPermissions，不是这个字段）。
-	// 真正的运行期执法在 permission.Registry.Allowed（架构 §9 最后一步）
-	GrantedPerms []string
-}
-
-// Arbitrate 是最终安装裁决：manifest 必须已经通过独立复核（签名+digest，
-// 见 signature.go/digest.go），本函数只回答“这个来源 + 这份已验证信任，
-// 最终该给多高的 profile”
+// Arbitrate 是最终信任裁决：来源 + 多角色验签结论 -> 最终 TrustProfile
 //
-// 架构 §7 的硬规则：只有【只读系统镜像里】平台/OEM 签名的 Package 才有资格
-// 获得非 Ordinary 的信任；判定标准是“来自只读系统镜像”，不是单看签名本身——
-// 一份 OEM 签名的 manifest 如果走的是动态安装路径，依然只能拿 Ordinary。
-// manifest 不能通过自称 system 或者随便一个签名就完成提权
-func Arbitrate(_ Manifest, src Source, verifiedTrust identity.TrustProfile, requestedPerms []string) Decision {
-	trust := identity.TrustOrdinary
-	if src == SourceSystemImage && verifiedTrust.Valid() && verifiedTrust != identity.TrustOrdinary {
-		trust = verifiedTrust
+// 硬规则（应用层架构决策 §2.2 红线 1）：只有来自【只读系统镜像】的包才有资格
+// 获得非 Ordinary 的信任。一份带 platform/oem 签名的 manifest 如果走的是动态
+// 安装路径，依然只能拿 Ordinary——判定标准是”来自系统镜像”，不是签名本身。
+// manifest 不能通过带一个高角色签名就在动态安装路径上完成提权
+//
+// SignerSet.Trust 已经是 VerifySignature 根据多角色签名算出的最高信任（平台根/OEM
+// 根背书的密钥 → Platform/OEM，developer 自签 → Ordinary），本函数只负责来源门槛：
+// 动态安装一律降为 Ordinary，系统镜像透传 SignerSet.Trust（但 Unspecified 归一为 Ordinary）
+//
+// 权限的”请求 ∩ 已注册 ∩ trust 门槛”交集运算在 permission.Intersect 完成
+// （见 install.go），不在这里；本函数只回答”该给多高的信任”
+func Arbitrate(src Source, signers SignerSet) identity.TrustProfile {
+	if src != SourceSystemImage {
+		return identity.TrustOrdinary
 	}
-
-	granted := make([]string, len(requestedPerms))
-	copy(granted, requestedPerms)
-
-	return Decision{Trust: trust, GrantedPerms: granted}
+	// 系统镜像来源：透传 VerifySignature 的结论，但 Unspecified（未验证/验证失败）
+	// 归一为 Ordinary——没有验证结果就不能发放特权
+	if signers.Trust == identity.TrustUnspecified {
+		return identity.TrustOrdinary
+	}
+	return signers.Trust
 }

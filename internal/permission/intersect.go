@@ -23,7 +23,15 @@ import "github.com/nervus-os/nervud/internal/identity"
 //
 // 本函数只做机械裁决，不涉及任何运行时用户交互或阻塞调用——v2 Policy 的
 // "用户确认"不在这里实现
-func Intersect(requested []string, cat Catalog, trust identity.TrustProfile) (granted, denied []string) {
+// signerRoles 是该包已验证签名里出现的角色字符串集合（如 "developer"、
+// "platform-release"）。用于 RequireSignerRole 裁决：某些最危险的权限只给特定角色
+// 签的包，比单纯 trust 等级更细（应用层架构决策 §2.2）。空集表示无可用角色信息，
+// 带 RequireSignerRole 的权限一律拒
+func Intersect(requested []string, cat Catalog, trust identity.TrustProfile, signerRoles []string) (granted, denied []string) {
+	roleSet := make(map[string]struct{}, len(signerRoles))
+	for _, r := range signerRoles {
+		roleSet[r] = struct{}{}
+	}
 	for _, id := range requested {
 		entry, ok := cat.Lookup(id)
 		if !ok {
@@ -35,6 +43,13 @@ func Intersect(requested []string, cat Catalog, trust identity.TrustProfile) (gr
 		if trust < entry.MinTrust {
 			denied = append(denied, id)
 			continue
+		}
+		// RequireSignerRole：只有该角色签的包才能拿。角色缺失即拒
+		if entry.RequireSignerRole != "" {
+			if _, ok := roleSet[entry.RequireSignerRole]; !ok {
+				denied = append(denied, id)
+				continue
+			}
 		}
 		granted = append(granted, id)
 	}

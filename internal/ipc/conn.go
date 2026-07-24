@@ -148,18 +148,24 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 	}
 
 	// 架构 10.2：验证声明，而不是相信声明。客户端在 declared_component_id 里自报的
-	// Component 只是待验证线索，必须用 PID、systemd unit/cgroup 与启动记录核对，
-	// 【核对通过才完成握手】。核对基础设施未落地时 verifyComponent 默认 fail closed
-	// （除非显式开发降级），见其实现
-	componentID, err := co.s.verifyComponent(co.caller, hello.GetDeclaredComponentId())
+	// Component 只是待验证线索，必须用对端 cgroup→unit→Component 与内核事实核对，
+	// 【核对通过才完成握手】（应用层架构决策 §5.5）。co.c 底层一定是 *net.UnixConn
+	// （accept 自 UDS listener），用于 SO_PEERPIDFD
+	uc, _ := co.c.(*net.UnixConn)
+	componentID, err := co.s.verifyComponent(uc, co.caller, hello.GetDeclaredComponentId())
 	if err != nil {
-		// 无法核对（能力缺口），或将来：核对到声明与事实不符（潜在伪装）。两者
-		// 都是身份不成立，按架构 10.12 回 UNAUTHENTICATED Failure HelloAck 再关闭。
-		// 当前 err 只可能是「核对基础设施未落地」，属能力缺口而非攻击，不审计为
-		// 违规——避免 IPC 注册前的 fail-closed 把每条连接都刷成安全告警；真正核对
-		// 落地后，对「声明与事实不符」再补违规审计
-		co.log.Warn("ipc: component not verified, rejecting handshake",
-			"declared", hello.GetDeclaredComponentId(), "err", err)
+		// 两类失败都回 UNAUTHENTICATED 关闭，但审计区分：
+		//   - errComponentMismatch（核对到不一致）：潜在伪装，审计为违规
+		//   - 其它（能力缺口：Components 未接线 / 对端不在受管 cgroup / 内核太旧）：
+		//     不审计为违规，避免把能力缺口刷成安全告警
+		if errors.Is(err, errComponentMismatch) {
+			co.log.Warn("ipc: component impersonation suspected, rejecting handshake",
+				"declared", hello.GetDeclaredComponentId(), "err", err)
+			co.s.auditViolation(co.caller, err)
+		} else {
+			co.log.Warn("ipc: component not verifiable, rejecting handshake",
+				"declared", hello.GetDeclaredComponentId(), "err", err)
+		}
 		co.sendHelloFailure(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED)
 		return false
 	}

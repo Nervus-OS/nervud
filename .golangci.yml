@@ -27,6 +27,16 @@ linters:
             # os/exec 刻意【不】放行 sysprobe：起进程是权力行使，不是观察。
             - pkg: "os/exec"
               desc: "Only authority is allowed"
+        # godbus 只允许 internal/authority/systemd import：它是对 systemd(PID 1) 的
+        # D-Bus 客户端，属于 TCB（架构 §8）。其它模块只能依赖 authority 的窄接口，
+        # 不得直接说 D-Bus 协议
+        godbus-boundary:
+          files:
+            - "$all"
+            - "!**/internal/authority/systemd/**"
+          deny:
+            - pkg: "github.com/godbus/dbus/v5"
+              desc: "Only internal/authority/systemd may speak D-Bus to systemd (architecture §8)"
         no-testing-in-prod:
           files:
             - "$all"

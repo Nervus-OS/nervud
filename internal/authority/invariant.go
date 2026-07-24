@@ -15,16 +15,19 @@ import (
 //
 // 所有字段在 New 时冻结，运行期只读；没有任何导出的 setter
 type Invariants struct {
-	DataRoot    string // App 私有数据根，如 /var/lib/nervus/data
+	DataRoot    string // Package 私有数据根，如 /var/lib/nervus/package-data
 	PackageRoot string // 已安装 Package 根，如 /var/lib/nervus/packages
 	MinAppUID   uint32 // App UID/GID 下界，低于此值属系统保留
 	MaxAppUID   uint32
 }
 
 // DefaultInvariants 是生产镜像的固定取值。不做成配置文件读取
+//
+// DataRoot 用 package-data 而非 data：与架构 §7 的路径表一致，名字也更能表达
+// “这是 Package 私有数据”而非“某个通用 data 目录”（应用层架构决策 §4.4）
 func DefaultInvariants() *Invariants {
 	return &Invariants{
-		DataRoot:    "/var/lib/nervus/data",
+		DataRoot:    "/var/lib/nervus/package-data",
 		PackageRoot: "/var/lib/nervus/packages",
 		MinAppUID:   20000, // 避开发行版的系统和普通用户段
 		MaxAppUID:   59999,
@@ -58,8 +61,8 @@ func (inv *Invariants) CheckContained(p, root string) error {
 // ：
 //  1. 必须绝对路径——相对路径的含义取决于进程 cwd，而 cwd 可被 systemd 单元
 //     甚至运行期 chdir 改变，等于把安全边界交给外部状态
-//  2. Clean 后做前缀比较，且前缀必须以 "/" 结尾——否则 /var/lib/nervus/data-evil
-//     会通过 /var/lib/nervus/data 的朴素前缀检查；".." 也在 Clean 中被折叠
+//  2. Clean 后做前缀比较，且前缀必须以 "/" 结尾——否则 /var/lib/nervus/package-data-evil
+//     会通过 /var/lib/nervus/package-data 的朴素前缀检查；".." 也在 Clean 中被折叠
 //     折叠后逃出 root 的路径同样通不过前缀比较
 //
 // 注意：本函数是纯字符串运算，挡不住 symlink 逃逸。真正的保证必须

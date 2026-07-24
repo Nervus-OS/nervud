@@ -31,7 +31,7 @@ func newTestGate(t *testing.T) (*Gate, *fakeRecorder) {
 // validReq 是一个能通过全部不变量检查的请求
 func validReq() CreateDataDirRequest {
 	return CreateDataDirRequest{
-		Path: "/var/lib/nervus/data/com.example.app",
+		Path: "/var/lib/nervus/package-data/com.example.app",
 		UID:  20001, GID: 20001, Perm: 0o700,
 	}
 }
@@ -135,13 +135,13 @@ func TestCheckContained(t *testing.T) {
 		path string
 		ok   bool
 	}{
-		{"direct child", "/var/lib/nervus/data/app", true},
-		{"nested", "/var/lib/nervus/data/app/cache", true},
-		{"root itself", "/var/lib/nervus/data", false},
-		{"prefix trick", "/var/lib/nervus/data-evil/x", false},
-		{"dotdot escape", "/var/lib/nervus/data/../../../etc/shadow", false},
-		{"dotdot inside", "/var/lib/nervus/data/app/../app2", true}, // Clean 后仍在内
-		{"relative", "var/lib/nervus/data/app", false},
+		{"direct child", "/var/lib/nervus/package-data/app", true},
+		{"nested", "/var/lib/nervus/package-data/app/cache", true},
+		{"root itself", "/var/lib/nervus/package-data", false},
+		{"prefix trick", "/var/lib/nervus/package-data-evil/x", false},
+		{"dotdot escape", "/var/lib/nervus/package-data/../../../etc/shadow", false},
+		{"dotdot inside", "/var/lib/nervus/package-data/app/../app2", true}, // Clean 后仍在内
+		{"relative", "var/lib/nervus/package-data/app", false},
 		{"unrelated", "/etc/passwd", false},
 	}
 	for _, c := range cases {

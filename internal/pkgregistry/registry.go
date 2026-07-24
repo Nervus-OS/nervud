@@ -22,16 +22,30 @@ var ErrDuplicatePackageID = errors.New("pkgregistry: duplicate package id in reg
 type Entry struct {
 	Manifest      Manifest
 	ActiveVersion string
+	VersionCode   uint64
 	UID           uint32
 	Trust         identity.TrustProfile
 	Source        Source
 
 	// GrantedPermissions 是 permission.Intersect 对 Manifest.Permissions 的裁决
-	// 结果（"请求 ∩ 已注册权限 ∩ trust 门槛"），取代此前被 Install() 算出后
-	// 直接丢弃的 Decision.GrantedPerms（见 arbitrate.go 的注释）。动态安装
-	// 路径在 Install 时算一次并持久化，重启只读回、不重新裁决（见 module.go
-	// 的 commit 与 scan.go 的 scanDynamicInstalls）
+	// 结果（"请求 ∩ 已注册权限 ∩ trust 门槛"）。动态安装路径在 Install 时算一次
+	// 并持久化，重启只读回、不重新裁决（见 module.go 的 commit 与 scan.go 的
+	// scanDynamicInstalls）
 	GrantedPermissions []string
+
+	// DisabledComponents 是被停用的 Component ID 集合（应用层架构决策 §7）。
+	// 停用按 Component；服务生命周期与 IPC 握手据此拒绝该组件
+	DisabledComponents []string
+}
+
+// ComponentDisabled 报告某个 Component 当前是否被停用
+func (e Entry) ComponentDisabled(compID string) bool {
+	for _, id := range e.DisabledComponents {
+		if id == compID {
+			return true
+		}
+	}
+	return false
 }
 
 // Registry 是 pkgregistry 的权威内存态：Package ID -> Entry

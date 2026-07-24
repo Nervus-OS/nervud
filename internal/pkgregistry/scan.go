@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/identity"
@@ -48,10 +49,15 @@ type SkippedPackage struct {
 //
 // packageRoot 通常取 authority.DefaultInvariants().PackageRoot；调用方
 // 显式传入而不是本函数内部硬编码，便于测试用 t.TempDir() 隔离
-func Scan(stateDir, systemPackagesDir, packageRoot string, log *slog.Logger) ScanResult {
+//
+// trust 是签名验证的信任根视图：系统镜像包的 trust 由其 manifest.sig 的真实
+// 验签结论决定（经 Arbitrate），而不是“存在于系统目录即 TrustPlatform”。trust
+// 为零值（LoadTrustStore 失败）时，platform/oem 签名都验不过 → 一律 fail-closed
+// 到 Ordinary（应用层架构决策 §2.1）
+func Scan(stateDir, systemPackagesDir, packageRoot string, trust TrustStore, log *slog.Logger) ScanResult {
 	var result ScanResult
 
-	sysEntries, sysSkipped := scanSystemImage(stateDir, systemPackagesDir, log)
+	sysEntries, sysSkipped := scanSystemImage(stateDir, systemPackagesDir, trust, log)
 	result.Entries = append(result.Entries, sysEntries...)
 	result.Skipped = append(result.Skipped, sysSkipped...)
 
@@ -64,13 +70,13 @@ func Scan(stateDir, systemPackagesDir, packageRoot string, log *slog.Logger) Sca
 
 // scanSystemImage 扫描系统镜像内置 Package
 //
-// 信任来自"只读镜像 = 构建管线已经保证"这条 v1 简化：真实签名校验落地前，
-// 存在于该目录即视为 TrustPlatform。真正的复核只做 digest——系统镜像本应
-// 只读，digest 不符意味着镜像本身已损坏或被篡改，这是必须 fail-closed 的信号
-//
-// TODO(signature): 签名校验落地后，这里应改为调用 verifySignature 并按
-// 其返回值决定 trust，而不是无条件给 TrustPlatform
-func scanSystemImage(stateDir, systemPackagesDir string, log *slog.Logger) ([]Entry, []SkippedPackage) {
+// 信任【不是】“存在于系统目录即 TrustPlatform”——那样一来 trust store 失败时
+// main.go 记的“non-Ordinary trust disabled”就是假的，被写进系统目录的任意包都能
+// 白拿 Platform。这里改为：读 manifest.sig → 用内嵌根验签的 TrustStore 验签 →
+// Arbitrate(SourceSystemImage, signers) 定 trust。验不过或缺 sig → fail-closed
+// 到 Ordinary（不跳过整个包：系统包即便只拿 Ordinary 也应能装载运行，只是拿不到
+// 特权），digest 不符仍是硬 fail（镜像损坏/被篡改的信号）
+func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *slog.Logger) ([]Entry, []SkippedPackage) {
 	var entries []Entry
 	var skipped []SkippedPackage
 
@@ -83,7 +89,12 @@ func scanSystemImage(stateDir, systemPackagesDir string, log *slog.Logger) ([]En
 	for _, manifestPath := range matches {
 		pkgDir := filepath.Dir(manifestPath)
 
-		m, err := readManifest(manifestPath)
+		manifestBytes, err := os.ReadFile(manifestPath)
+		if err != nil {
+			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
+			continue
+		}
+		m, err := ParseManifest(manifestBytes)
 		if err != nil {
 			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
 			continue
@@ -102,20 +113,37 @@ func scanSystemImage(stateDir, systemPackagesDir string, log *slog.Logger) ([]En
 			continue
 		}
 
-		uid, err := stableUID(stateDir, m.PackageID, m.Version, identity.TrustPlatform, SourceSystemImage)
+		// 验签定 trust。缺 sig 或验不过 → Ordinary（fail-closed），仍装载；
+		// 有效的 platform/oem 签名 → 经 Arbitrate 给对应特权 trust
+		pkgTrust := identity.TrustOrdinary
+		sigPath := filepath.Join(pkgDir, SignatureFileName)
+		if sigBytes, serr := os.ReadFile(sigPath); serr == nil {
+			if signers, verr := trust.VerifySignature(manifestBytes, sigBytes); verr == nil {
+				pkgTrust = Arbitrate(SourceSystemImage, signers)
+			} else if log != nil {
+				log.Warn("pkgregistry: system package signature not verified; downgrading to Ordinary",
+					"package_id", m.PackageID, "err", verr)
+			}
+		} else if log != nil {
+			log.Warn("pkgregistry: system package missing manifest.sig; treating as Ordinary",
+				"package_id", m.PackageID)
+		}
+
+		uid, err := stableUID(stateDir, m.PackageID, m.Version, pkgTrust, SourceSystemImage)
 		if err != nil {
 			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
 			continue
 		}
 
 		if log != nil {
-			log.Info("pkgregistry: loaded system package", "package_id", m.PackageID, "version", m.Version)
+			log.Info("pkgregistry: loaded system package", "package_id", m.PackageID, "version", m.Version, "trust", pkgTrust.String())
 		}
 		entries = append(entries, Entry{
 			Manifest:      m,
 			ActiveVersion: m.Version,
+			VersionCode:   m.VersionCode,
 			UID:           uid,
-			Trust:         identity.TrustPlatform,
+			Trust:         pkgTrust,
 			Source:        SourceSystemImage,
 		})
 	}
@@ -177,10 +205,12 @@ func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entr
 		entries = append(entries, Entry{
 			Manifest:           m,
 			ActiveVersion:      st.ActiveVersion,
+			VersionCode:        st.VersionCode,
 			UID:                st.UID,
 			Trust:              identity.TrustOrdinary,
 			Source:             SourceDynamicInstall,
 			GrantedPermissions: st.GrantedPermissions,
+			DisabledComponents: st.DisabledComponents,
 		})
 	}
 	return entries, skipped
@@ -197,7 +227,11 @@ func readManifest(path string) (Manifest, error) {
 // stableUID 返回 packageID 已持久化的 UID；若这是第一次见到该 Package，
 // 分配一个新的并原子写入记账文件
 func stableUID(stateDir, packageID, version string, trust identity.TrustProfile, src Source) (uint32, error) {
-	existing, err := readRegistryState(stateFilePath(stateDir, packageID))
+	sp, err := stateFilePath(stateDir, packageID)
+	if err != nil {
+		return 0, err
+	}
+	existing, err := readRegistryState(sp)
 	if err == nil {
 		return existing.UID, nil
 	}
@@ -227,17 +261,44 @@ func stableUID(stateDir, packageID, version string, trust identity.TrustProfile,
 type registryState struct {
 	PackageID     string `json:"package_id"`
 	ActiveVersion string `json:"active_version"`
+	VersionCode   uint64 `json:"version_code"`
 	UID           uint32 `json:"uid"`
 	Trust         string `json:"trust"`
 	Source        string `json:"source"`
 	// GrantedPermissions 是 Install 时 permission.Intersect 算出的授予集合，
 	// 随记账文件持久化；scanDynamicInstalls 启动时直接读回，不重新裁决
-	// （见 module.go 顶部"trust 和 grant 的裁决只在 Install 时做一次"）
 	GrantedPermissions []string `json:"granted_permissions,omitempty"`
+
+	// LineageRootKeyID / LineageKeyIDs 是 developer 签名的血统摘要，供升级期的
+	// 签名连续性核对（应用层架构决策 §2.6）。unverified（devmode）安装时为空——
+	// 无身份锚点，checkUpgrade 据此放宽连续性（见 upgrade.go）
+	LineageRootKeyID string   `json:"lineage_root_key_id,omitempty"`
+	LineageKeyIDs    []string `json:"lineage_key_ids,omitempty"`
+
+	// DisabledComponents 是被停用的 Component ID 列表（应用层架构决策 §7）。
+	// 停用按 Component 记，升级/重启后仍生效
+	DisabledComponents []string `json:"disabled_components,omitempty"`
 }
 
-func stateFilePath(dir, packageID string) string {
-	return filepath.Join(dir, packageID+".json")
+// stateFilePath 计算某个 Package 记账文件的路径，并做纵深防御校验
+//
+// 这条路径【不过 Authority Gate】（记账文件不跨信任边界，见 writeFileAtomic 的
+// 注释），因此它接收的 packageID 若来自敌意 manifest 且未经校验，就是一个可以
+// 让 nervud 以 root 在 stateDir 之外写文件的洞（应用层架构决策 §9.1）。治本在
+// manifest.validate 的 validPackageID；这里是第二道：即便上游漏了，也确保拼出的
+// 路径仍严格位于 stateDir 之下，并在拒绝时带上 Clean 后的完整解析路径便于取证
+func stateFilePath(dir, packageID string) (string, error) {
+	if !validPackageID(packageID) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidPackageID, packageID)
+	}
+	p := filepath.Join(dir, packageID+".json")
+	cleanDir := filepath.Clean(dir)
+	rel, err := filepath.Rel(cleanDir, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%w: state path for %q escapes %q (resolved %q)",
+			ErrInvalidPackageID, packageID, cleanDir, filepath.Clean(p))
+	}
+	return p, nil
 }
 
 func readRegistryState(path string) (registryState, error) {
@@ -253,6 +314,10 @@ func readRegistryState(path string) (registryState, error) {
 }
 
 func saveRegistryState(dir string, st registryState) error {
+	sp, err := stateFilePath(dir, st.PackageID)
+	if err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("pkgregistry: encode state for %s: %w", st.PackageID, err)
@@ -260,7 +325,7 @@ func saveRegistryState(dir string, st registryState) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("pkgregistry: create registry state dir %s: %w", dir, err)
 	}
-	return writeFileAtomic(stateFilePath(dir, st.PackageID), data, 0o644)
+	return writeFileAtomic(sp, data, 0o644)
 }
 
 // ---- UID 分配器 -----------------------------------------------------------

@@ -8,7 +8,18 @@ import (
 	"log/slog"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/authority/systemd"
 )
+
+// UnitManager 是 authority 对 systemd 子包的窄接口依赖：起/停/等一个瞬态 unit。
+// *systemd.Conn 隐式满足。authority 以接口注入而不直接 new systemd.Conn，是为了
+// 让不需要起进程的测试传 nil（StartSandboxedProcess 会 fail-closed），以及单测能注入
+// fake 走完 Validate/审计而不碰真实 D-Bus
+type UnitManager interface {
+	StartTransientUnit(ctx context.Context, spec systemd.UnitSpec) error
+	StopUnit(ctx context.Context, name string) error
+	WaitUnit(ctx context.Context, name string) (systemd.ExitInfo, error)
+}
 
 // Gate 是 NSOS 全部 Linux 特权操作的唯一入口
 //
@@ -24,12 +35,18 @@ type Gate struct {
 	auditor audit.Recorder
 	inv     *Invariants
 	log     *slog.Logger
+	// spawner 是 systemd unit 管理后端；nil 表示未配置起进程能力，
+	// StartSandboxedProcess/StopProcess/WaitProcess 会返回 ErrUnsupportedPlatform
+	spawner UnitManager
 }
 
 type Config struct {
 	Auditor    audit.Recorder
 	Invariants *Invariants // nil 则用 DefaultInvariants()
 	Log        *slog.Logger
+	// Spawner 是 systemd unit 管理后端（生产由 main.go 用 systemd.Dial 构造并注入）。
+	// nil 时 Gate 仍可用于非进程类操作（装包/删树/设属主/重启）
+	Spawner UnitManager
 }
 
 // New 构造 Gate
@@ -45,7 +62,7 @@ func New(cfg Config) (*Gate, error) {
 	if inv == nil {
 		inv = DefaultInvariants()
 	}
-	return &Gate{auditor: cfg.Auditor, inv: inv, log: cfg.Log}, nil
+	return &Gate{auditor: cfg.Auditor, inv: inv, log: cfg.Log, spawner: cfg.Spawner}, nil
 }
 
 // 实现方法

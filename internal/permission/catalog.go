@@ -10,12 +10,59 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
+// GrantMode 是一个权限【怎么被授予】（应用层架构决策 §6.1）
+type GrantMode uint8
+
+const (
+	// GrantInstall 安装时静默授予（normal 权限）：只要 trust 够、装了就有
+	GrantInstall GrantMode = iota
+	// GrantUser 危险权限：安装只授予「可请求」资格，实际访问需运行期用户确认，
+	// 且可随时撤销（我们独有、Android 也有的 dangerous 权限）
+	GrantUser
+	// GrantSignature 只按签名/trust 授予，用户不参与（如平台内部能力）
+	GrantSignature
+)
+
+func (m GrantMode) valid() bool { return m == GrantInstall || m == GrantUser || m == GrantSignature }
+
+// 权限组名（应用层架构决策 §6.1）。撤销 motion 组权限要联动 control 撤租 + 递增
+// motion epoch（§6.4），因此组名是裁决逻辑的一部分，用常量钉死
+const (
+	GroupMotion     = "motion"
+	GroupCamera     = "camera"
+	GroupMicrophone = "microphone"
+	GroupStorage    = "storage"
+	GroupLocation   = "location"
+)
+
 // CatalogEntry 是一条已注册权限的定义
 type CatalogEntry struct {
 	ID       string
 	MinTrust identity.TrustProfile // 拿到这个权限至少需要的 trust profile
+	Mode     GrantMode             // 怎么授予（install/user/signature）
+	Group    string                // 权限组（camera/microphone/motion/...），空表示无组
+	// RequireSignerRole 可选：只有【该角色】签名的包才能拿到这个权限，比单纯 trust
+	// 等级更细（应用层架构决策 §2.2）。如 perm.authority.reboot 只给 platform-release。
+	// 用字符串而非 pkgregistry.SignerRole 类型，避免 permission→pkgregistry 依赖倒挂
+	RequireSignerRole string
 	// Description 供审计/诊断日志使用，不参与裁决
 	Description string
+}
+
+// GrantState 是一个 (Package, 权限) 的运行期授予状态（应用层架构决策 §6.2）
+type GrantState uint8
+
+const (
+	// GrantStateNotRequested 从未请求（GrantUser 权限的初始态）
+	GrantStateNotRequested    GrantState = iota
+	GrantStateGranted                    // 已授予
+	GrantStateDenied                     // 用户拒绝过，还能再问
+	GrantStateDeniedPermanent            // 用户勾了「不再询问」
+)
+
+func (s GrantState) valid() bool {
+	return s == GrantStateNotRequested || s == GrantStateGranted ||
+		s == GrantStateDenied || s == GrantStateDeniedPermanent
 }
 
 // Catalog 是权限定义表：每个已注册权限 ID 声明拿到它所需的最低信任 profile
@@ -40,6 +87,9 @@ func NewCatalog(entries []CatalogEntry) (Catalog, error) {
 		}
 		if !e.MinTrust.Valid() {
 			return Catalog{}, fmt.Errorf("permission: catalog entry %q has invalid min trust %d", e.ID, e.MinTrust)
+		}
+		if !e.Mode.valid() {
+			return Catalog{}, fmt.Errorf("permission: catalog entry %q has invalid grant mode %d", e.ID, e.Mode)
 		}
 		if _, dup := m[e.ID]; dup {
 			return Catalog{}, fmt.Errorf("permission: duplicate catalog entry %q", e.ID)
@@ -76,17 +126,54 @@ func DefaultCatalog() Catalog {
 		{
 			ID:          "perm.diagnostics.read",
 			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantInstall,
 			Description: "只读诊断信息（占位）",
+		},
+		// perm.service.register 拆分（应用层架构决策 §6.5）：让用户应用的配套服务能
+		// 服务自己的 app（.private，Ordinary 即可），同时保持「普通包不能对外冒充系统
+		// 能力」（跨包 .register 仍需 OEM+）
+		{
+			ID:          "perm.service.register.private",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantInstall,
+			Description: "注册仅同 Package 内可见的 Service",
 		},
 		{
 			ID:          "perm.service.register",
 			MinTrust:    identity.TrustOEM,
+			Mode:        GrantInstall,
 			Description: "注册可被其它 Package 调用的 Service（占位）",
+		},
+		// GrantUser 危险权限示例：安装只给「可请求」，实际访问需运行期用户确认、可撤销
+		{
+			ID:          "perm.camera.capture",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantUser,
+			Group:       GroupCamera,
+			Description: "访问摄像头（危险，需用户确认）",
+		},
+		{
+			// motion 组：撤销时联动 control 撤租 + 递增 motion epoch（§6.4）
+			ID:          "perm.motion.control",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantUser,
+			Group:       GroupMotion,
+			Description: "控制机器人运动（危险，需用户确认；撤销即递增 motion epoch）",
 		},
 		{
 			ID:          "perm.platform.control",
 			MinTrust:    identity.TrustPlatform,
+			Mode:        GrantSignature,
 			Description: "平台级控制能力（占位）",
+		},
+		{
+			// RequireSignerRole 示例：最危险的操作只给 platform-release 签的包，
+			// 连 platform-systemapp 签的 Launcher 也拿不到（§2.2）
+			ID:                "perm.authority.reboot",
+			MinTrust:          identity.TrustPlatform,
+			Mode:              GrantSignature,
+			RequireSignerRole: "platform-release",
+			Description:       "重启整机（只给 platform-release 签名）",
 		},
 	})
 	if err != nil {

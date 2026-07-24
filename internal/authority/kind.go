@@ -22,6 +22,7 @@ const (
 	KindSetOwner               Kind = 6
 	KindEnableFsVerity         Kind = 7
 	KindReboot                 Kind = 8
+	KindRemovePackageTree      Kind = 9
 )
 
 func (k Kind) String() string {
@@ -42,6 +43,8 @@ func (k Kind) String() string {
 		return "EnableFsVerity"
 	case KindReboot:
 		return "Reboot"
+	case KindRemovePackageTree:
+		return "RemovePackageTree"
 	default:
 		return "Unspecified"
 	}

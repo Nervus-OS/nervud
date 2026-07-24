@@ -55,7 +55,7 @@ func selfUIDInvariants(t *testing.T) *authority.Invariants {
 		t.Skip("以 root 运行；准入用例需要一个非 0 的 UID")
 	}
 	return &authority.Invariants{
-		DataRoot:    "/var/lib/nervus/data",
+		DataRoot:    "/var/lib/nervus/package-data",
 		PackageRoot: "/var/lib/nervus/packages",
 		MinAppUID:   uid,
 		MaxAppUID:   uid,
@@ -410,7 +410,7 @@ func TestAdmit_RejectsOutOfRangeUID(t *testing.T) {
 	}
 	// 故意把区段设成不含当前 UID
 	inv := &authority.Invariants{
-		DataRoot: "/var/lib/nervus/data", PackageRoot: "/var/lib/nervus/packages",
+		DataRoot: "/var/lib/nervus/package-data", PackageRoot: "/var/lib/nervus/packages",
 		MinAppUID: 20000, MaxAppUID: 59999,
 	}
 	s, sock, rec := newTestServer(t, inv, DefaultLimits())

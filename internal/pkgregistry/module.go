@@ -8,6 +8,7 @@ package pkgregistry
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/identity"
@@ -25,6 +26,7 @@ type Module struct {
 	idReg    IdentityUpdater
 	perm     PermissionArbiter
 	registry *Registry
+	trust    TrustStore
 	aud      audit.Recorder
 	log      *slog.Logger
 
@@ -32,6 +34,17 @@ type Module struct {
 	systemPackagesDir string // /usr/lib/nervus/system-packages
 	packageRoot       string // authority.DefaultInvariants().PackageRoot
 	dataRoot          string // authority.DefaultInvariants().DataRoot
+
+	// mu 串行化全部状态变更（Install / Uninstall / SetComponentEnabled）。P1-9：
+	// 没有它，并发安装会争抢 UID 分配器（_allocator.json 的 read-modify-write）、
+	// 并让 commit 的 List→Replace 丢更新，导致 registry/identity/permission 三份投影
+	// 分裂。装包/卸载不是高频路径，一把大锁足矣
+	mu sync.Mutex
+
+	// stopper/revoker 是卸载/停用时的外部协作者（service 停组件、control 撤租），
+	// 经 SetLifecycleHooks 注入；可为 nil（对应阶段未接线时留接缝）。读写受 mu 保护
+	stopper ComponentStopper
+	revoker LeaseRevoker
 }
 
 // New 构造 pkgregistry 的 Module
@@ -41,13 +54,18 @@ type Module struct {
 // 显式 NewRegistry() 构造后传入，而不是本函数内部 new——如果日后需要在
 // Register 之前就单独持有同一个 *Registry（例如给诊断端点只读访问），
 // 调用方与 Module 必须共享同一份状态，不能各自持有一份互不知情的副本
+// trust 是签名验证的信任根视图（应用层架构决策 §2）。装配时由 main.go 用
+// LoadTrustStore 加载；加载失败（开发构建缺内嵌根、或 bundle 验不过）时传入
+// 零值 TrustStore——此时 developer 自签仍可验证（公钥内嵌），但任何 platform/oem
+// 角色都因查不到而 fail-closed，动态安装一律只能拿 Ordinary，符合“验不过就
+// fail-closed”
 func New(
 	auth PackageInstaller, idReg IdentityUpdater, perm PermissionArbiter, registry *Registry,
-	aud audit.Recorder, log *slog.Logger,
+	trust TrustStore, aud audit.Recorder, log *slog.Logger,
 	stateDir, systemPackagesDir, packageRoot, dataRoot string,
 ) *Module {
 	return &Module{
-		auth: auth, idReg: idReg, perm: perm, registry: registry, aud: aud, log: log,
+		auth: auth, idReg: idReg, perm: perm, registry: registry, trust: trust, aud: aud, log: log,
 		stateDir: stateDir, systemPackagesDir: systemPackagesDir,
 		packageRoot: packageRoot, dataRoot: dataRoot,
 	}
@@ -62,7 +80,7 @@ func (m *Module) Name() string { return "pkgregistry" }
 // identity 的 Replace 本身失败时才返回错误，那意味着扫描结果自相矛盾
 // （如重复 Package ID），属于装配级别的问题
 func (m *Module) Start(_ context.Context) error {
-	result := Scan(m.stateDir, m.systemPackagesDir, m.packageRoot, m.log)
+	result := Scan(m.stateDir, m.systemPackagesDir, m.packageRoot, m.trust, m.log)
 
 	for _, s := range result.Skipped {
 		m.aud.Record(context.Background(), audit.Event{

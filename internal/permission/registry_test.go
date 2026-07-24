@@ -97,7 +97,7 @@ func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 	if empty.Len() != 0 {
 		t.Fatal("未初始化 Registry 的 Len 应为 0")
 	}
-	granted, denied := empty.Intersect([]string{"perm.diagnostics.read"}, identity.TrustPlatform)
+	granted, denied := empty.Intersect([]string{"perm.diagnostics.read"}, identity.TrustPlatform, nil)
 	if len(granted) != 0 || len(denied) != 1 {
 		t.Fatalf("未初始化 Registry 的 Intersect 应全部拒绝，got granted=%v denied=%v", granted, denied)
 	}
@@ -113,7 +113,7 @@ func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 
 func TestRegistryIntersect_UsesOwnCatalog(t *testing.T) {
 	r := NewRegistry(DefaultCatalog())
-	granted, denied := r.Intersect([]string{"perm.diagnostics.read", "perm.platform.control"}, identity.TrustOrdinary)
+	granted, denied := r.Intersect([]string{"perm.diagnostics.read", "perm.platform.control"}, identity.TrustOrdinary, nil)
 	if len(granted) != 1 || granted[0] != "perm.diagnostics.read" {
 		t.Fatalf("granted = %v, want [perm.diagnostics.read]", granted)
 	}

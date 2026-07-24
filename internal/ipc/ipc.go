@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/service"
 	"github.com/nervus-os/nervud/internal/sysprobe"
 )
 
@@ -142,11 +144,25 @@ type Config struct {
 	// Limits 为零值时使用 DefaultLimits()
 	Limits Limits
 
-	// AllowUnverifiedComponent 显式放行「Component 核对尚未落地」时的握手，仅供
-	// 开发/测试。默认 false = fail closed：核对不可用即拒绝握手，绝不让未确认
-	// Component 的连接进入 Ready（架构 10.2：核对 Component 后才完成握手）。
-	// 生产镜像永不置 true——同 ND内核介绍「开发机需显式开关才允许降级运行」的规矩
+	// Components 把 systemd unit 反查回它承载的组件（由 service.Manager 提供）。
+	// 接口由本包（消费者）定义，*service.Manager 隐式满足。为 nil 时 verifyComponent
+	// 走 fail-closed（除非 AllowUnverifiedComponent）
+	Components ComponentResolver
+
+	// AllowUnverifiedComponent 显式放行「Component 核对基础设施未接线（Components 为
+	// nil）」时的握手，仅供开发/测试。默认 false = fail closed：核对不可用即拒绝握手。
+	// 注意它只放行「基础设施缺失」，【绝不】放行「核对到不一致」——后者永远拒绝
 	AllowUnverifiedComponent bool
+}
+
+// ComponentResolver 把 systemd unit 名反查回它承载的组件实例（应用层架构决策 §5.5）
+//
+// 接口在消费者（ipc）这一侧定义，实现由 internal/service 提供。verifyComponent 用
+// 对端进程的 cgroup 解出 unit，再经它拿到「这个 unit 到底是哪个 Package 的哪个
+// Component、什么 UID、是否停用」的内核事实，与客户端自报的 declared_component_id
+// 交叉核对
+type ComponentResolver interface {
+	LookupByUnit(unit string) (service.Instance, bool)
 }
 
 // PeerResolver 把 SO_PEERCRED 凭证解析成可信身份
@@ -184,6 +200,7 @@ type Server struct {
 	inv        *authority.Invariants
 	identity   PeerResolver
 	permission PermissionChecker
+	components ComponentResolver
 	limits     Limits
 
 	// allowUnverifiedComponent 见 Config.AllowUnverifiedComponent
@@ -254,6 +271,7 @@ func New(cfg Config) (*Server, error) {
 		inv:                      cfg.Invariants,
 		identity:                 cfg.Identity,
 		permission:               cfg.Permission,
+		components:               cfg.Components,
 		limits:                   normalizeLimits(cfg.Limits),
 		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
 		quit:                     make(chan struct{}),
@@ -686,28 +704,103 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	}
 }
 
-// errComponentUnverifiable：无法核对客户端自报的 Component（核对基础设施尚未落地）。
-// 与「核对到不一致」不同——后者是潜在伪装、要审计；本错误只是能力缺口，fail closed
-var errComponentUnverifiable = errors.New("ipc: component verification unavailable")
+var (
+	// errComponentUnverifiable：无法核对（核对基础设施未接线，或对端不在受管 cgroup、
+	// 内核太旧无 SO_PEERPIDFD 等能力缺口）。属能力缺口而非攻击，fail closed 但不算违规
+	errComponentUnverifiable = errors.New("ipc: component verification unavailable")
 
-// verifyComponent 是架构 10.2「验证声明而不是相信声明」的落点：把客户端在 Hello
-// 里自报的 declared_component_id 与内核事实（PID、systemd unit/cgroup、启动记录、
-// manifest）核对，返回【核对确认】的 Component ID
+	// errComponentMismatch：核对到客户端自报 Component 与内核事实【不一致】（UID/包/
+	// 组件 ID 对不上，或 unit 非受管组件，或组件已停用）。这是潜在伪装，永远拒绝并审计
+	errComponentMismatch = errors.New("ipc: declared component does not match kernel facts")
+)
+
+// verifyComponent 是架构 10.2「验证声明而不是相信声明」的落点（应用层架构决策 §5.5）：
+// 用对端进程的 cgroup 解出它所属的 systemd unit，经 ComponentResolver 拿到「这个 unit
+// 到底是哪个 Package 的哪个 Component、UID、是否停用」的内核事实，与客户端在 Hello 里
+// 自报的 declared_component_id 交叉核对，返回【核对确认】的 Component ID
 //
-// 核对基础设施尚未落地：internal/service 还没暴露 PID→Component 反查，
-// internal/identity 也没有 Component 级索引。因此本函数【默认 fail closed】——返回
-// errComponentUnverifiable，握手随即回 UNAUTHENTICATED 并关闭，绝不让未确认 Component
-// 的连接进入 Ready。只有显式开发/测试开关（AllowUnverifiedComponent）才放行，且即便
-// 放行也只返回空 Component（未确认），【绝不】回退成信任自报值——信任自报等于把身份
-// 决策权交给对端，正是 §10.2 禁止的
-//
-// TODO(component-verify): service/identity 就位后改为真正核对，声明与事实不符时返回
-// 错误并由调用方审计为潜在伪装；届时删除 AllowUnverifiedComponent 开关
-func (s *Server) verifyComponent(_ identity.Caller, _ string) (string, error) {
-	if !s.allowUnverifiedComponent {
+// 两类失败严格区分：
+//   - errComponentUnverifiable（能力缺口）：Components 未接线、对端不在受管 cgroup、
+//     内核无 SO_PEERPIDFD 且回退也失败。fail closed，但不审计为违规。开发/测试可用
+//     AllowUnverifiedComponent 放行「Components 未接线」这一种。
+//   - errComponentMismatch（潜在伪装）：核对到不一致。永远拒绝并审计，AllowUnverifiedComponent
+//     也不放行——信任自报等于把身份决策权交给对端，正是 §10.2 禁止的
+func (s *Server) verifyComponent(uc *net.UnixConn, caller identity.Caller, declared string) (string, error) {
+	if s.components == nil {
+		if s.allowUnverifiedComponent {
+			return "", nil // 仅开发/测试：基础设施未接线时放行，返回空 Component（未确认）
+		}
 		return "", errComponentUnverifiable
 	}
-	return "", nil
+
+	unit, err := s.resolvePeerUnit(uc, caller)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errComponentUnverifiable, err)
+	}
+
+	inst, ok := s.components.LookupByUnit(unit)
+	if !ok {
+		// 对端所在 unit 不是 nervud 起的受管组件——可能是伪装，或非受管进程连了上来
+		return "", fmt.Errorf("%w: unit %q is not a managed component", errComponentMismatch, unit)
+	}
+	// 内核事实交叉核对（任一不符即潜在伪装）
+	if inst.UID != caller.UID {
+		return "", fmt.Errorf("%w: unit uid %d != peer uid %d", errComponentMismatch, inst.UID, caller.UID)
+	}
+	if inst.PackageID != caller.PackageID {
+		return "", fmt.Errorf("%w: unit package %q != caller package %q", errComponentMismatch, inst.PackageID, caller.PackageID)
+	}
+	if declared != "" && declared != inst.ComponentID {
+		return "", fmt.Errorf("%w: declared %q != actual %q", errComponentMismatch, declared, inst.ComponentID)
+	}
+	if inst.State == service.StateDisabled {
+		return "", fmt.Errorf("%w: component %q is disabled", errComponentMismatch, inst.ComponentID)
+	}
+	return inst.ComponentID, nil
+}
+
+// resolvePeerUnit 解析对端进程当前所属的 systemd unit（应用层架构决策 §5.5）
+//
+// 优先 SO_PEERPIDFD（稳定引用，免 PID 回收竞态）读 cgroup；不可用（内核 <6.5）时
+// 回退到 SO_PEERCRED PID + 复核 /proc/<pid> 属主仍等于 SO_PEERCRED UID 后再读 cgroup。
+// 回退路径的残留风险：同一 Package 内 component A 冒充 component B（同 UID、同数据目录）
+// ——如实记录，不假装解决
+func (s *Server) resolvePeerUnit(uc *net.UnixConn, caller identity.Caller) (string, error) {
+	cgroup, err := sysprobe.PeerCgroupViaPIDFD(uc)
+	if err != nil {
+		// 回退：SO_PEERCRED PID + /proc 属主复核
+		owner, oerr := sysprobe.ProcOwnerUID(caller.PID)
+		if oerr != nil {
+			return "", fmt.Errorf("pidfd path failed (%v); proc owner recheck failed: %v", err, oerr)
+		}
+		if owner != caller.UID {
+			return "", fmt.Errorf("proc owner uid %d != peer uid %d (PID reused?)", owner, caller.UID)
+		}
+		cgroup, err = sysprobe.CgroupPath(caller.PID)
+		if err != nil {
+			return "", err
+		}
+	}
+	unit, ok := unitFromCgroup(cgroup)
+	if !ok {
+		return "", fmt.Errorf("cgroup %q carries no nervus unit", cgroup)
+	}
+	return unit, nil
+}
+
+// unitFromCgroup 从 cgroup v2 路径里取出 nervud 起的 systemd unit 名
+//
+// 受管组件的 cgroup 形如 ".../system.slice/nervus-<pkg>-<comp>.service"（可能有嵌套
+// 的 .slice 层级）。取路径里最后一个以 nervus- 起、.service 结尾的段
+func unitFromCgroup(cgroup string) (string, bool) {
+	segs := strings.Split(cgroup, "/")
+	for i := len(segs) - 1; i >= 0; i-- {
+		seg := segs[i]
+		if strings.HasPrefix(seg, "nervus-") && strings.HasSuffix(seg, ".service") {
+			return seg, true
+		}
+	}
+	return "", false
 }
 
 // ConnectionLimits 下发给 SDK 的预算取值（架构 10.11 的 wire 投影）

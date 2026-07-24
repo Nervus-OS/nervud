@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
@@ -37,6 +38,9 @@ type Grant struct {
 type Registry struct {
 	catalog Catalog
 	snap    atomic.Pointer[snapshot]
+	// grants 是 GrantUser（危险）权限的运行期授予状态。install-set（snap）回答
+	// 「安装时授予了什么」，grants 回答「用户运行期确认/撤销了什么」，Allowed 两者都看
+	grants *grantStore
 }
 
 type snapshot struct {
@@ -45,9 +49,21 @@ type snapshot struct {
 
 // NewRegistry 用给定 Catalog 构造一个空的 Registry
 func NewRegistry(cat Catalog) *Registry {
-	r := &Registry{catalog: cat}
+	r := &Registry{catalog: cat, grants: newGrantStore()}
 	r.snap.Store(&snapshot{byPackage: map[string]map[string]struct{}{}})
 	return r
+}
+
+// SetGrantStore 接线运行期授予状态的持久化目录与撤销联动（应用层架构决策 §6.2/§6.4）。
+// 装配期由 main.go 调用；stateDir 为 /var/lib/nervus/registry，revoker 由 control 实现
+// （撤销 motion 组权限时递增 motion epoch）。调用后从磁盘载入已有状态
+func (r *Registry) SetGrantStore(stateDir string, revoker LeaseRevoker, aud audit.Recorder) {
+	r.grants.mu.Lock()
+	r.grants.stateDir = stateDir
+	r.grants.revoker = revoker
+	r.grants.aud = aud
+	r.grants.mu.Unlock()
+	r.grants.load()
 }
 
 // Intersect 用 Registry 自带的 Catalog 裁决一次安装请求（见 intersect.go）
@@ -57,11 +73,11 @@ func NewRegistry(cat Catalog) *Registry {
 //
 // 对未初始化的 Registry fail-safe：零值 Catalog 视为"没有任何已注册权限"，
 // 全部请求都会被拒绝，而不是 panic
-func (r *Registry) Intersect(requested []string, trust identity.TrustProfile) (granted, denied []string) {
+func (r *Registry) Intersect(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string) {
 	if r == nil {
 		return nil, append([]string(nil), requested...)
 	}
-	return Intersect(requested, r.catalog, trust)
+	return Intersect(requested, r.catalog, trust, signerRoles)
 }
 
 // Replace 原子替换整份已授予权限索引
@@ -115,8 +131,46 @@ func (r *Registry) Allowed(packageID, permission string) bool {
 	if !ok {
 		return false
 	}
-	_, ok = perms[permission]
-	return ok
+	if _, ok = perms[permission]; !ok {
+		return false // 安装期就没授予（或已被卸载/降权投影出去）
+	}
+	// GrantUser（危险）权限：安装期集合只证明「可请求」，实际放行还要运行期状态
+	// == Granted（应用层架构决策 §6.2：两者都通过才放行）
+	if entry, ok := r.catalog.Lookup(permission); ok && entry.Mode == GrantUser {
+		return r.grants.state(packageID, permission) == GrantStateGranted
+	}
+	return true
+}
+
+// SetRuntimeState 设置一个 GrantUser 权限的运行期授予状态并持久化（应用层架构决策
+// §6.3/§6.4）。只有 GrantUser 权限有运行期状态——对其它 Mode 调用返回错误。撤销
+// motion 组权限会联动 control 撤租 + 递增 motion epoch
+//
+// 调用入口需 perm.permission.admin（全系统只有权限确认 UI 有）——该执法在 IPC 请求
+// 管线落地，本方法是被执法后的机制落点
+func (r *Registry) SetRuntimeState(packageID, permission string, state GrantState) error {
+	if r == nil {
+		return fmt.Errorf("permission: nil registry")
+	}
+	if !state.valid() {
+		return fmt.Errorf("permission: invalid grant state %d", state)
+	}
+	entry, ok := r.catalog.Lookup(permission)
+	if !ok {
+		return fmt.Errorf("permission: unknown permission %q", permission)
+	}
+	if entry.Mode != GrantUser {
+		return fmt.Errorf("permission: %q is not a user-grantable (dangerous) permission", permission)
+	}
+	return r.grants.set(packageID, permission, state, entry.Group == GroupMotion)
+}
+
+// GrantStateOf 返回一个权限当前的运行期授予状态（供权限 UI 展示/诊断）
+func (r *Registry) GrantStateOf(packageID, permission string) GrantState {
+	if r == nil {
+		return GrantStateNotRequested
+	}
+	return r.grants.state(packageID, permission)
 }
 
 // Len 返回当前持有已授予权限记录的 Package 数，供诊断与测试使用
