@@ -25,22 +25,22 @@ func main() {
 }
 
 // usage 打印命令总览。放进变量以便 -h 与参数错误共用。
-const usage = `nervusctl — nervud 本地特权运维工具
+const usage = `nervusctl — nervud Local privileged O&M tool
 
-用法:
-  nervusctl [--sock PATH] <命令> [参数...]
+Usage:
+  nervusctl [--sock PATH] <command> [arguments...]
 
-命令:
-  install <file.nspkg>              解包并触发安装（经 nervud 复核签名/权限）
-  uninstall <package_id>            卸载一个 Package
-  list                              列出已装 Package
-  enable <package_id> <component>   启用一个 Component
-  disable <package_id> <component>  停用一个 Component
-  grant <package_id> <permission>   授予一个运行期（危险）权限
-  revoke <package_id> <permission>  撤销一个运行期权限
+Commands:
+  install <file.nspkg>              Unpack and trigger installation
+  uninstall <package_id>            Uninstall a Package
+  list                              List installed Packages
+  enable <package_id> <component>   Enable a Component
+  disable <package_id> <component>  Disable a Component
+  grant <package_id> <permission>   Grant a runtime (dangerous) permission
+  revoke <package_id> <permission>  Revoke a runtime permission
 
-选项:
-  --sock PATH   管理通道 socket 路径 (默认 ` + adminwire.DefaultSockPath + `)
+Options:
+  --sock PATH   Admin channel socket path
 `
 
 // run 是可测的入口：解析参数、构造客户端、执行子命令。返回进程退出码。
