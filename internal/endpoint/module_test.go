@@ -616,14 +616,32 @@ func TestNamespaceIsolation_TwoConnsIndependentNumbering(t *testing.T) {
 		t.Fatalf("each connection should number endpoints independently from 1, got id1=%d id2=%d", id1, id2)
 	}
 
-	if _, rerr := m.Route("conn-2", id1); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
+	// conn-1 再 Resolve 一次拿到 id=2；conn-2 没有第二次，故它没有编号 2。
+	//
+	// 这一步是证明「(conn, endpoint_id) 才是查找键」所必需的：上面两条连接的
+	// 首个 id 都是 1，用 id=1 去跨连接 Route 一定命中对方自己的 binding，
+	// 证不出任何隔离性。必须构造一个「此连接不存在但彼连接存在」的编号。
+	res1b := m.ResolveEndpoint("conn-1", identity.Caller{PackageID: "com.caller1"}, &ipcv1.ResolveEndpoint{
+		RequestId: 2, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
+	})
+	id1b := res1b.GetSuccess().GetEndpointId()
+	if id1b != 2 {
+		t.Fatalf("second resolve on conn-1 should get id 2, got %d", id1b)
+	}
+
+	// 隔离性：conn-1 的 2 在 conn-2 上不存在
+	if _, rerr := m.Route("conn-2", id1b); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
 		t.Fatalf("cross-conn route code = %v, want NOT_FOUND", rerr.Code)
 	}
+	// 同一个数字 1 在两条连接上各自可路由，且互不干扰
 	if _, rerr := m.Route("conn-1", id1); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		t.Fatalf("conn-1 own route code = %v, want 0", rerr.Code)
 	}
 	if _, rerr := m.Route("conn-2", id2); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		t.Fatalf("conn-2 own route code = %v, want 0", rerr.Code)
+	}
+	if _, rerr := m.Route("conn-1", id1b); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("conn-1 second route code = %v, want 0", rerr.Code)
 	}
 }
 
