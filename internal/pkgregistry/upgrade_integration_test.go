@@ -111,9 +111,11 @@ func stagingForVersion(t *testing.T, root, packageID, version string, versionCod
 	return staging, []byte(manifest)
 }
 
-// installOnce 是测试的便捷封装：装一次包，返回 Install 的 error
+// installOnce 是测试的便捷封装：装一次包，返回 Install 的 error。写入 staging 元数据
+// 以满足 verifyStagingMetadata（落盘树的 manifest/sig 必须与验签字节一致）
 func installOnce(t *testing.T, mod *Module, manifestBytes, sig []byte, staging string) error {
 	t.Helper()
+	writeStagingMetadata(t, staging, manifestBytes, sig)
 	_, err := mod.Install(context.Background(), InstallTransaction{
 		ManifestBytes: manifestBytes, SigBlock: sig, StagingDir: staging, Source: SourceDynamicInstall,
 	})

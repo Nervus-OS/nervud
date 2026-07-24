@@ -67,10 +67,14 @@ func (e Entry) CanDisable(compID string) (bool, string) {
 	return true, ""
 }
 
-// ComponentStopper 是卸载/停用时对 service.Manager 的窄接口依赖：停掉一个组件的
-// 运行实例。为 nil 时跳过（endpoint/service 尚未接线的阶段留接缝）
+// ComponentStopper 是卸载/停用/升级时对 service.Manager 的窄接口依赖：停掉一个组件
+// 的运行实例，或在升级后把整个包切到新版本。为 nil 时跳过（endpoint/service 尚未
+// 接线的阶段留接缝）
 type ComponentStopper interface {
 	StopComponent(ctx context.Context, pkg, comp string) error
+	// ReloadPackage 停掉该包全部旧实例并用当前 Registry 的新版本重起 always-on 组件
+	// （升级用，防旧版本继续运行/重启）
+	ReloadPackage(ctx context.Context, pkg string) error
 }
 
 // LeaseRevoker 是卸载/撤权时对 control 的窄接口依赖：撤销某 Package 持有的全部
@@ -205,6 +209,12 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 		if rerr := os.Remove(sp); rerr != nil && !os.IsNotExist(rerr) {
 			m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.rmLedger", Subject: pkgID, Denied: true, Err: rerr})
 		}
+	}
+
+	// 6. 清运行期权限授予状态（_grants.json）。install-set 已随 removeEntry 的投影剔除，
+	// 但运行期危险权限授予是 permission 单独的持久态，不清会被同 ID 重装继承（§P1）
+	if cerr := m.perm.ClearPackage(pkgID); cerr != nil {
+		m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.clearGrants", Subject: pkgID, Denied: true, Err: cerr})
 	}
 
 	m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall", Subject: pkgID})

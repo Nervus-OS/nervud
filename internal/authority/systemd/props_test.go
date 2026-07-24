@@ -133,6 +133,26 @@ func TestValidateSpec_Rejections(t *testing.T) {
 	}
 }
 
+func TestBuildProperties_BindToUnit(t *testing.T) {
+	// 默认不设 BindsTo
+	m := propMap(t, validSpec())
+	if _, ok := m["BindsTo"]; ok {
+		t.Fatal("BindsTo should be absent when BindToUnit empty")
+	}
+	// 设了 BindToUnit：BindsTo + After 都指向它（owner-death）
+	spec := validSpec()
+	spec.BindToUnit = "nervud.service"
+	m = propMap(t, spec)
+	bt, ok := m["BindsTo"].([]string)
+	if !ok || len(bt) != 1 || bt[0] != "nervud.service" {
+		t.Fatalf("BindsTo = %v, want [nervud.service]", m["BindsTo"])
+	}
+	af, ok := m["After"].([]string)
+	if !ok || len(af) != 1 || af[0] != "nervud.service" {
+		t.Fatalf("After = %v, want [nervud.service]", m["After"])
+	}
+}
+
 func TestValidUnitName(t *testing.T) {
 	ok := []string{
 		"nervus-com.example.app-main.service",

@@ -62,6 +62,9 @@ type StartSandboxedProcessRequest struct {
 	ReadOnlyPaths     []string
 	InaccessiblePaths []string
 	Limits            ResourceLimits
+	// BindToUnit 非空时给组件 unit 绑定 owner-death：绑定 unit（生产为 nervud.service）
+	// 停/failed 即连带停组件，杜绝 nervud 被 SIGKILL 后组件仍归 systemd 持有
+	BindToUnit string
 }
 
 func (StartSandboxedProcessRequest) Kind() Kind { return KindStartSandboxedProcess }
@@ -132,6 +135,7 @@ func (g *Gate) osStartSandboxedProcess(ctx context.Context, req StartSandboxedPr
 		GID:         req.GID,
 		WorkingDir:  req.WorkingDir,
 		Env:         req.Env,
+		BindToUnit:  req.BindToUnit,
 		Limits: systemd.Limits{
 			MemoryMaxBytes:  req.Limits.MemoryMaxBytes,
 			CPUQuotaPercent: req.Limits.CPUQuotaPercent,

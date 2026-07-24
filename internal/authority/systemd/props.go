@@ -68,6 +68,11 @@ type UnitSpec struct {
 	Env         []string
 	Limits      Limits
 	Sandbox     Sandbox
+	// BindToUnit 非空时给瞬态 unit 加 BindsTo/After=<该 unit>：绑定的 unit 一旦
+	// inactive/failed（含 nervud 被 SIGKILL 后 nervud.service 进入 failed），systemd
+	// 会连带停掉本 unit，杜绝「nervud 死了、组件还归 systemd 持有继续跑」。生产设为
+	// nervud.service；测试留空（避免绑一个不存在的 unit 导致起不来）
+	BindToUnit string
 }
 
 // property 是 StartTransientUnit 的一条属性（D-Bus 结构 (sv)）
@@ -153,6 +158,12 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 		{"RestrictAddressFamilies", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"AF_UNIX", "AF_INET", "AF_INET6"}})},
 	}
 
+	if spec.BindToUnit != "" {
+		// BindsTo：被绑 unit 停/failed 即连带停本 unit（owner-death 语义）。
+		// After：确保本 unit 在被绑 unit 之后启动，绑定关系才有意义
+		props = append(props, property{"BindsTo", dbus.MakeVariant([]string{spec.BindToUnit})})
+		props = append(props, property{"After", dbus.MakeVariant([]string{spec.BindToUnit})})
+	}
 	if len(spec.Env) > 0 {
 		props = append(props, property{"Environment", dbus.MakeVariant(spec.Env)})
 	}

@@ -24,6 +24,9 @@ type ctrlSpawner struct {
 	stopN    map[string]int
 	exit     map[string]chan systemd.ExitInfo
 	startErr error
+	// startGate 非 nil 时，StartTransientUnit 会先阻塞等它被关闭，用来模拟「组件仍在
+	// Starting、Handle 未落定」的窗口，测试此时 Stop 仍能真正停掉 unit（§P0 #4a）
+	startGate chan struct{}
 }
 
 func newCtrlSpawner() *ctrlSpawner {
@@ -44,11 +47,23 @@ func (s *ctrlSpawner) exitCh(name string) chan systemd.ExitInfo {
 
 func (s *ctrlSpawner) StartTransientUnit(_ context.Context, spec systemd.UnitSpec) error {
 	s.mu.Lock()
+	gate := s.startGate
+	s.mu.Unlock()
+	if gate != nil {
+		<-gate // 阻塞在 Starting 窗口，直到测试放行
+	}
+	s.mu.Lock()
 	s.startN[spec.Name]++
 	err := s.startErr
 	s.mu.Unlock()
 	s.exitCh(spec.Name) // 确保 channel 存在
 	return err
+}
+
+func (s *ctrlSpawner) stops(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopN[name]
 }
 
 func (s *ctrlSpawner) StopUnit(_ context.Context, name string) error {
@@ -279,5 +294,66 @@ func TestStopComponent_NoRestart(t *testing.T) {
 	waitFor(t, time.Second, func() bool {
 		inst, ok := m.LookupByUnit(unit)
 		return ok && inst.State == StateStopped
+	})
+}
+
+// §P0 #4a：在组件仍处于 Starting（Handle 尚未落定）时请求停止，最终该 unit 仍必须
+// 被真正 StopUnit——不能因为调用方那一刻快照到空 Handle 就漏停，留下野进程
+func TestStopDuringStarting_StillStopsUnit(t *testing.T) {
+	sp := newCtrlSpawner()
+	sp.startGate = make(chan struct{}) // 卡住 StartTransientUnit
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.app", "worker")
+
+	// 组件此刻卡在 Starting（StartTransientUnit 阻塞在 gate）。此时请求停止：调用方
+	// 会快照到空 Handle
+	done := make(chan struct{})
+	go func() { _ = m.StopComponent(context.Background(), "com.example.app", "worker"); close(done) }()
+	time.Sleep(20 * time.Millisecond) // 让 StopComponent 先跑（snapshot 空 handle）
+
+	// 放行启动：StartTransientUnit 返回，supervisor 拿到真 Handle，看到 stopCh 已关，
+	// 必须自己 StopUnit
+	close(sp.startGate)
+	<-done
+
+	// 最终该 unit 必须被 StopUnit（证明没有因空 Handle 漏停）
+	waitFor(t, 2*time.Second, func() bool { return sp.stops(unit) >= 1 })
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateStopped
+	})
+}
+
+// §P1 #6：ReloadPackage 停掉旧实例后用当前 Registry 的新版本重起 always-on 组件
+func TestReloadPackage_RestartsFromCurrentRegistry(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.app", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+
+	if err := m.ReloadPackage(context.Background(), "com.example.app"); err != nil {
+		t.Fatalf("ReloadPackage: %v", err)
+	}
+	// 旧实例被停、新实例被起：start 计数应升到 2，且最终 Running
+	waitFor(t, 2*time.Second, func() bool { return sp.starts(unit) == 2 })
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateRunning
 	})
 }

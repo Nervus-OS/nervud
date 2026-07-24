@@ -1,4 +1,4 @@
-// 本文件是组件实例的 supervisor 循环与崩溃分级处置（应用层架构决策 §5.4）。
+// Package service 本文件是组件实例的 supervisor 循环与崩溃分级处置（应用层架构决策 §5.4）。
 //
 // 每个运行中的实例由【一个】supervisor goroutine 独占监视：起进程 → 等退出 →
 // 判定（预期停止 / 崩溃）→ 按 criticality 退避重启或熔断。阻塞调用
@@ -27,6 +27,13 @@ const (
 	// systemd/D-Bus 卡住，也不让一个 supervisor 无限期阻塞。等一个长期运行组件
 	// 退出（WaitProcess）则用 m.ctx，不设此上限
 	startStopTimeout = 30 * time.Second
+
+	// nervudUnit 是 nervud 自身的 systemd unit 名（部署形态，见 ND内核介绍）。组件
+	// 瞬态 unit BindsTo 它，实现 owner-death：nervud 被 SIGKILL 后组件也被 systemd 停
+	nervudUnit = "nervud.service"
+	// registryDir 是 nervud 的可信状态目录，含 _grants/_devmode/ledger/uid 分配器。
+	// 组件沙箱把它设 InaccessiblePaths，任何组件都读不到
+	registryDir = "/var/lib/nervus/registry"
 )
 
 // unitName 由 (pkg, comp) 生成 systemd 瞬态 unit 名。pkg/comp 的字符集都禁止 '-'
@@ -56,6 +63,8 @@ func (m *Manager) startLocked(e pkgregistry.Entry, c pkgregistry.Component) {
 		switch inst.State {
 		case StateRunning, StateStarting:
 			return // 已在跑
+		default:
+			panic("unhandled default case")
 		}
 	}
 	inst := &Instance{
@@ -68,6 +77,7 @@ func (m *Manager) startLocked(e pkgregistry.Entry, c pkgregistry.Component) {
 		LaunchMode:  c.LaunchMode,
 		State:       StateStarting,
 		stopCh:      make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	m.byKey[key] = inst
 	m.byUnit[inst.Unit] = inst
@@ -82,7 +92,11 @@ func (m *Manager) requestStop(inst *Instance) {
 
 // supervise 是单个实例的监视循环
 func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.Component) {
-	defer m.wg.Done()
+	// done 在最后关闭：此刻 unit 已停、状态已定，ReloadPackage 可安全起新版本
+	defer func() {
+		close(inst.done)
+		m.wg.Done()
+	}()
 
 	backoff := m.backoffMin
 	for {
@@ -126,11 +140,16 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 
 		select {
 		case <-inst.stopCh:
-			// 预期停止：StopProcess 由 StopComponent/Stop 发起，这里只等退出确认
+			// 预期停止。【关键】由 supervisor 自己 StopProcess，不依赖外部调用方——
+			// StopComponent/Stop 可能在本组件还处于 Starting、Handle 尚未落定时就快照
+			// 到空 Handle 而没真正停掉它（§P0 修复）。此刻 supervisor 手里的 h 一定有效
+			m.stopProc(h)
 			m.drain(exitCh)
 			m.setState(inst, StateStopped)
 			return
 		case <-m.ctx.Done():
+			// 整体关停：同样由 supervisor 兜底停自己的 unit，避免 Starting 窗口漏停
+			m.stopProc(h)
 			m.drain(exitCh)
 			m.setState(inst, StateStopped)
 			return
@@ -156,6 +175,20 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 				return
 			}
 		}
+	}
+}
+
+// stopProc 停掉一个句柄对应的 systemd unit。用【独立】的有界 ctx 而非 m.ctx——
+// 关停路径上 m.ctx 已被 cancel，用它 StopProcess 会立刻 ctx 失败、unit 停不掉。
+// StopUnit 幂等，与外部 StopComponent/Stop 的调用重叠也无害
+func (m *Manager) stopProc(h authority.ProcessHandle) {
+	if h.Unit() == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), startStopTimeout)
+	defer cancel()
+	if err := m.auth.StopProcess(ctx, authority.SubjectKernel(), authority.StopProcessRequest{Handle: h}); err != nil {
+		m.log.Warn("service: supervisor StopProcess failed", "unit", h.Unit(), "err", err)
 	}
 }
 
@@ -259,14 +292,20 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		UID:        e.UID,
 		GID:        e.UID,
 		WorkingDir: dataDir,
+		BindToUnit: nervudUnit, // owner-death：nervud 死了组件也停（§P0 修复）
 		Limits: authority.ResourceLimits{
 			MemoryMaxBytes:  c.Limits.MemoryMaxMB * 1024 * 1024,
 			CPUQuotaPercent: c.Limits.CPUQuotaPercent,
 			TasksMax:        uint64(c.Limits.TasksMax),
 		},
-		ReadWritePaths:    []string{dataDir},
-		ReadOnlyPaths:     []string{verDir},
-		InaccessiblePaths: []string{filepath.Join(m.inv.PackageRoot)}, // 其它包目录：strict 下本就只读；registry 单独 inaccessible
+		ReadWritePaths: []string{dataDir},
+		ReadOnlyPaths:  []string{verDir},
+		// 【不能】把整个 PackageRoot 设 InaccessiblePaths——那会连组件自己的代码目录
+		// （verDir 在 PackageRoot 之下）一起隐藏，且 InaccessiblePaths 隐藏子目录后无法
+		// 再靠嵌套 ReadOnlyPaths 恢复，native ELF / JAR / .so 全都读不到、起不来。
+		// 隔离靠：① ProtectSystem=strict 让整个 fs 只读（含别的包代码目录）② 别的包数据
+		// 目录 0700 归各自 UID，DAC 天然挡住 ③ 单独把 registry 敏感目录设 Inaccessible
+		InaccessiblePaths: []string{registryDir},
 		ContainedPaths:    []string{entryPath},
 	}
 

@@ -111,6 +111,7 @@ func (f *fakeAuditor) Record(_ context.Context, ev audit.Event) { f.events = app
 type fakePermissionArbiter struct {
 	intersect func(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string)
 	replaced  [][]permission.Grant
+	cleared   []string
 }
 
 func (f *fakePermissionArbiter) Intersect(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string) {
@@ -122,6 +123,11 @@ func (f *fakePermissionArbiter) Intersect(requested []string, trust identity.Tru
 
 func (f *fakePermissionArbiter) Replace(grants []permission.Grant) error {
 	f.replaced = append(f.replaced, grants)
+	return nil
+}
+
+func (f *fakePermissionArbiter) ClearPackage(pkg string) error {
+	f.cleared = append(f.cleared, pkg)
 	return nil
 }
 
@@ -171,7 +177,22 @@ func newValidStagingWithKey(
 		`"digests":{"bin":%q},`+
 		`"components":[{"id":"main","type":"app","entry":"bin","runtime":"native","launch_mode":"manual"}]}`,
 		packageID, version, versionCode, testABI(), hashOf(content))
-	return staging, []byte(manifest), signManifest(t, priv, []byte(manifest))
+	mb := []byte(manifest)
+	sig := signManifest(t, priv, mb)
+	writeStagingMetadata(t, staging, mb, sig)
+	return staging, mb, sig
+}
+
+// writeStagingMetadata 把 manifest.json/manifest.sig 写进 staging，满足 Install 的
+// verifyStagingMetadata（落盘树里的元数据必须与验签字节逐字节一致）
+func writeStagingMetadata(t *testing.T, staging string, manifestBytes, sig []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(staging, ManifestFileName), manifestBytes, 0o644); err != nil {
+		t.Fatalf("write staging manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, SignatureFileName), sig, 0o644); err != nil {
+		t.Fatalf("write staging sig: %v", err)
+	}
 }
 
 func TestInstall_Success(t *testing.T) {
@@ -321,6 +342,7 @@ func TestInstall_ComputesGrantedPermissions(t *testing.T) {
 		`"components":[{"id":"main","type":"app","entry":"bin","runtime":"native","launch_mode":"manual"}]}`,
 		testABI(), hashOf(content)))
 	sig := signManifest(t, newDevKey(t), manifestBytes)
+	writeStagingMetadata(t, staging, manifestBytes, sig)
 
 	entry, err := mod.Install(context.Background(), InstallTransaction{
 		ManifestBytes: manifestBytes, SigBlock: sig, StagingDir: staging, Source: SourceDynamicInstall,

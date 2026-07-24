@@ -119,13 +119,20 @@ func (g *grantStore) persistLocked() error {
 // Catalog，避免它既管状态又管定义两件事
 func (g *grantStore) set(pkg, perm string, state GrantState, isMotionGroup bool) error {
 	g.mu.Lock()
-	prev := g.states[grantKey{pkg, perm}]
-	g.states[grantKey{pkg, perm}] = state
-	err := g.persistLocked()
-	g.mu.Unlock()
-	if err != nil {
+	key := grantKey{pkg, perm}
+	prev, had := g.states[key]
+	g.states[key] = state
+	if err := g.persistLocked(); err != nil {
+		// 落盘失败即回滚内存，绝不让内存态领先磁盘（重启后磁盘旧值会赢，造成不一致）
+		if had {
+			g.states[key] = prev
+		} else {
+			delete(g.states, key)
+		}
+		g.mu.Unlock()
 		return err
 	}
+	g.mu.Unlock()
 
 	// 从「已授予」转到「非授予」= 撤销。motion 组权限撤销必须让 control 撤掉该包
 	// 的全部 lease（含递增 epoch），否则已拿到 lease 的 App 还能继续让机器人动
@@ -145,6 +152,24 @@ func (g *grantStore) set(pkg, perm string, state GrantState, isMotionGroup bool)
 		})
 	}
 	return nil
+}
+
+// clearPackage 删除某 Package 的全部运行期授予状态并落盘。卸载时调用——否则同 ID
+// 重装会继承旧的危险权限授予（§P1 修复）
+func (g *grantStore) clearPackage(pkg string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	changed := false
+	for k := range g.states {
+		if k.pkg == pkg {
+			delete(g.states, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return g.persistLocked()
 }
 
 // writeFileAtomic 原子写文件（先临时文件再 rename）。permission 的运行期授予状态

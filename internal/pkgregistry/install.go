@@ -6,8 +6,11 @@
 package pkgregistry
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/nervus-os/nervud/internal/audit"
@@ -15,6 +18,32 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
 )
+
+// ErrStagingMetadataMismatch staging 里的 manifest.json/manifest.sig 与调用方提交、
+// 已验签的字节不一致——「验签 A、落盘 B」的信号，拒绝安装
+var ErrStagingMetadataMismatch = errors.New("pkgregistry: staging manifest/signature differs from verified bytes")
+
+// verifyStagingMetadata 核对 staging 目录里的 manifest.json 与 manifest.sig 与调用方
+// 传入、已经过验签的字节【逐字节一致】。这样落盘（提交）的那棵树里的 manifest/sig
+// 就是被验证的同一个对象，堵住 digest 豁免这两个文件所留下的「验签与落盘不是同一份」
+// 缺口（§P0）。payload 文件由 VerifyDigests 覆盖，此处只补上被豁免的两份元数据
+func verifyStagingMetadata(stagingDir string, manifestBytes, sigBlock []byte) error {
+	mGot, err := os.ReadFile(filepath.Join(stagingDir, ManifestFileName))
+	if err != nil {
+		return fmt.Errorf("%w: read staging manifest: %v", ErrStagingMetadataMismatch, err)
+	}
+	if !bytes.Equal(mGot, manifestBytes) {
+		return fmt.Errorf("%w: manifest.json", ErrStagingMetadataMismatch)
+	}
+	sGot, err := os.ReadFile(filepath.Join(stagingDir, SignatureFileName))
+	if err != nil {
+		return fmt.Errorf("%w: read staging signature: %v", ErrStagingMetadataMismatch, err)
+	}
+	if !bytes.Equal(sGot, sigBlock) {
+		return fmt.Errorf("%w: manifest.sig", ErrStagingMetadataMismatch)
+	}
+	return nil
+}
 
 // PackageInstaller 是 pkgregistry 对 authority.Gate 的窄接口依赖
 //
@@ -38,6 +67,8 @@ type IdentityUpdater interface {
 type PermissionArbiter interface {
 	Intersect(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string)
 	Replace(grants []permission.Grant) error
+	// ClearPackage 删除某 Package 的运行期授予状态（卸载用）
+	ClearPackage(packageID string) error
 }
 
 // InstallTransaction 是一次装包事务的输入
@@ -60,18 +91,35 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Source 必须是一个明确的合法来源：developer 必签、OEM 副署等准入检查都只对
-	// SourceDynamicInstall 触发，一个漏填 Source 的事务若被放行，会绕过全部准入、
-	// 装成 source=unspecified 的记账文件，重启扫描时又因 source 不匹配被忽略，
-	// 形成“本次可见、重启即消失”的幽灵包（应用层架构决策 §4）
-	if tx.Source != SourceSystemImage && tx.Source != SourceDynamicInstall {
-		err := fmt.Errorf("%w: %q", ErrInvalidSource, tx.Source)
+	// Install 是【动态安装专用】入口，只接受 SourceDynamicInstall（§P1 修复）。
+	// 系统镜像包【绝不】走这里——它们由 scanSystemImage 直接构造 Entry。若允许调用方
+	// 传 SourceSystemImage，就能绕过 developer 必签 / OEM 副署等只在动态分支执行的准入，
+	// 还能经 Arbitrate 白拿系统 trust。两条入口不可混用
+	if tx.Source != SourceDynamicInstall {
+		err := fmt.Errorf("%w: Install only accepts dynamic-install source, got %q", ErrInvalidSource, tx.Source)
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err
 	}
 
 	manifest, err := ParseManifest(tx.ManifestBytes)
 	if err != nil {
+		m.auditInstall(ctx, tx, false, err)
+		return Entry{}, err
+	}
+
+	// §P0 修复：验证的 manifest/签名必须与落盘树里的【逐字节一致】。digest.go 有意
+	// 豁免 manifest.json/manifest.sig 的 Extra 检查（它们不能自散列），因此若不在此
+	// 显式比对，攻击者可「验签 A、落盘 B」——tx.ManifestBytes 过了验签，staging 里却
+	// 放另一份 manifest.json，提交后重启扫描读到的是未验证的那份
+	if err := verifyStagingMetadata(tx.StagingDir, tx.ManifestBytes, tx.SigBlock); err != nil {
+		m.auditInstall(ctx, tx, false, err)
+		return Entry{}, err
+	}
+
+	// §P1 修复：动态安装不得占用系统镜像包的 package_id。否则可覆盖系统 Entry、
+	// 继承其身份，并在重启扫描时制造重复 ID
+	if cur, ok := m.registry.Lookup(manifest.PackageID); ok && cur.Source == SourceSystemImage {
+		err := fmt.Errorf("%w: %q is a system-image package", ErrSystemPackageImmutable, manifest.PackageID)
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err
 	}
@@ -233,6 +281,17 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		return Entry{}, err
 	}
 	committed = true // commit 成功：不再补偿删除
+
+	// 升级：把运行中的旧版本组件切到新版本。否则旧版本继续运行、崩溃后还被按旧
+	// Entry 重启（§P1 升级修复）。ReloadPackage 会先停旧实例再起新版本，共享 unit
+	// 名的起/停不竞态。stopper 未接线（nil）时跳过——那时也没有在跑的组件
+	if hadPrev && m.stopper != nil {
+		if rerr := m.stopper.ReloadPackage(ctx, manifest.PackageID); rerr != nil {
+			m.aud.Record(ctx, audit.Event{
+				Action: "pkgregistry.Install.reload", Subject: manifest.PackageID, Denied: true, Err: rerr,
+			})
+		}
+	}
 
 	m.auditInstall(ctx, tx, true, nil)
 	return entry, nil

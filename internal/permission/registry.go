@@ -173,6 +173,16 @@ func (r *Registry) GrantStateOf(packageID, permission string) GrantState {
 	return r.grants.state(packageID, permission)
 }
 
+// ClearPackage 删除某 Package 的全部运行期授予状态（卸载时调用，§6/§P1）。安装期
+// 集合（snap）由 pkgregistry 的 Replace 投影负责剔除，这里只清运行期 _grants.json，
+// 否则同 ID 重装会继承旧的危险权限授予
+func (r *Registry) ClearPackage(packageID string) error {
+	if r == nil {
+		return nil
+	}
+	return r.grants.clearPackage(packageID)
+}
+
 // Len 返回当前持有已授予权限记录的 Package 数，供诊断与测试使用
 func (r *Registry) Len() int {
 	if r == nil {

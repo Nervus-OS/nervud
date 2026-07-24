@@ -81,6 +81,9 @@ type Instance struct {
 	// WaitProcess 返回后不要重启
 	stopCh   chan struct{}
 	stopOnce sync.Once
+	// done 在 supervisor 完全退出（含停掉 unit）后关闭。ReloadPackage 升级时据此
+	// 确认旧实例已彻底停掉，再起新版本，避免共享 unit 名的起/停竞态
+	done chan struct{}
 }
 
 // snapshot 返回 Instance 的只读副本（不含内部 channel），供跨包返回
@@ -269,6 +272,49 @@ func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
 		return fmt.Errorf("service: component %s/%s is disabled", pkg, comp)
 	}
 	m.startLocked(e, c)
+	return nil
+}
+
+// ReloadPackage 在升级后把某 Package 的运行实例切换到新版本（应用层架构决策 §4.3）：
+// 停掉全部旧实例并等它们彻底退出（unit 停稳），再用【当前 Registry 的新版本】重起
+// always-on 组件。先停后起是必须的——组件 unit 名与版本无关，旧 unit 未停就起新版本
+// 会在同一个 unit 名上发生起/停竞态（§P1 升级修复）
+func (m *Manager) ReloadPackage(ctx context.Context, pkg string) error {
+	// 1. 摘下并请求停掉该包全部旧实例
+	m.mu.Lock()
+	var olds []*Instance
+	for key, inst := range m.byKey {
+		if key.pkg == pkg {
+			olds = append(olds, inst)
+			m.requestStop(inst)
+			delete(m.byKey, key)
+			delete(m.byUnit, inst.Unit)
+		}
+	}
+	m.mu.Unlock()
+
+	// 2. 等旧 supervisor 彻底退出（它们自会 stopProc 停掉 unit）。不持 mu 等待，
+	//    否则与 supervisor 的 setState/onStarted 争锁死锁
+	for _, inst := range olds {
+		select {
+		case <-inst.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// 3. 用新版本重起 always-on 组件（on-demand/manual 等 Resolve/显式请求再拉起）
+	e, ok := m.pkgs.Lookup(pkg)
+	if !ok {
+		return nil // 升级后又被卸载：无需重起
+	}
+	m.mu.Lock()
+	for _, c := range e.Manifest.Components {
+		if c.LaunchMode == pkgregistry.LaunchAlwaysOn && !e.ComponentDisabled(c.ID) {
+			m.startLocked(e, c)
+		}
+	}
+	m.mu.Unlock()
 	return nil
 }
 

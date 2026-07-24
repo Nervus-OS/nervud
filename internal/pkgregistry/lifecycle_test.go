@@ -10,12 +10,22 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
-// fakeStopper 记录被停的组件
-type fakeStopper struct{ stopped []string }
+// fakeStopper 记录被停的组件与 reload 的包
+type fakeStopper struct {
+	stopped   []string
+	reloaded  []string
+	stopErr   error
+	reloadErr error
+}
 
 func (f *fakeStopper) StopComponent(_ context.Context, pkg, comp string) error {
 	f.stopped = append(f.stopped, pkg+"/"+comp)
-	return nil
+	return f.stopErr
+}
+
+func (f *fakeStopper) ReloadPackage(_ context.Context, pkg string) error {
+	f.reloaded = append(f.reloaded, pkg)
+	return f.reloadErr
 }
 
 // installOne 用一把随机 dev key 装一个动态包，返回其 Entry
