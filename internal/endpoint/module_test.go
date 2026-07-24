@@ -100,6 +100,24 @@ func (f *fakeStarter) EnsureStarted(ctx context.Context, pkg, comp string) error
 	return f.fn(ctx, pkg, comp)
 }
 
+// fakeResourceResolver 镜像 resource.DefaultRegistry() 的 v1 行为（只有
+// base.main 一条记录），不直接 import internal/resource——保持 endpoint 包
+// 测试对窄接口的实现方式可控，同 fakePkgs/fakePerm/fakeStarter 的既有风格
+type fakeResourceResolver struct{}
+
+func newFakeResourceResolver() *fakeResourceResolver { return &fakeResourceResolver{} }
+
+func (f *fakeResourceResolver) Resolve(resourceType, role string) (string, bool) {
+	if resourceType == resourceTypeMotionBase && role == resourceRoleMain {
+		return "base.main", true
+	}
+	return "", false
+}
+
+func (f *fakeResourceResolver) Valid(handle string) bool {
+	return handle == "base.main"
+}
+
 type fakeAudit struct {
 	mu  sync.Mutex
 	evs []audit.Event
@@ -144,7 +162,7 @@ func callerEntry(pkg string) pkgregistry.Entry {
 }
 
 func newTestModule(pkgs *fakePkgs, perm *fakePerm, starter *fakeStarter, aud *fakeAudit) *Module {
-	return New(pkgs, perm, starter, aud, nil)
+	return New(pkgs, perm, starter, newFakeResourceResolver(), aud, nil)
 }
 
 // ---- RegisterEndpoint --------------------------------------------------------
@@ -281,8 +299,8 @@ func TestResolveEndpoint_Success(t *testing.T) {
 	if succ.GetEndpointId() != 1 {
 		t.Fatalf("endpoint_id = %d, want 1", succ.GetEndpointId())
 	}
-	if succ.GetResourceHandle() != resourceHandleBaseMain {
-		t.Fatalf("resource_handle = %q, want %q", succ.GetResourceHandle(), resourceHandleBaseMain)
+	if succ.GetResourceHandle() != "base.main" {
+		t.Fatalf("resource_handle = %q, want %q", succ.GetResourceHandle(), "base.main")
 	}
 
 	// Route 应该能查到刚创建的 binding，指向注册时的 conn 与 service 侧 id
@@ -352,6 +370,40 @@ func TestResolveEndpoint_InterfaceNotFound(t *testing.T) {
 	})
 	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
 		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
+	}
+}
+
+// TestResolveEndpoint_EmptySelectorMatchesExplicitDefault 覆盖 Resource模块
+// 设计方案.md §7 的收尾用例：空 Selector 走隐式默认值、显式
+// {type=nervus.resource.motion.base, role=main} 走精确匹配，两条路径必须
+// 殊途同归，得到相同的 resource_handle
+func TestResolveEndpoint_EmptySelectorMatchesExplicitDefault(t *testing.T) {
+	pkgs := newFakePkgs(
+		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
+		callerEntry("com.caller"),
+	)
+	perm := newFakePerm()
+	perm.grant("com.svc", permServiceRegister)
+	perm.grant("com.caller", testPerm)
+	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
+
+	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
+
+	implicit := m.ResolveEndpoint("conn-implicit", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
+		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
+	})
+	explicit := m.ResolveEndpoint("conn-explicit", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
+		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
+		Selector: &ipcv1.ResourceSelector{Type: resourceTypeMotionBase, Role: resourceRoleMain},
+	})
+
+	implicitSucc, explicitSucc := implicit.GetSuccess(), explicit.GetSuccess()
+	if implicitSucc == nil || explicitSucc == nil {
+		t.Fatalf("want both success, got implicit=%+v explicit=%+v", implicit.GetFailure(), explicit.GetFailure())
+	}
+	if implicitSucc.GetResourceHandle() != explicitSucc.GetResourceHandle() {
+		t.Fatalf("resource_handle mismatch: implicit=%q explicit=%q",
+			implicitSucc.GetResourceHandle(), explicitSucc.GetResourceHandle())
 	}
 }
 

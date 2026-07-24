@@ -67,9 +67,10 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "missing permission "+permID)
 	}
 
-	// 步骤 4：resource_handle 校验（[REWRITE-v1] 单一执行器，不查 Resource 目录）
+	// 步骤 4：resource_handle 校验——空字符串表示未指定、视为合法，非空则必须
+	// 是 Resource Registry 里的一个已知句柄（Resource模块设计方案.md §4.3）
 	resourceHandle := req.GetResourceHandle()
-	if resourceHandle != "" && resourceHandle != resourceHandleBaseMain {
+	if resourceHandle != "" && !m.resources.Valid(resourceHandle) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT, "unsupported resource_handle")
 	}
 

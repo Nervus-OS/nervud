@@ -23,6 +23,7 @@ import (
 	"github.com/nervus-os/nervud/internal/permission"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/preflight"
+	"github.com/nervus-os/nervud/internal/resource"
 	"github.com/nervus-os/nervud/internal/safety"
 	"github.com/nervus-os/nervud/internal/scheduler"
 	"github.com/nervus-os/nervud/internal/service"
@@ -299,7 +300,12 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	)
 	k.Register(pkgMod)                  // Package Registry + 安装裁决
 	k.Register(permission.New(permReg)) // capability 执法：Grant 投影由 pkgregistry 推送
-	//   k.Register(resource.New(...))       // Resource Registry + Provider 绑定
+
+	// Resource Registry：v1 编译期常量表，唯一执行器 base.main（Resource模块设计
+	// 方案.md）。不依赖任何已装配的模块，注册在 endpoint 之前——endpoint.New 需要
+	// 它做 Selector 解析与 resource_handle 校验
+	resMod := resource.New(resource.DefaultRegistry())
+	k.Register(resMod)
 
 	// HUMAN/AI ControlLease + deadman + Control Lane(RR 40)。读/递增与 safety 同一个 gate。
 	// 注册在 safety 之前 = 启动更早、关闭更晚：关停时 safety 先收工，control 最后撤租。
@@ -335,7 +341,7 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// Endpoint 注册/解析/路由：把 endpoint_id/method_id 推导 permission ID 的手段
 	// 接上（架构总览 §7 待办列表里优先级最高的一条）。注册在 service 之后、ipc 之前
 	// ——Resolve 时 on-demand 拉起组件要靠 svcMgr.EnsureStarted 已就绪
-	epMod := endpoint.New(pkgReg, permReg, svcMgr, aud, logger)
+	epMod := endpoint.New(pkgReg, permReg, svcMgr, resMod, aud, logger)
 	k.Register(epMod)
 
 	// IPC 控制面 UDS：最后开门。依赖上面全部就绪（Identity/Permission/Safety/Service/

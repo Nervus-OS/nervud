@@ -29,7 +29,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 	}
 
 	// 步骤 2：Selector 校验
-	resourceHandle, ok := resolveSelector(req.GetSelector())
+	resourceHandle, ok := m.resolveSelector(req.GetSelector())
 	if !ok {
 		m.audit(caller, "endpoint.ResolveEndpoint", true, errResourceNotFound, interfaceID)
 		return resolveFailure(reqID, ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
@@ -135,20 +135,16 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 
 // resolveSelector 校验 ResourceSelector 并返回对应的 resource_handle
 //
-// v1 [REWRITE-v1] 只有 base.main 一种合法取值：留空视为隐式取该值，非空则必须
-// 精确匹配（设计方案 §5.2 第 2 步 / §6.3）。internal/resource 落地后这里要改成
-// 真正查 Resource Registry
-func resolveSelector(sel *ipcv1.ResourceSelector) (string, bool) {
-	if sel == nil {
-		return resourceHandleBaseMain, true
+// 留空视为隐式取 {type=nervus.resource.motion.base, role=main}（设计方案
+// §5.2 第 2 步 / Resource模块设计方案.md §4.2）；非空则把 Selector 的
+// type/role 原样交给 m.resources.Resolve 精确匹配。这条"空 selector 等于
+// 哪个默认值"的规则属于 ResolveEndpoint 这个 wire 消息自身的协议层语义，
+// 因此翻译逻辑留在这里，不下沉进 internal/resource
+func (m *Module) resolveSelector(sel *ipcv1.ResourceSelector) (string, bool) {
+	if sel == nil || (sel.GetType() == "" && sel.GetRole() == "") {
+		return m.resources.Resolve(resourceTypeMotionBase, resourceRoleMain)
 	}
-	if sel.GetType() == "" && sel.GetRole() == "" {
-		return resourceHandleBaseMain, true
-	}
-	if sel.GetType() == resourceTypeMotionBase && sel.GetRole() == resourceRoleMain {
-		return resourceHandleBaseMain, true
-	}
-	return "", false
+	return m.resources.Resolve(sel.GetType(), sel.GetRole())
 }
 
 // resolveFailure 组装一个带 ResolveEndpointErrorDetail 的失败结果。

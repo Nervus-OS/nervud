@@ -14,12 +14,13 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// v1 [REWRITE-v1] 固定的唯一合法 Resource 选择器与句柄（设计方案 §6.3）。
-// internal/resource 落地后这里要改成真正查 Resource Registry
+// resourceTypeMotionBase/resourceRoleMain 是空 Selector 时的隐式默认值
+// （Resource模块设计方案.md §4.2）："空 selector 等于哪个默认值"是
+// ResolveEndpoint 这个 wire 消息自身的协议层语义，不属于"Registry 里有哪些
+// 资源"，因此不下沉进 internal/resource，仍留在 endpoint 包内
 const (
 	resourceTypeMotionBase = "nervus.resource.motion.base"
 	resourceRoleMain       = "main"
-	resourceHandleBaseMain = "base.main"
 )
 
 // perm.service.register(.private) 的权限 ID 必须与 permission.DefaultCatalog
@@ -70,18 +71,28 @@ type ComponentStarter interface {
 	EnsureStarted(ctx context.Context, pkg, comp string) error
 }
 
+// ResourceResolver 是对 resource.Registry 的窄接口：把 (resource_type, role)
+// 解析成 resource_handle，并校验一个 handle 当前是否已知（Resource模块设计
+// 方案.md §2/§6）。实现由 *resource.Registry（或转发它的 *resource.Module）
+// 隐式满足，同 PackageLookup/PermissionChecker/ComponentStarter 的既有模式
+type ResourceResolver interface {
+	Resolve(resourceType, role string) (handle string, ok bool)
+	Valid(handle string) bool
+}
+
 // Module 是 endpoint 的 kernel.Module 实现，持有 Register/Resolve/Route 的
 // 全部运行期状态
 //
 // v1 的 Start/Stop 基本是空操作：它不持有自己的 RT Lane 或后台循环，全部状态
 // 都挂在每条 IPC 连接的生命周期上，随连接创建/销毁（设计方案 §2）
 type Module struct {
-	pkgs    PackageLookup
-	perm    PermissionChecker
-	starter ComponentStarter
-	aud     audit.Recorder
-	log     *slog.Logger
-	catalog InterfaceCatalog
+	pkgs      PackageLookup
+	perm      PermissionChecker
+	starter   ComponentStarter
+	resources ResourceResolver
+	aud       audit.Recorder
+	log       *slog.Logger
+	catalog   InterfaceCatalog
 
 	mu sync.Mutex
 
@@ -99,11 +110,12 @@ type Module struct {
 
 // New 构造 endpoint 的 Module
 //
-// 窄接口注入（main.go 的装配范式）：pkgs/perm/starter 分别由 *pkgregistry.Registry
-// /*permission.Registry/*service.Manager 隐式满足
-func New(pkgs PackageLookup, perm PermissionChecker, starter ComponentStarter, aud audit.Recorder, log *slog.Logger) *Module {
+// 窄接口注入（main.go 的装配范式）：pkgs/perm/starter/resources 分别由
+// *pkgregistry.Registry/*permission.Registry/*service.Manager/*resource.Module
+// 隐式满足
+func New(pkgs PackageLookup, perm PermissionChecker, starter ComponentStarter, resources ResourceResolver, aud audit.Recorder, log *slog.Logger) *Module {
 	return &Module{
-		pkgs: pkgs, perm: perm, starter: starter, aud: aud, log: log,
+		pkgs: pkgs, perm: perm, starter: starter, resources: resources, aud: aud, log: log,
 		catalog:       DefaultInterfaceCatalog(),
 		byConn:        make(map[ConnHandle]*connState),
 		byInterface:   make(map[string][]*serviceRegistration),
