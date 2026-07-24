@@ -4,6 +4,25 @@ package permission
 
 import "github.com/nervus-os/nervud/internal/identity"
 
+// V1GrantAll 是 v1 交付期的权限总开关。
+//
+// 打开后两件事同时生效：
+//   - 安装时：manifest 申请什么就授予什么，不查 Catalog、不看 trust 门槛、
+//     不看 RequireSignerRole（见 Intersect）
+//   - 运行期：GrantUser（危险）权限不再要求用户确认状态 == Granted（见 Registry.Allowed）
+//
+// 为什么是一个常量而不是 flag：它放宽的是安全裁决，绝不能变成运行期可开关的
+// 东西——生产二进制里不该存在一个「把权限系统关掉」的命令行参数。要恢复执法
+// 就把它改回 false 重新编译，改动点在 grep V1GrantAll 能找全的两处。
+//
+// 恢复执法时要一并处理的事：权限 ID 的正式命名空间与取值表仍未冻结
+// （见 catalog.go 的 DefaultCatalog），届时 Catalog 必须先补全，否则 Intersect
+// 会把所有未登记的权限一律拒掉。
+//
+// 注意本开关【不】放宽「必须在 manifest 里声明」这一条：没申请过的权限
+// 仍然进不了 install-set，Allowed 照样返回 false。
+const V1GrantAll = true
+
 // Intersect 计算一个 Package 实际能拿到的权限集合
 //
 // requested 来自 manifest.Permissions，trust 来自 pkgregistry.Arbitrate 已经
@@ -26,6 +45,13 @@ import "github.com/nervus-os/nervud/internal/identity"
 // 签的包，比单纯 trust 等级更细。空集表示无可用角色信息，
 // 带 RequireSignerRole 的权限一律拒
 func Intersect(requested []string, cat Catalog, trust identity.TrustProfile, signerRoles []string) (granted, denied []string) {
+	// v1：申请即授予。放在最前面短路，连 Catalog 查表都跳过——否则未登记的
+	// 权限 ID（OEM 自定义权限、还没进 DefaultCatalog 的标准权限）仍会被拒，
+	// 达不到「系统服务在描述文件里声明、用户软件申请就能用」的效果。
+	if V1GrantAll {
+		return append([]string(nil), requested...), nil
+	}
+
 	roleSet := make(map[string]struct{}, len(signerRoles))
 	for _, r := range signerRoles {
 		roleSet[r] = struct{}{}

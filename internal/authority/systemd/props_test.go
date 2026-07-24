@@ -167,3 +167,39 @@ func TestValidUnitName(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildProperties_DeviceAccessDefaultsClosed(t *testing.T) {
+	// 默认（AllowDeviceAccess 零值）必须保持封闭 /dev：这是绝大多数组件走的分支，
+	// 一旦默认值漂成放开，任意动态安装的包都能摸到设备节点
+	m := propMap(t, validSpec())
+	if m["PrivateDevices"] != true {
+		t.Errorf("PrivateDevices = %v, want true (默认必须封闭)", m["PrivateDevices"])
+	}
+	if m["DevicePolicy"] != "closed" {
+		t.Errorf("DevicePolicy = %v, want closed (默认必须封闭)", m["DevicePolicy"])
+	}
+}
+
+func TestBuildProperties_DeviceAccessOptIn(t *testing.T) {
+	spec := validSpec()
+	spec.Sandbox.AllowDeviceAccess = true
+	m := propMap(t, spec)
+
+	if m["PrivateDevices"] != false {
+		t.Errorf("PrivateDevices = %v, want false", m["PrivateDevices"])
+	}
+	if m["DevicePolicy"] != "auto" {
+		t.Errorf("DevicePolicy = %v, want auto", m["DevicePolicy"])
+	}
+	// 放开设备【不得】连带放松其它沙箱硬项——这是本开关最容易出错的地方：
+	// 一个"给 Provider 开权限"的改动顺手把系统调用过滤也关掉，比不加开关更糟
+	if m["NoNewPrivileges"] != true {
+		t.Error("放开设备访问不得关闭 NoNewPrivileges")
+	}
+	if m["ProtectSystem"] != "strict" {
+		t.Error("放开设备访问不得放松 ProtectSystem")
+	}
+	if rs, ok := m["SystemCallFilter"].(restrictSet); !ok || !rs.Whitelist {
+		t.Error("放开设备访问不得放松 SystemCallFilter")
+	}
+}

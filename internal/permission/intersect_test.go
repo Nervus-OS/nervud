@@ -31,6 +31,7 @@ func TestIntersect_GrantsWhenTrustMeetsThreshold(t *testing.T) {
 }
 
 func TestIntersect_DeniesWhenTrustBelowThreshold(t *testing.T) {
+	skipIfGrantAll(t)
 	cat := testCatalog(t)
 	granted, denied := Intersect([]string{"perm.ordinary", "perm.platform"}, cat, identity.TrustOrdinary, nil)
 	if len(granted) != 1 || granted[0] != "perm.ordinary" {
@@ -42,6 +43,7 @@ func TestIntersect_DeniesWhenTrustBelowThreshold(t *testing.T) {
 }
 
 func TestIntersect_DeniesUnregisteredPermissionID(t *testing.T) {
+	skipIfGrantAll(t)
 	cat := testCatalog(t)
 	granted, denied := Intersect([]string{"perm.unknown"}, cat, identity.TrustPlatform, nil)
 	if len(granted) != 0 {
@@ -61,6 +63,7 @@ func TestIntersect_EmptyRequestYieldsEmptyResult(t *testing.T) {
 }
 
 func TestIntersect_ZeroValueCatalogDeniesEverything(t *testing.T) {
+	skipIfGrantAll(t)
 	var cat Catalog
 	granted, denied := Intersect([]string{"perm.a", "perm.b"}, cat, identity.TrustPlatform, nil)
 	if len(granted) != 0 {

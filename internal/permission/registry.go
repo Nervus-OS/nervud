@@ -132,6 +132,12 @@ func (r *Registry) Allowed(packageID, permission string) bool {
 	if _, ok = perms[permission]; !ok {
 		return false // 安装期就没授予（或已被卸载/降权投影出去）
 	}
+	// v1：不做运行期用户确认，install-set 命中即放行（见 V1GrantAll）。
+	// 注意上面那条 install-set 检查【不】跳过：没在 manifest 里申请过的权限
+	// 依然拿不到，v1 放宽的是「要不要确认」，不是「要不要声明」。
+	if V1GrantAll {
+		return true
+	}
 	// GrantUser（危险）权限：安装期集合只证明可请求，实际放行还要运行期状态
 	// == Granted（两者都通过才放行）
 	if entry, ok := r.catalog.Lookup(permission); ok && entry.Mode == GrantUser {

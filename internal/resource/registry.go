@@ -67,16 +67,31 @@ func NewRegistry(list []Entry) (*Registry, error) {
 	return &Registry{entries: entries, byHandle: byHandle}, nil
 }
 
-// DefaultRegistry 返回编译期硬编码的 v1 Resource 定义表：唯一执行器 base.main
+// DefaultRegistry 返回编译期硬编码的 v1 Resource 定义表
 //
 // 不从任何 manifest 派生 - 与 permission.DefaultCatalog/
 // endpoint.DefaultInterfaceCatalog 同一个"不要在没有产品侧输入之前堆更多看起来
 // 完备的条目"的自洽性原则
+//
+// 这张表【会拦人】：ResolveEndpoint 第 2 步要把 selector 解析成 resource_handle，
+// 表里没有对应的 (type, role) 就直接 RESOURCE_NOT_FOUND。新增一款硬件必须先
+// 在这里登记——v2 由 Provider Descriptor 数据驱动后本函数即可退役。
 func DefaultRegistry() *Registry {
 	reg, err := NewRegistry([]Entry{
 		{
+			// 机械狗 / 移动底盘。ResolveEndpoint 的空 selector 隐式落到这条
+			// （见 endpoint.resolveSelector），所以移动主线不必显式填 selector
 			Handle:     "base.main",
 			Type:       "nervus.resource.motion.base",
+			Role:       "main",
+			AccessMode: "exclusive_control",
+		},
+		{
+			// 机械臂。type/role 取值与 nervus-ipc 的 manipulator.proto 文件头
+			// 声明一致（nervus.resource.manipulator.arm，role 如 main/left/right）；
+			// 对不上就会解析不到 handle。多臂机型在这里按 role 逐条加
+			Handle:     "arm.main",
+			Type:       "nervus.resource.manipulator.arm",
 			Role:       "main",
 			AccessMode: "exclusive_control",
 		},

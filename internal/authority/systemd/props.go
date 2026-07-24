@@ -54,6 +54,23 @@ type Sandbox struct {
 	// ReadOnlyPaths / InaccessiblePaths 让其它 Package 的目录不可读写
 	ReadOnlyPaths     []string
 	InaccessiblePaths []string
+
+	// AllowDeviceAccess 放开该 unit 对宿主设备节点的访问：PrivateDevices 关闭、
+	// DevicePolicy 由 closed 放宽为 auto。
+	//
+	// 为什么需要这个口子：默认的 PrivateDevices=true 给进程挂一个只含
+	// null/zero/full/random/urandom/tty 的私有 /dev，DevicePolicy=closed 再把
+	// cgroup 设备白名单收紧到同一批。两者叠加后，进程【无论以什么 UID 运行】
+	// 都看不到 /dev/ttyUSB*、CAN、SPI、i2c —— 也就是说驱动机器人硬件的
+	// 系统服务在默认沙箱里根本起不到作用。提权到 root 并不能绕开这一点：
+	// 这是 mount namespace 与 cgroup 设备控制器的限制，不是 DAC 权限问题。
+	//
+	// 只应对【系统镜像内置】的 Provider 打开（见 service.buildStartReq）。
+	// 动态安装的包永远拿不到它——那等于把设备节点交给任意第三方包。
+	//
+	// 其余沙箱硬项（NoNewPrivileges / ProtectSystem=strict / SystemCallFilter /
+	// RestrictAddressFamilies ...）不受本开关影响，仍然无条件生效。
+	AllowDeviceAccess bool
 }
 
 // UnitSpec 是一次 StartTransientUnit 的完整输入
@@ -145,8 +162,6 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 		{"ProtectSystem", dbus.MakeVariant("strict")},
 		{"ProtectHome", dbus.MakeVariant("yes")},
 		{"PrivateTmp", dbus.MakeVariant(true)},
-		{"PrivateDevices", dbus.MakeVariant(true)},
-		{"DevicePolicy", dbus.MakeVariant("closed")},
 		{"ProtectKernelTunables", dbus.MakeVariant(true)},
 		{"ProtectKernelModules", dbus.MakeVariant(true)},
 		{"RestrictSUIDSGID", dbus.MakeVariant(true)},
@@ -156,6 +171,22 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 		{"SystemCallFilter", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"@system-service"}})},
 		// 仅允许 UNIX/INET/INET6：堵住 raw/packet socket 等
 		{"RestrictAddressFamilies", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"AF_UNIX", "AF_INET", "AF_INET6"}})},
+	}
+
+	// 设备访问：默认（AllowDeviceAccess=false）保持原来的两条硬项不变；
+	// 放开时 PrivateDevices 关闭 + DevicePolicy=auto，让 Provider 能看到宿主
+	// 的 /dev 并按 DAC 权限访问真实设备节点。两条属性无论哪个分支都显式下发，
+	// 不依赖 systemd 的缺省值——瞬态 unit 的缺省随版本变化，写死才可预期。
+	if spec.Sandbox.AllowDeviceAccess {
+		props = append(props,
+			property{"PrivateDevices", dbus.MakeVariant(false)},
+			property{"DevicePolicy", dbus.MakeVariant("auto")},
+		)
+	} else {
+		props = append(props,
+			property{"PrivateDevices", dbus.MakeVariant(true)},
+			property{"DevicePolicy", dbus.MakeVariant("closed")},
+		)
 	}
 
 	if spec.BindToUnit != "" {

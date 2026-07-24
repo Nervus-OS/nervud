@@ -85,6 +85,7 @@ func TestRegistryAllowed_ReflectsRevocationImmediately(t *testing.T) {
 }
 
 func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
+	skipIfGrantAll(t)
 	var empty Registry
 	if empty.Allowed("com.a", "perm.diagnostics.read") {
 		t.Fatal("Allowed on an uninitialized Registry must return false")
@@ -107,6 +108,7 @@ func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 }
 
 func TestRegistryIntersect_UsesOwnCatalog(t *testing.T) {
+	skipIfGrantAll(t)
 	r := NewRegistry(DefaultCatalog())
 	granted, denied := r.Intersect([]string{"perm.diagnostics.read", "perm.platform.control"}, identity.TrustOrdinary, nil)
 	if len(granted) != 1 || granted[0] != "perm.diagnostics.read" {

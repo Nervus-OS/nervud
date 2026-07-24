@@ -65,6 +65,13 @@ type StartSandboxedProcessRequest struct {
 	// BindToUnit 非空时给组件 unit 绑定 owner-death：绑定 unit（生产为 nervud.service）
 	// 停/failed 即连带停组件，杜绝 nervud 被 SIGKILL 后组件仍归 systemd 持有
 	BindToUnit string
+	// AllowDeviceAccess 放开该组件对宿主设备节点的访问（关 PrivateDevices、
+	// DevicePolicy=auto）。语义与约束见 systemd.Sandbox.AllowDeviceAccess。
+	//
+	// Gate 不在这里二次裁决「谁配拿到它」——那是调用方（service.Manager）按
+	// Package 来源判定的策略，Gate 只负责把它如实翻给 systemd。Gate 守的是
+	// 不变量（路径包含、UID 区段），不是策略。
+	AllowDeviceAccess bool
 }
 
 func (StartSandboxedProcessRequest) Kind() Kind { return KindStartSandboxedProcess }
@@ -145,6 +152,7 @@ func (g *Gate) osStartSandboxedProcess(ctx context.Context, req StartSandboxedPr
 			ReadWritePaths:    req.ReadWritePaths,
 			ReadOnlyPaths:     req.ReadOnlyPaths,
 			InaccessiblePaths: req.InaccessiblePaths,
+			AllowDeviceAccess: req.AllowDeviceAccess,
 		},
 	}
 	if err := g.spawner.StartTransientUnit(ctx, spec); err != nil {

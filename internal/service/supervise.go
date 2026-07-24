@@ -311,6 +311,12 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		// 2. 各包数据目录使用独立 UID 和 0700；3. registry 敏感目录设为 Inaccessible
 		InaccessiblePaths: []string{registryDir},
 		ContainedPaths:    []string{entryPath},
+		// 只有系统镜像内置的包能碰真实设备节点：驱动机器人硬件的 Provider
+		// （电机 / CAN / 串口）必须看得到宿主 /dev，而默认沙箱的
+		// PrivateDevices+DevicePolicy=closed 会把它们全部挡掉（与 UID 无关，
+		// 提权到 root 也绕不开）。动态安装的包一律拿不到——它们的 Source 是
+		// SourceDynamicInstall，走 else 分支保持默认的封闭 /dev。
+		AllowDeviceAccess: e.Source == pkgregistry.SourceSystemImage,
 	}
 
 	var nativeLibDir string

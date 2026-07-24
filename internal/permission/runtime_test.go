@@ -24,6 +24,7 @@ func TestAllowed_GrantInstallNoRuntimeNeeded(t *testing.T) {
 }
 
 func TestAllowed_GrantUserRequiresRuntimeGrant(t *testing.T) {
+	skipIfGrantAll(t)
 	r := NewRegistry(DefaultCatalog())
 	grant(t, r, "com.a", "perm.camera.capture")
 
@@ -123,6 +124,7 @@ func TestGrantState_Persistence(t *testing.T) {
 }
 
 func TestIntersect_RequireSignerRole(t *testing.T) {
+	skipIfGrantAll(t)
 	r := NewRegistry(DefaultCatalog())
 	g, d := r.Intersect([]string{"perm.authority.reboot"}, identity.TrustPlatform, []string{"platform-systemapp"})
 	if len(g) != 0 || len(d) != 1 {
@@ -135,6 +137,7 @@ func TestIntersect_RequireSignerRole(t *testing.T) {
 }
 
 func TestIntersect_RegisterSplit(t *testing.T) {
+	skipIfGrantAll(t)
 	r := NewRegistry(DefaultCatalog())
 	g, _ := r.Intersect([]string{"perm.service.register.private"}, identity.TrustOrdinary, []string{"developer"})
 	if len(g) != 1 {
