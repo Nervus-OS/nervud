@@ -186,11 +186,24 @@ func (c *Client) Do(req Request) (Response, error) {
 	if err := conn.SetDeadline(time.Now().Add(ioTimeout)); err != nil {
 		return Response{}, err
 	}
-	if err := WriteTo(conn, req); err != nil {
-		return Response{}, err
-	}
+	// 写失败【不立即返回】，先试着读一次响应。
+	//
+	// 服务端在 SO_PEERCRED 判定不通过时，会在【读请求之前】就写出
+	// CodeUnauthorized 并关连接——这是有意的（不为未授权对端读取、解析它的
+	// 载荷）。于是客户端这一侧完全可能在写请求的过程中撞上 EPIPE：连接已经
+	// 被对端关掉了，但那条拒绝响应其实已经在缓冲区里等着。
+	//
+	// 直接返回写错误的话，运维看到的是「broken pipe」而不是「unauthorized」，
+	// 把一个明确的权限问题伪装成网络故障，极其浪费排查时间。
+	//
+	// 读也失败时才把写错误报出去——那才是真正的连接问题。
+	writeErr := WriteTo(conn, req)
+
 	var resp Response
 	if err := ReadFrom(conn, &resp); err != nil {
+		if writeErr != nil {
+			return Response{}, writeErr
+		}
 		return Response{}, fmt.Errorf("adminwire: read response: %w", err)
 	}
 	return resp, nil
