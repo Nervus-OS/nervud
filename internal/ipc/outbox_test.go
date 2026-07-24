@@ -124,6 +124,12 @@ func TestOutboundQueue_ConcurrentPushFromMultipleGoroutines(t *testing.T) {
 		t.Fatalf("并发 push 成功数 = %d, want %d", ok, n)
 	}
 
+	// 关闭后 pop 会先弹尽已排队条目再返回 ok=false（见 outbox.go 的 pop/close
+	// 语义:close 只挡新 push,不截断已排队内容）。不 close 的话,排空后的 pop 会
+	// 永久阻塞在 <-q.wake 上——开放且已空的队列 pop 阻塞是【正确】行为,漏 close
+	// 才是测试自身的缺陷
+	q.close()
+
 	got := 0
 	for {
 		if _, ok := q.pop(); !ok {

@@ -70,4 +70,9 @@ var (
 var (
 	errConnectionClosed = errors.New("control: owner connection closed")
 	errSafetyRevoked    = errors.New("control: revoked by safety trip")
+
+	// errPackageRevoked 是 RevokeByPackage 撤租时写进审计的原因：包被卸载，或其
+	// motion 组权限被用户撤销（应用层架构决策 §6.4）。与 errConnectionClosed 分开，
+	// 让离线规则能把「连接断开被动失去控制权」与「因包生命周期/权限变更被撤租」区分开
+	errPackageRevoked = errors.New("control: revoked by package lifecycle or permission change")
 )

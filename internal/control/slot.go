@@ -243,6 +243,39 @@ func (m *Module) RevokeConn(conn ConnID) {
 	m.dropLocked(l, actionRevoked, errConnectionClosed)
 }
 
+// RevokeByPackage 撤销某 Package 名下持有的全部执行器租约：包被卸载、或其 motion 组
+// 权限被用户撤销时由上层调用（permission.LeaseRevoker / pkgregistry.LeaseRevoker 的
+// 窄接口，*Module 隐式满足）。这是「我们独有、Android 没有」的立即撤销能力（应用层
+// 架构决策 §6.4）在 control 侧的落点。
+//
+// 归属判据用租约签发时记下的可信身份 Owner.PackageID（由 IPC 请求管线裁决后填入，
+// 见 lease.go 的 Owner 说明），不信任何自报值。[REWRITE-v1] 只有单个租约槽，所以最多
+// 撤一条；API 形状按「撤该包全部租约」定义，v2 放开多 Resource / 多槽时调用方不用改。
+//
+// 与 doc.go 的三条硬规则一致，但此路径【不在】急停/Safety Supervisor Lane 上——它由
+// 卸载/撤权的普通优先级流程调用，因此与 RevokeConn/Release 同样【取 mu】走正常变更路
+// 径（不是 RevokeAll 那条免锁的 RT 路径，别把两者互相套用）。撤租经 dropLocked：
+//   - 递增 epoch 走 BumpEpochIfNormal（不先读 State 再 Bump；Gate 已锁存时不叠加递增）
+//   - 不锁存 Safety（撤租只回到 NONE，不 Trip）
+//   - 幂等：pkgID 为空、无租约、或当前租约不属于该包，都直接返回 nil（无 lease 可撤
+//     本就是调用方想要的终态——包已经没有控制权了）
+//
+// 返回 error 是为了满足窄接口签名并给未来多槽实现留余地；v1 单槽下恒为 nil。
+func (m *Module) RevokeByPackage(pkgID string) error {
+	if pkgID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	l := m.cur.Load()
+	if l == nil || l.Owner.PackageID != pkgID {
+		return nil
+	}
+	m.dropLocked(l, actionRevoked, errPackageRevoked)
+	return nil
+}
+
 // RevokeAll 撤销全部执行器租约，满足 safety 侧的 LeaseRevoker
 //
 // 由 Safety Supervisor Lane（FIFO 90）在锁存后同步调用，因此有三条硬约束：

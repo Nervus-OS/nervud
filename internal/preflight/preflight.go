@@ -90,6 +90,10 @@ func DefaultConfig(log *slog.Logger) Config {
 			{Path: "/var/lib/nervus", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/registry", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/packages", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
+			// 动态安装 staging 根：nervusctl/安装器解包 .nspkg 的落点，随后由 nervud
+			// 经 renameat2 提交进 PackageRoot（同处 /var/lib/nervus = 同一文件系统）。
+			// 0700 属主 nervud：只有内核能读写，装包中间态不对外可见（见 internal/admin）
+			{Path: "/var/lib/nervus/staging", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
 			{Path: inv.PackageRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: inv.DataRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/jvm-cache", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},

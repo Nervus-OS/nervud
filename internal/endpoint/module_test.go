@@ -38,12 +38,6 @@ func newFakePkgs(entries ...pkgregistry.Entry) *fakePkgs {
 	return f
 }
 
-func (f *fakePkgs) put(e pkgregistry.Entry) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.entries[e.Manifest.PackageID] = e
-}
-
 func (f *fakePkgs) Lookup(id string) (pkgregistry.Entry, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -127,12 +121,6 @@ func (f *fakeAudit) Record(_ context.Context, ev audit.Event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.evs = append(f.evs, ev)
-}
-
-func (f *fakeAudit) snapshot() []audit.Event {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]audit.Event(nil), f.evs...)
 }
 
 // ---- 测试固定值 --------------------------------------------------------------

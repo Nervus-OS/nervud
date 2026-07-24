@@ -10,11 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nervus-os/nervud/internal/admin"
+	"github.com/nervus-os/nervud/internal/adminwire"
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/authority/systemd"
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
+	"github.com/nervus-os/nervud/internal/health"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/ipc"
 	"github.com/nervus-os/nervud/internal/kernel"
@@ -44,6 +47,9 @@ func main() {
 	// 控制面 IPC 入口。生产镜像固定为 /run/nervus/nervud.sock
 	// flag 仅用于开发阶段
 	sockPath := flag.String("sock", "/run/nervus/nervud.sock", "IPC socket path")
+	// 管理通道 UDS（root-only），供 nervusctl 触发装包/卸载/权限授撤。与 App 控制面
+	// 分开：那条只接受 App 段 UID，运维工具（root）连不上（见 internal/admin）
+	adminSockPath := flag.String("admin-sock", adminwire.DefaultSockPath, "privileged admin channel socket path")
 	logLevel := flag.String("log-level", "info", "Log level：debug/info/warn/error")
 	// 仅供开发机（缺 CAP_SYS_NICE 的 Linux 环境）使用：允许实时优先级设置失败后降级运行
 	// 生产环境禁用，缺 CAP_SYS_NICE 的 Linux 直接退出
@@ -72,7 +78,7 @@ func main() {
 	}()
 
 	// 把逻辑放进 run() 是为了能用 return error —— main 里一旦 os.Exit，defer 不会执行
-	err := run(ctx, *sockPath, *allowSchedDegrade, *skipPreflight, logger)
+	err := run(ctx, *sockPath, *adminSockPath, *allowSchedDegrade, *skipPreflight, logger)
 	if err != nil {
 		logger.Error("nervud exited", "err", err)
 	} else {
@@ -143,7 +149,7 @@ const laneStopTimeout = 2 * time.Second
 // 否则 Lane 与 Kernel 会被同一个信号并行唤醒，谁先退出不确定，Lane 的收尾
 // 逻辑（撤权、刹停确认、审计落盘）可能在进程结束时被截断
 // Lane 是最底层基建，因此在所有模块停完之后才回收
-func run(ctx context.Context, sockPath string, allowSchedDegrade, skipPreflight bool, logger *slog.Logger) (err error) {
+func run(ctx context.Context, sockPath, adminSockPath string, allowSchedDegrade, skipPreflight bool, logger *slog.Logger) (err error) {
 	sched := scheduler.New(logger, allowSchedDegrade)
 
 	// defer 保证无论装配失败还是正常停机，Lane 都会被取消并等待回收。
@@ -160,7 +166,7 @@ func run(ctx context.Context, sockPath string, allowSchedDegrade, skipPreflight 
 		}
 	}()
 
-	k, cleanup, aerr := assemble(ctx, sched, sockPath, skipPreflight, logger)
+	k, cleanup, aerr := assemble(ctx, sched, sockPath, adminSockPath, skipPreflight, logger)
 	if aerr != nil {
 		return aerr
 	}
@@ -178,7 +184,7 @@ func run(ctx context.Context, sockPath string, allowSchedDegrade, skipPreflight 
 // 新模块加在这
 // k.Register(...)，Kernel 和其它模块都不用改
 // 返回 error 表示装配阶段就已失败，内核启动将会终止
-func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, skipPreflight bool, logger *slog.Logger) (*kernel.Kernel, func(), error) {
+func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSockPath string, skipPreflight bool, logger *slog.Logger) (*kernel.Kernel, func(), error) {
 	// cleanup 汇集设施级需要在停机时释放的资源（当前只有 systemd D-Bus 连接）。
 	// 始终非 nil，装配任一步失败时也安全可调用
 	var closers []func()
@@ -278,11 +284,9 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// internal/permission/registry.go 顶部说明）。DefaultCatalog() 是编译期
 	// 硬编码的最小权限表，本阶段不支持外部可写的权限定义文件（见其文档）
 	permReg := permission.NewRegistry(permission.DefaultCatalog())
-	// 运行期授予状态持久化到 registry 目录（GrantUser 危险权限的用户确认/撤销）。
-	// revoker（撤销 motion 组权限 → control 撤租 + 递增 motion epoch，§6.4）暂传 nil：
-	// control 尚无 RevokeByPackage，且 IPC dispatch 管线未接线时 App 也拿不到 motion
-	// lease，无 lease 可撤——待 control 侧 RevokeByPackage + endpoint 落地后接线
-	permReg.SetGrantStore(pkgregistry.DefaultRegistryStateDir, nil, aud)
+	// 运行期授予状态的持久化 + 撤销联动（GrantUser 危险权限的用户确认/撤销，§6.2/§6.4）
+	// 需要 control 作为 LeaseRevoker，而 ctl 在下面才构造——SetGrantStore 因此下移到
+	// ctl 构造之后调用（见该处），这里先不接线，避免用 nil revoker 载入一次又要重设
 
 	// TODO(rewrite): 按 sec 2 逐个接入，从最基础往上叠。IPC 放最后：对外开门之前
 	// Identity/Permission/Safety 须先就绪，避免出现 未受权限访问 的窗口期
@@ -316,6 +320,14 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	ctl := control.New(sched, gate, aud, logger, control.DefaultPolicy())
 	k.Register(ctl)
 
+	// ctl 就绪后接线运行期授予状态：stateDir 持久化 + revoker=ctl。撤销 motion 组权限时
+	// permission 经该 revoker 调 ctl.RevokeByPackage 撤该包的执行器租约（control 侧递增
+	// motion epoch，§6.4）。SetGrantStore 之所以放在这里而不是 permReg 构造处，是因为它
+	// 需要 ctl —— permReg 先构造（pkgregistry 装配裁决要它）、ctl 后构造，故两段式接线。
+	// lease-wire 未落地前 App 拿不到 motion lease、无 lease 可撤，此接线是闭合撤权链的接缝，
+	// 在 lease-wire 落地后即自动生效
+	permReg.SetGrantStore(pkgregistry.DefaultRegistryStateDir, ctl, aud)
+
 	// Safety Gate + Stop Lane(FIFO 95) + Supervisor(FIFO 90)：模块自持两条 RT Lane。
 	// 必须在 IPC 之前就绪（对外开门前 Safety 须先武装）。v1：无真实 Provider，投递用
 	// NopPath、上报用 NopReports；LeaseRevoker 接 control —— motion epoch 递增仍是主
@@ -335,9 +347,23 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 		authority.DefaultInvariants())
 	k.Register(svcMgr)
 
-	// 把卸载/停用需要的外部协作者注入 pkgregistry：service 停组件；control 撤租留到
-	// Step 9（LeaseRevoker）——现在传 nil，卸载时跳过撤租那一步（留接缝）
-	pkgMod.SetLifecycleHooks(svcMgr, nil)
+	// Health 聚合器：现读 safety/control/service 三个权威源合成整机一句话健康档位。
+	// 注册在 safety/control/service 都构造【之后】、endpoint/ipc 之前——它依赖这三者已
+	// 构造出实例（不依赖其 Start，Report 现读现算）。
+	//
+	// ⚠ 缺口（交收尾同学）：*service.Manager 目前【未实现】health.ServiceObserver 要求的
+	// Instances() []service.Instance，无法作为第三个观察者注入。为不改队友的 service 包
+	// （红线 #10），这里第三参传 nil —— health 对 nil 观察者 fail-safe（该维度按零值参与
+	// 判定，且 deriveStatus 的 fail-closed 规则保证「看不到 Safety」永不误判 Healthy）。
+	// service 组件维度待 *service.Manager 补 Instances() 后，把 nil 换成 svcMgr 即可。
+	healthMod := health.New(safetyMod, ctl, nil)
+	k.Register(healthMod)
+
+	// 把卸载/停用需要的外部协作者注入 pkgregistry：service 停组件；control 撤租。
+	// 卸载 Package 时经 ctl.RevokeByPackage 撤销该包名下的执行器租约（含 motion 则由
+	// control 递增 motion epoch）。lease-wire 未落地前无 lease 可撤 —— 此接线闭合撤租链，
+	// 落地后即生效
+	pkgMod.SetLifecycleHooks(svcMgr, ctl)
 
 	// Endpoint 注册/解析/路由：把 endpoint_id/method_id 推导 permission ID 的手段
 	// 接上（架构总览 §7 待办列表里优先级最高的一条）。注册在 service 之后、ipc 之前
@@ -377,6 +403,27 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 		return nil, cleanup, err
 	}
 	k.Register(ipcSrv)
+
+	// 特权管理通道（root-only UDS）：供 nervusctl 触发装包/卸载/停用启用/权限授撤。
+	// 注册在 ipc 之后 = 启动更晚、关闭更早：关停时先停管理面（不再接受新的装包/改权限
+	// 命令），再停 App 控制面。它驱动【同一个】进程内的 pkgregistry.Module / permission
+	// .Registry，绝不另开第二个写者（架构红线 §10 单写者）。AdminUID 取 nervud 自身
+	// euid（生产为 0/root）——只有运行 nervud 的运维身份可发命令，配合 socket 0600。
+	// StagingRoot 留空 = admin.DefaultStagingDir（/var/lib/nervus/staging，由 preflight
+	// 建好，与 PackageRoot 同一文件系统，安装期 renameat2 才不跨盘）
+	adminSrv, err := admin.New(admin.Config{
+		SockPath:    adminSockPath,
+		AdminUID:    uint32(os.Geteuid()),
+		Packages:    pkgMod,
+		Registry:    pkgReg,
+		Permissions: permReg,
+		Auditor:     aud,
+		Log:         logger,
+	})
+	if err != nil {
+		return nil, cleanup, err
+	}
+	k.Register(adminSrv)
 
 	return k, cleanup, nil
 }
