@@ -390,23 +390,36 @@ func TestReady_DispatchIsProtocolViolation(t *testing.T) {
 		hasAudit(rec, "ipc.ProtocolViolation", errUnexpectedBody))
 }
 
-// DispatchResult 是 Service→nervud 方向（§10.7）：方向合法但 route 追踪未落地，
-// 归为 UnsupportedBody 而非协议违规（否则会阻碍将来的 ServiceHost 接入）
-func TestReady_DispatchResultIsUnsupported(t *testing.T) {
+// DispatchResult 是 Service→nervud 方向（§10.7），现在是真实、有意义的入站
+// body：未知/已完成的 route_id 是预期内的良性竞态（清道夫、另一次结果、或连接
+// 断开清理已经抢先完成），丢弃但【不关连接】——归入独立的 Action 而不是
+// UnsupportedBody（后者会关闭连接，但一个从未创建过 route 或刚完成的 route_id
+// 不该让整条连接付出代价）。真正的目标错位（伪装）测试见 dispatch_e2e_test.go，
+// 那需要两条真实连接才能构造出"存在但错位"的场景
+func TestReady_UnmatchedDispatchResultIsDiscardedNotClosed(t *testing.T) {
 	inv := selfUIDInvariants(t)
 	s, sock, rec := newTestServer(t, inv, DefaultLimits())
 
 	c := dial(t, sock)
 	handshake(t, c)
 
-	dr := &ipcv1.Envelope{Body: &ipcv1.Envelope_DispatchResult{DispatchResult: &ipcv1.DispatchResult{RouteId: 1}}}
+	dr := &ipcv1.Envelope{Body: &ipcv1.Envelope_DispatchResult{DispatchResult: &ipcv1.DispatchResult{RouteId: 999}}}
 	if err := WriteFrame(c, mustMarshal(t, dr)); err != nil {
 		t.Fatal(err)
 	}
-	expectClosed(t, c)
-	waitFor(t, "连接被回收", func() bool { return s.connCount() == 0 })
-	waitFor(t, "DispatchResult 被审计为 UnsupportedBody",
-		hasAudit(rec, "ipc.UnsupportedBody", errUnsupportedBody))
+
+	// 未知 route_id 不该关连接：随后 Ping→Pong 仍能打通
+	if err := WriteFrame(c, mustMarshal(t, pingEnv(1))); err != nil {
+		t.Fatal(err)
+	}
+	if got := readEnv(t, c).GetPong().GetNonce(); got != 1 {
+		t.Fatalf("pong nonce = %d, want 1", got)
+	}
+	if n := s.connCount(); n != 1 {
+		t.Fatalf("未知 DispatchResult 不该关连接，connCount=%d", n)
+	}
+	waitFor(t, "未知 route_id 被审计为 DispatchResultUnmatched",
+		hasAudit(rec, "ipc.DispatchResultUnmatched", nil))
 }
 
 // Request 带保留的 request_id 0（§10.6）：在生成任何 Response 之前按协议违规关闭

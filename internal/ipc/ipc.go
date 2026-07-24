@@ -256,6 +256,11 @@ type Server struct {
 	perUID  map[uint32]int
 	started bool
 
+	// dispatch 是 route_id -> 在途 Dispatch 的唯一权威（dispatch.go），
+	// handleRequest/handleDispatchResult/runDispatchReaper/dispatchConnClosed
+	// 共同消费
+	dispatch *dispatchTable
+
 	// rejectLog 给准入拒绝路径的审计限速。被拒绝的连接可以由攻击者任意刷，
 	// 不限速的话审计日志本身就成了放大器
 	rejectLog rateLimiter
@@ -263,6 +268,11 @@ type Server struct {
 	// violationLog 给协议违规路径的审计限速。畸形帧同样可被恶意连接刷，
 	// 与 rejectLog 同理需要限速
 	violationLog rateLimiter
+
+	// dispatchRaceLog 给"迟到/未知 route_id 的 DispatchResult"审计限速,与
+	// violationLog 分开的桶——这是预期内的正常竞态,不该跟真正的协议违规信号
+	// 抢占同一份审计预算（见 dispatch.go 的 auditDispatchRace）
+	dispatchRaceLog rateLimiter
 }
 
 func New(cfg Config) (*Server, error) {
@@ -309,8 +319,10 @@ func New(cfg Config) (*Server, error) {
 		fatal:                    make(chan error, 1),
 		conns:                    make(map[*net.UnixConn]struct{}),
 		perUID:                   make(map[uint32]int),
+		dispatch:                 newDispatchTable(),
 		rejectLog:                newRateLimiter(10, time.Second),
 		violationLog:             newRateLimiter(10, time.Second),
+		dispatchRaceLog:          newRateLimiter(10, time.Second),
 	}, nil
 }
 
@@ -379,6 +391,8 @@ func (s *Server) Start(context.Context) error {
 	s.ln = ln
 	s.wg.Add(1)
 	go s.acceptLoop()
+	s.wg.Add(1)
+	go s.runDispatchReaper()
 
 	ok = true
 	s.log.Info("ipc: listening", "sock", s.sockPath, "mode", socketMode.String(),
@@ -651,10 +665,6 @@ func (s *Server) reject(c *net.UnixConn, uid uint32, reason string, err error) {
 // serve 是单条连接的帧泵：分帧、超时、每帧准入复核，然后把每个良构 Envelope
 // 交给连接状态机（conn）。握手（Hello/HelloAck 协商版本、下发 ConnectionLimits）
 // 与握手后的 body 分派都在 conn.go
-//
-// TODO(register): 本模块暂不应被注册进 Kernel。握手已就绪，但请求管线
-// （Permission/Policy 裁决、endpoint 解析、Dispatch）尚未落地，Request 目前只回
-// UNAVAILABLE。架构 2 要求对外开门前 Identity/Permission/Safety 必须先就绪
 func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	log := s.log.With("package", caller.PackageID, "uid", caller.UID, "pid", caller.PID)
 
@@ -668,13 +678,29 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	// 连接状态机：第一帧必须是 Hello，握手完成前不接受其它 body（conn.go）
 	co := newConn(s, c, caller, log)
 
-	// 无论本连接是 Service 侧还是 Caller 侧，serve() 退出都意味着它彻底断线：
-	// 通知 endpoint 清理该连接名下的全部 registration/binding（架构 §10.5，
-	// 设计方案 §5.4）。co 本身作为 endpoint.ConnHandle 传入——两个命名空间的
-	// endpoint_id 靠这份指针身份区分，而不是数字本身
+	// 独立 writer goroutine（架构 10.8）：本连接自己的出站帧全部经 co.outbox
+	// 排队，只有它真正调用 co.c.Write（conn.go 的 runWriter）。在读循环之前
+	// 起，好让握手的 HelloAck 也走同一条路径
+	s.wg.Add(1)
+	go co.runWriter()
+
+	// 下面三个 defer 按 LIFO 执行，即 serve() 返回时的实际顺序是：
+	//   1. dispatchConnClosed —— 摘掉 route 表里以本连接为 target/source 的
+	//      表项（结果送去的是【别的】连接的 outbox，不影响本连接自己的收尾）
+	//   2. endpoints.ConnClosed —— 通知 endpoint 清理本连接名下的全部
+	//      registration/binding（架构 §10.5，设计方案 §5.4）
+	//   3. 关闭本连接自己的 outbox 并等 writer 真正退出——必须等它停止碰 socket
+	//      之后，admit() 那层的 release() 才能安全 Close 底层连接
+	defer func() {
+		co.outbox.close()
+		<-co.writerDone
+	}()
 	if s.endpoints != nil {
+		// co 本身作为 endpoint.ConnHandle 传入——两个命名空间的 endpoint_id
+		// 靠这份指针身份区分，而不是数字本身
 		defer s.endpoints.ConnClosed(co)
 	}
+	defer s.dispatchConnClosed(co)
 
 	for {
 		select {
