@@ -1,6 +1,4 @@
-// 见 doc.go 的包说明
-//
-// 本文件是卸载与停用/启用（应用层架构决策 §4.2 / §7）。与 install.go 共用 Module.mu
+// 本文件实现卸载与停用或启用，并与 install.go 共用 Module.mu
 // 串行化，保证卸载/停用与安装不并发交错、三份投影不分裂。
 package pkgregistry
 
@@ -27,11 +25,11 @@ var (
 	ErrSystemPackageImmutable = errors.New("pkgregistry: system-image package cannot be uninstalled")
 )
 
-// isProtectedComponent 报告 "<pkg>/<comp>" 是否在【编译期硬编码】的不可停用名单里
-// （应用层架构决策 §7）。理由同 permission.DefaultCatalog：这条底线不能由文件系统写
+// isProtectedComponent 报告 "<pkg>/<comp>" 是否在编译期硬编码的不可停用名单里
+// 。理由同 permission.DefaultCatalog：这条底线不能由文件系统写
 // 权限决定，所以是代码里的 switch 而非可被改动的数据。停用提供停用 UI 的设置 app
 // 自身、权限确认通道、会话/包管理/安全恢复，都会让系统失去自我修复能力。用函数而非
-// 包级 map，避开 gochecknoglobals，也让「名单是代码」这件事更直白
+// 包级 map，避开 gochecknoglobals，也让名单是代码这件事更直白
 func isProtectedComponent(pkgSlashComp string) bool {
 	switch pkgSlashComp {
 	case "nervus.pkgmanagerd/main",
@@ -45,7 +43,7 @@ func isProtectedComponent(pkgSlashComp string) bool {
 	}
 }
 
-// CanDisable 报告某 Component 是否可被停用，不可时给出原因（应用层架构决策 §7）
+// CanDisable 报告某 Component 是否可被停用，不可时给出原因
 //
 // Ordinary 包：用户对自己装的东西有完全控制权，恒可停用（其 manifest 声明
 // disableable:false 无效，与 Install 一致）。系统包：不在保护名单、且 manifest 显式
@@ -92,7 +90,7 @@ func (m *Module) SetLifecycleHooks(stopper ComponentStopper, revoker LeaseRevoke
 	m.revoker = revoker
 }
 
-// SetComponentEnabled 停用/启用一个 Component 并持久化（应用层架构决策 §7）
+// SetComponentEnabled 停用/启用一个 Component 并持久化
 //
 // 停用生效范围（缺一不可，本函数负责持久化 + 投影 + 停运行实例；IPC 握手据
 // DisabledComponents 拒绝该组件由 ipc/verifyComponent 侧完成）：
@@ -100,7 +98,7 @@ func (m *Module) SetLifecycleHooks(stopper ComponentStopper, revoker LeaseRevoke
 //   - Replace 三份投影（DisabledComponents 进 Entry，scan 重启后仍生效）
 //   - 停掉运行实例（经 ComponentStopper）
 //
-// 停用【按 Component】，不回收 Package UID。启用永远可逆
+// 停用按 Component，不回收 Package UID。启用永远可逆
 func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -142,7 +140,7 @@ func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, 
 	// 停用：停掉运行实例（启用则交给下一次 Start/EnsureStarted 拉起，本函数不主动起）
 	if !enabled && m.stopper != nil {
 		if err := m.stopper.StopComponent(ctx, pkgID, compID); err != nil {
-			// 停实例失败不回滚持久化的停用意图——持久化的 disabled 是权威，实例
+			// 停实例失败不回滚持久化的停用意图 - 持久化的 disabled 是权威，实例
 			// 会在下次复核/重启时被清；只记审计
 			m.aud.Record(ctx, audit.Event{Action: "pkgregistry.SetComponentEnabled.stop", Subject: pkgID, Denied: true, Err: err})
 		}
@@ -156,7 +154,7 @@ func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, 
 }
 
 // Uninstall 彻底删除一个 Package：代码、数据、记账、投影全清，UID 不复用
-// （由 allocateUID 的单调高水位保证）。系统镜像来源的包不可动态卸载（应用层架构决策 §4.2）
+// （由 allocateUID 的单调高水位保证）。系统镜像来源的包不可动态卸载
 func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -178,7 +176,7 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 		}
 	}
 
-	// 2. 撤销其持有的全部 ControlLease（含 motion → control 递增 epoch）。接缝：Step 9
+	// 2. 撤销其持有的全部 ControlLease（含 motion -> control 递增 epoch）。接缝：Step 9
 	if m.revoker != nil {
 		if err := m.revoker.RevokeByPackage(pkgID); err != nil {
 			m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.revoke", Subject: pkgID, Denied: true, Err: err})
@@ -212,7 +210,7 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 	}
 
 	// 6. 清运行期权限授予状态（_grants.json）。install-set 已随 removeEntry 的投影剔除，
-	// 但运行期危险权限授予是 permission 单独的持久态，不清会被同 ID 重装继承（§P1）
+	// 但运行期危险权限授予是 permission 单独的持久态，不清会被同 ID 重装继承
 	if cerr := m.perm.ClearPackage(pkgID); cerr != nil {
 		m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.clearGrants", Subject: pkgID, Denied: true, Err: cerr})
 	}

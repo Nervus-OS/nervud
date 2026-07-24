@@ -1,7 +1,5 @@
-// 见 doc.go 的包说明
-//
 // 本文件是 permission 的权威运行期状态：Package ID -> 已授予权限集合，
-// 供 ipc 的 Request 分派管线在裁决时查询（架构 §10.7）
+// 供 ipc 的 Request 分派管线在裁决时查询
 package permission
 
 import (
@@ -18,7 +16,7 @@ var ErrDuplicatePackageID = fmt.Errorf("permission: duplicate package id in gran
 // Grant 是一个 Package 在某一时刻的全量已授予权限集合
 //
 // 这是 pkgregistry 推送给 permission 的投影单元，与 identity.Package 投影
-// identity 所需字段的方式一致——只带 permission 用得着的两个字段
+// identity 所需字段的方式一致 - 只带 permission 用得着的两个字段
 type Grant struct {
 	PackageID   string
 	Permissions []string
@@ -39,7 +37,7 @@ type Registry struct {
 	catalog Catalog
 	snap    atomic.Pointer[snapshot]
 	// grants 是 GrantUser（危险）权限的运行期授予状态。install-set（snap）回答
-	// 「安装时授予了什么」，grants 回答「用户运行期确认/撤销了什么」，Allowed 两者都看
+	// 安装时授予了什么，grants 回答用户运行期确认/撤销了什么，Allowed 两者都看
 	grants *grantStore
 }
 
@@ -54,7 +52,7 @@ func NewRegistry(cat Catalog) *Registry {
 	return r
 }
 
-// SetGrantStore 接线运行期授予状态的持久化目录与撤销联动（应用层架构决策 §6.2/§6.4）。
+// SetGrantStore 接线运行期授予状态的持久化目录与撤销联动。
 // 装配期由 main.go 调用；stateDir 为 /var/lib/nervus/registry，revoker 由 control 实现
 // （撤销 motion 组权限时递增 motion epoch）。调用后从磁盘载入已有状态
 func (r *Registry) SetGrantStore(stateDir string, revoker LeaseRevoker, aud audit.Recorder) {
@@ -111,13 +109,13 @@ func (r *Registry) Replace(grants []Grant) error {
 // Allowed 报告 packageID 是否已被授予 permission
 //
 // 对未初始化的 Registry（未经 NewRegistry 的 &Registry{}，甚至 typed-nil）
-// 同样 fail-safe 返回 false（拒绝）而不是 panic——这里的 fail-safe 方向必须
+// 同样 fail-safe 返回 false（拒绝）而不是 panic - 这里的 fail-safe 方向必须
 // 格外小心：identity.Lookup 对未初始化状态返回"查无此人"是安全的默认拒绝，
 // Allowed 返回 false 同样是默认拒绝，两者方向一致，不存在"未初始化时反而
 // 放行"的风险
 //
-// 架构 §10.7 要求"每次调用时仍做快速权限与存活复核，以支持动态撤权"：本方法
-// 每次都读最新快照，不缓存在调用方——写时复制 + 原子指针天然让 Replace 后
+// 要求"每次调用时仍做快速权限与存活复核，以支持动态撤权"：本方法
+// 每次都读最新快照，不缓存在调用方 - 写时复制 + 原子指针天然让 Replace 后
 // 的下一次 Allowed 立刻看到新状态
 func (r *Registry) Allowed(packageID, permission string) bool {
 	if r == nil {
@@ -134,19 +132,18 @@ func (r *Registry) Allowed(packageID, permission string) bool {
 	if _, ok = perms[permission]; !ok {
 		return false // 安装期就没授予（或已被卸载/降权投影出去）
 	}
-	// GrantUser（危险）权限：安装期集合只证明「可请求」，实际放行还要运行期状态
-	// == Granted（应用层架构决策 §6.2：两者都通过才放行）
+	// GrantUser（危险）权限：安装期集合只证明可请求，实际放行还要运行期状态
+	// == Granted（两者都通过才放行）
 	if entry, ok := r.catalog.Lookup(permission); ok && entry.Mode == GrantUser {
 		return r.grants.state(packageID, permission) == GrantStateGranted
 	}
 	return true
 }
 
-// SetRuntimeState 设置一个 GrantUser 权限的运行期授予状态并持久化（应用层架构决策
-// §6.3/§6.4）。只有 GrantUser 权限有运行期状态——对其它 Mode 调用返回错误。撤销
+// SetRuntimeState 设置一个 GrantUser 权限的运行期授予状态并持久化。只有 GrantUser 权限有运行期状态，对其它 Mode 调用返回错误。撤销
 // motion 组权限会联动 control 撤租 + 递增 motion epoch
 //
-// 调用入口需 perm.permission.admin（全系统只有权限确认 UI 有）——该执法在 IPC 请求
+// 调用入口需 perm.permission.admin（全系统只有权限确认 UI 有） - 该执法在 IPC 请求
 // 管线落地，本方法是被执法后的机制落点
 func (r *Registry) SetRuntimeState(packageID, permission string, state GrantState) error {
 	if r == nil {
@@ -173,7 +170,7 @@ func (r *Registry) GrantStateOf(packageID, permission string) GrantState {
 	return r.grants.state(packageID, permission)
 }
 
-// ClearPackage 删除某 Package 的全部运行期授予状态（卸载时调用，§6/§P1）。安装期
+// ClearPackage 删除某 Package 的全部运行期授予状态，供卸载路径调用。安装期
 // 集合（snap）由 pkgregistry 的 Replace 投影负责剔除，这里只清运行期 _grants.json，
 // 否则同 ID 重装会继承旧的危险权限授予
 func (r *Registry) ClearPackage(packageID string) error {

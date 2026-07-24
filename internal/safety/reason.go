@@ -2,10 +2,10 @@ package safety
 
 // ReasonCode 是固定的数字触发原因码。它用于零堆分配的审计 ring：Safety 触发热路径
 // 只写这个 uint32，普通优先级的 auditDrain 再把它翻成审计文本。绝不在热路径做字符串
-// 格式化或 Protobuf 编码（架构 §6 item4：审计由普通优先级线程读取固定事件码后完成）。
+// 格式化或 Protobuf 编码（ ：审计由普通优先级线程读取固定事件码后完成）。
 //
 // 数值必须与 nervus-ipc safety.proto 的 HaltReason 枚举保持一致（proto 是唯一真源，
-// 本地 const 只是镜像）；跨语言一致性由 golden 测试守住。0 恒为「未指定」并 fail-closed。
+// 本地 const 只是镜像）；跨语言一致性由 golden 测试守住。0 恒为未指定并 fail-closed。
 type ReasonCode uint32
 
 const (

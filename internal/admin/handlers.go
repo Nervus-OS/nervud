@@ -1,7 +1,6 @@
-// 见 doc.go 的包说明。本文件是管理命令的处理本体：把 adminwire.Request 分派到
 // pkgregistry / permission 的对应操作，并把结果投影回 adminwire.Response。
 //
-// 安全纪律：本文件【不做任何安全裁决】。签名验证、Arbitrate、OEM 副署、ABI、
+// 安全纪律：本文件不做任何安全裁决。签名验证、Arbitrate、OEM 副署、ABI、
 // 权限 Intersect、失败补偿全在 pkgregistry.Install/Uninstall 内部。这里只做
 //  1. 参数存在性与路径逃逸校验（staging 目录必须是 nervud 掌控的 staging 根的
 //     直接子目录）；
@@ -62,7 +61,7 @@ func (s *Server) handleBeginStaging() adminwire.Response {
 }
 
 // handleInstall 校验 staging 路径后触发 pkgregistry.Install。nervud 自己从 staging
-// 目录读 manifest.json / manifest.sig 作为「待验证字节」，再由 Install 内部完整
+// 目录读 manifest.json / manifest.sig 作为待验证字节，再由 Install 内部完整
 // 验签 + digest 复核 + 裁决 + 原子提交。
 func (s *Server) handleInstall(ctx context.Context, req adminwire.Request) adminwire.Response {
 	staging, err := s.validateStagingChild(req.StagingDir)
@@ -165,8 +164,8 @@ func (s *Server) handleSetPermission(req adminwire.Request) adminwire.Response {
 
 // ---- 校验与投影辅助 -------------------------------------------------------
 
-// validateStagingChild 校验 dir 是 staging 根的【直接子目录】且当前存在为目录。
-// 这是本模块唯一的路径安全职责（路径逃逸校验，B4 spec 约束）：CLI 提交的 staging
+// validateStagingChild 校验 dir 是 staging 根的直接子目录且当前存在为目录。
+// 这是本模块唯一的路径安全职责：CLI 提交的 staging
 // 路径必须是 nervud 之前经 begin-staging 发出的那类目录，不能是任意路径。用纯
 // 字符串 path 运算（linux 语义）+ os.Lstat 拒 symlink 顶点，快速失败。
 //
@@ -183,7 +182,7 @@ func (s *Server) validateStagingChild(dir string) (string, error) {
 	if path.Dir(clean) != s.stagingRoot {
 		return "", fmt.Errorf("staging_dir %q is not a direct child of staging root %q", clean, s.stagingRoot)
 	}
-	// 顶点不得是 symlink（防被诱导把「别处的树」当 staging 提交）。lstat 不跟随。
+	// 顶点不得是 symlink（防被诱导把别处的树当 staging 提交）。lstat 不跟随。
 	fi, err := os.Lstat(clean)
 	if err != nil {
 		return "", fmt.Errorf("staging_dir %q: %v", clean, err)
@@ -198,7 +197,7 @@ func (s *Server) validateStagingChild(dir string) (string, error) {
 }
 
 // cleanupStaging 尽力删掉一个 staging 目录（安装失败/元数据缺失时）。只在确认它
-// 仍是 staging 根子目录时删——绝不因一个投递错误的路径而递归删到别处。
+// 仍是 staging 根子目录时删 - 绝不因一个投递错误的路径而递归删到别处。
 func (s *Server) cleanupStaging(dir string) {
 	if path.Dir(path.Clean(dir)) != s.stagingRoot {
 		return
@@ -237,7 +236,7 @@ func grantStateFromWire(s string) (permission.GrantState, bool) {
 	}
 }
 
-// classifyPkgErr 把 pkgregistry 的错误归类到 wire Code：「未安装/找不到组件」类
+// classifyPkgErr 把 pkgregistry 的错误归类到 wire Code：未安装/找不到组件类
 // 归 CodeNotFound（供 CLI 给出更贴切的措辞/退出码），其余归 CodeFailed。
 func classifyPkgErr(err error) adminwire.Response {
 	code := adminwire.CodeFailed

@@ -15,7 +15,7 @@ import (
 //
 // # Start 应快速返回：长期运行的循环自行开 goroutine
 //
-// 循环的退出只听 Stop()，不听 Start(ctx) 的 ctx。若循环也监听信号 ctx，
+// 循环的退出只听 Stop，不听 Start(ctx) 的 ctx。若循环也监听信号 ctx，
 // 它会与 stopAll 被同一个信号并行唤醒，谁先退出不确定，停机顺序就不再由
 // 反序 Stop 唯一决定；模块的收尾逻辑（撤权、刹停确认、审计落盘）可能被截断
 //
@@ -23,7 +23,7 @@ import (
 //
 // 但 Kernel 不信任模块一定会遵守：即便 Stop 无视 ctx 永久卡住，Kernel 也会
 // 在超时后放弃等待、继续关闭后续模块（见 stopModule）。一个卡死的模块不能连累
-// 整条关闭序列——尤其是排在最后、负责落盘审计的那个
+// 整条关闭序列 - 尤其是排在最后、负责落盘审计的那个
 type Module interface {
 	Name() string
 	Start(ctx context.Context) error
@@ -77,10 +77,10 @@ type moduleFailure struct {
 // Run 依次启动全部模块；任一启动失败则反序关闭已启动的模块并返回错误
 // *请注意 启动失败后，不会 stop 启动失败的模块
 //
-// 启动【与】运行期都在监听两个停机来源：
+// 启动与运行期都在监听两个停机来源：
 //
-//	ctx 取消        —— SIGINT/SIGTERM，计划内停机，反序 Stop 后返回 nil
-//	某模块报告致命错误 —— 反序 Stop 后返回该错误，main 据此非零退出
+//	ctx 取消     - SIGINT/SIGTERM，计划内停机，反序 Stop 后返回 nil
+//	某模块报告致命错误 - 反序 Stop 后返回该错误，main 据此非零退出
 //
 // 关键点：fatal watcher 是逐模块安装的，且每启动一个模块前都重新检查这两个
 // 来源。因此启动过程中若某个已就绪模块立刻 fatal、或此刻收到 SIGTERM，Kernel
@@ -131,7 +131,7 @@ func (k *Kernel) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		k.log.Info("shutdown signal received; shutting down")
 		// 即便是计划内停机，收尾失败也必须反映到退出码：否则撤权、刹停确认、
-		// 审计落盘失败时进程仍以 0 退出，systemd 完全看不见——这正是最需要
+		// 审计落盘失败时进程仍以 0 退出，systemd 完全看不见 - 这正是最需要
 		// 被看见的一类失败
 		if err := k.stopAll(started); err != nil {
 			return fmt.Errorf("shutdown completed with errors: %w", err)
@@ -143,7 +143,7 @@ func (k *Kernel) Run(ctx context.Context) error {
 		// 连续失败由 StartLimitAction=reboot 兜底
 		k.log.Error("module reported a fatal error; shutting down kernel",
 			"module", f.name, "err", f.err)
-		// 致命错误是主因，但收尾失败也不该丢——一并 join，供离线分析
+		// 致命错误是主因，但收尾失败也不该丢 - 一并 join，供离线分析
 		return joinShutdown(fmt.Errorf("module %s failed at runtime: %w", f.name, f.err), k.stopAll(started))
 	}
 }
@@ -158,7 +158,7 @@ func joinShutdown(primary, stopErr error) error {
 
 // watchModuleFatal 为单个模块安装致命错误监视 goroutine
 //
-// 不实现 FatalReporter、或 Fatal() 返回 nil 的模块直接跳过——本接口是可选的，
+// 不实现 FatalReporter、或 Fatal 返回 nil 的模块直接跳过 - 本接口是可选的，
 // 没有后台循环的设施型模块不需要它
 func (k *Kernel) watchModuleFatal(m Module, out chan<- moduleFailure, done <-chan struct{}) {
 	fr, ok := m.(FatalReporter)
@@ -187,7 +187,7 @@ func (k *Kernel) watchModuleFatal(m Module, out chan<- moduleFailure, done <-cha
 
 // stopAll 反序关闭所有模块，聚合各模块的关闭错误
 //
-// 单个模块关闭出错或超时不打断序列——继续关下一个（尤其是排在最后的 audit
+// 单个模块关闭出错或超时不打断序列 - 继续关下一个（尤其是排在最后的 audit
 // 必须有机会收尾），但错误会被收集并 join 返回，供上层反映到退出码
 func (k *Kernel) stopAll(started []Module) error {
 	var errs []error
@@ -202,7 +202,7 @@ func (k *Kernel) stopAll(started []Module) error {
 // stopModule 关闭单个模块，并强制施加时间上限，返回关闭错误（含超时）
 //
 // Stop 在独立 goroutine 里跑，本函数只等它 stopTimeout 这么久。超时即放弃等待、
-// 返回，让调用方继续关下一个模块——那个卡住的 goroutine 会泄漏，但相比让整条
+// 返回，让调用方继续关下一个模块 - 那个卡住的 goroutine 会泄漏，但相比让整条
 // 关闭序列（含最底层的 audit）永久卡死，泄漏一个 goroutine 是明显更小的代价：
 // 进程随后整体退出，泄漏的 goroutine 随之消失，安全性由 systemd 重启与 MCU
 // 心跳刹停兜底

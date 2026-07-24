@@ -15,17 +15,12 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// ctrlSpawner 是可控的 authority.UnitManager：起进程记账、WaitUnit 阻塞到测试喂一个
-// 退出事件。用真实 *authority.Gate 包着它，好让 service 拿到真实的 ProcessHandle
-// （unit 字段不导出，测试无法伪造，只能经真实 Gate 产生）
 type ctrlSpawner struct {
-	mu       sync.Mutex
-	startN   map[string]int
-	stopN    map[string]int
-	exit     map[string]chan systemd.ExitInfo
-	startErr error
-	// startGate 非 nil 时，StartTransientUnit 会先阻塞等它被关闭，用来模拟「组件仍在
-	// Starting、Handle 未落定」的窗口，测试此时 Stop 仍能真正停掉 unit（§P0 #4a）
+	mu        sync.Mutex
+	startN    map[string]int
+	stopN     map[string]int
+	exit      map[string]chan systemd.ExitInfo
+	startErr  error
 	startGate chan struct{}
 }
 
@@ -50,13 +45,13 @@ func (s *ctrlSpawner) StartTransientUnit(_ context.Context, spec systemd.UnitSpe
 	gate := s.startGate
 	s.mu.Unlock()
 	if gate != nil {
-		<-gate // 阻塞在 Starting 窗口，直到测试放行
+		<-gate
 	}
 	s.mu.Lock()
 	s.startN[spec.Name]++
 	err := s.startErr
 	s.mu.Unlock()
-	s.exitCh(spec.Name) // 确保 channel 存在
+	s.exitCh(spec.Name)
 	return err
 }
 
@@ -70,7 +65,6 @@ func (s *ctrlSpawner) StopUnit(_ context.Context, name string) error {
 	s.mu.Lock()
 	s.stopN[name]++
 	s.mu.Unlock()
-	// 让阻塞中的 WaitUnit 返回（模拟被停后 unit 变 inactive）
 	select {
 	case s.exitCh(name) <- systemd.ExitInfo{ActiveState: "inactive"}:
 	default:
@@ -87,7 +81,6 @@ func (s *ctrlSpawner) WaitUnit(ctx context.Context, name string) (systemd.ExitIn
 	}
 }
 
-// crash 让某个 unit 的下一次 WaitUnit 返回（模拟崩溃）
 func (s *ctrlSpawner) crash(name string) {
 	s.exitCh(name) <- systemd.ExitInfo{ActiveState: "failed", Result: "exit-code"}
 }
@@ -98,7 +91,6 @@ func (s *ctrlSpawner) starts(name string) int {
 	return s.startN[name]
 }
 
-// fakePkgs 是可控的 PackageLookup
 type fakePkgs struct{ entries []pkgregistry.Entry }
 
 func (f *fakePkgs) List() []pkgregistry.Entry { return f.entries }
@@ -111,7 +103,6 @@ func (f *fakePkgs) Lookup(id string) (pkgregistry.Entry, bool) {
 	return pkgregistry.Entry{}, false
 }
 
-// fakeSafety 记录 Trip 调用
 type fakeSafety struct {
 	mu   sync.Mutex
 	trip int
@@ -180,7 +171,6 @@ type fakeRecorderDiscard struct{}
 
 func (fakeRecorderDiscard) Record(context.Context, audit.Event) {}
 
-// waitFor 轮询 cond 直到成立或超时
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -208,7 +198,6 @@ func TestStart_LaunchesAlwaysOnEnabled(t *testing.T) {
 	unit := unitName("com.example.app", "worker")
 	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
 
-	// LookupByUnit 应能反查到它，状态 Running
 	waitFor(t, time.Second, func() bool {
 		inst, ok := m.LookupByUnit(unit)
 		return ok && inst.State == StateRunning && inst.ComponentID == "worker" && inst.UID == 20001
@@ -229,7 +218,6 @@ func TestCrash_RestartsWithBackoff(t *testing.T) {
 
 	unit := unitName("com.example.app", "worker")
 	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 1 })
-	// 崩一次 → 应被重启（start 计数 >= 2）
 	sp.crash(unit)
 	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 2 })
 }
@@ -238,7 +226,6 @@ func TestCircuitBreak_VitalEscalatesSafety(t *testing.T) {
 	sp := newCtrlSpawner()
 	fs := &fakeSafety{}
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
-		// Platform 信任的 Vital 组件（Ordinary 会被降级，见另一个测试）
 		makeEntry("nervus.core", 20002, identity.TrustPlatform,
 			alwaysOnService("provider", pkgregistry.CriticalityVital)),
 	}}
@@ -249,12 +236,10 @@ func TestCircuitBreak_VitalEscalatesSafety(t *testing.T) {
 	}
 
 	unit := unitName("nervus.core", "provider")
-	// 连续崩溃直到熔断（阈值 5）。每次崩溃后 supervisor 会重启，需等它重新起来再崩
 	for i := 0; i < crashThreshold; i++ {
 		waitFor(t, time.Second, func() bool { return sp.starts(unit) >= i+1 })
 		sp.crash(unit)
 	}
-	// 熔断后：Vital → Safety Trip 被调用；组件进 Failed
 	waitFor(t, 2*time.Second, func() bool { return fs.trips() >= 1 })
 	waitFor(t, time.Second, func() bool {
 		inst, ok := m.LookupByUnit(unit)
@@ -268,7 +253,6 @@ func TestEffectiveCriticality_OrdinaryDowngraded(t *testing.T) {
 	if got := effectiveCriticality(e, c); got != pkgregistry.CriticalityOptional {
 		t.Fatalf("Ordinary vital should downgrade to optional, got %q", got)
 	}
-	// Platform 保留
 	e2 := makeEntry("nervus.core", 20004, identity.TrustPlatform)
 	if got := effectiveCriticality(e2, c); got != pkgregistry.CriticalityVital {
 		t.Fatalf("Platform vital should stay vital, got %q", got)
@@ -293,7 +277,6 @@ func TestStopComponent_NoRestart(t *testing.T) {
 	if err := m.StopComponent(context.Background(), "com.example.app", "worker"); err != nil {
 		t.Fatalf("StopComponent: %v", err)
 	}
-	// 停止是预期内的，不应重启：等一小会，start 计数应稳定在 1
 	time.Sleep(30 * time.Millisecond)
 	if n := sp.starts(unit); n != 1 {
 		t.Fatalf("stopped component restarted: starts=%d, want 1", n)
@@ -304,11 +287,9 @@ func TestStopComponent_NoRestart(t *testing.T) {
 	})
 }
 
-// §P0 #4a：在组件仍处于 Starting（Handle 尚未落定）时请求停止，最终该 unit 仍必须
-// 被真正 StopUnit——不能因为调用方那一刻快照到空 Handle 就漏停，留下野进程
 func TestStopDuringStarting_StillStopsUnit(t *testing.T) {
 	sp := newCtrlSpawner()
-	sp.startGate = make(chan struct{}) // 卡住 StartTransientUnit
+	sp.startGate = make(chan struct{})
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
 		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
 			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
@@ -320,18 +301,13 @@ func TestStopDuringStarting_StillStopsUnit(t *testing.T) {
 	}
 	unit := unitName("com.example.app", "worker")
 
-	// 组件此刻卡在 Starting（StartTransientUnit 阻塞在 gate）。此时请求停止：调用方
-	// 会快照到空 Handle
 	done := make(chan struct{})
 	go func() { _ = m.StopComponent(context.Background(), "com.example.app", "worker"); close(done) }()
-	time.Sleep(20 * time.Millisecond) // 让 StopComponent 先跑（snapshot 空 handle）
+	time.Sleep(20 * time.Millisecond)
 
-	// 放行启动：StartTransientUnit 返回，supervisor 拿到真 Handle，看到 stopCh 已关，
-	// 必须自己 StopUnit
 	close(sp.startGate)
 	<-done
 
-	// 最终该 unit 必须被 StopUnit（证明没有因空 Handle 漏停）
 	waitFor(t, 2*time.Second, func() bool { return sp.stops(unit) >= 1 })
 	waitFor(t, time.Second, func() bool {
 		inst, ok := m.LookupByUnit(unit)
@@ -339,7 +315,6 @@ func TestStopDuringStarting_StillStopsUnit(t *testing.T) {
 	})
 }
 
-// §P1 #6：ReloadPackage 停掉旧实例后用当前 Registry 的新版本重起 always-on 组件
 func TestReloadPackage_RestartsFromCurrentRegistry(t *testing.T) {
 	sp := newCtrlSpawner()
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
@@ -357,7 +332,6 @@ func TestReloadPackage_RestartsFromCurrentRegistry(t *testing.T) {
 	if err := m.ReloadPackage(context.Background(), "com.example.app"); err != nil {
 		t.Fatalf("ReloadPackage: %v", err)
 	}
-	// 旧实例被停、新实例被起：start 计数应升到 2，且最终 Running
 	waitFor(t, 2*time.Second, func() bool { return sp.starts(unit) == 2 })
 	waitFor(t, time.Second, func() bool {
 		inst, ok := m.LookupByUnit(unit)
@@ -365,11 +339,6 @@ func TestReloadPackage_RestartsFromCurrentRegistry(t *testing.T) {
 	})
 }
 
-// 回归测试：startLocked 曾经在 byKey 里已有一个终态（Stopped/Failed）实例时
-// panic("unhandled default case")。internal/endpoint 的 ResolveEndpoint 落地后，
-// 这条路径变成任意已装包 App 都能触发的真实攻击面——对一个此前跑过又停止的
-// on-demand 组件发起 Resolve 就会走到 EnsureStarted → startLocked，把整个 nervud
-// 进程 panic 掉。这里验证：停止后再次 EnsureStarted 必须真正重启，而不是 panic
 func TestEnsureStarted_RestartsAfterStop(t *testing.T) {
 	sp := newCtrlSpawner()
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
@@ -394,7 +363,6 @@ func TestEnsureStarted_RestartsAfterStop(t *testing.T) {
 		return ok && inst.State == StateStopped
 	})
 
-	// 修复前这一步会 panic("unhandled default case")
 	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
 		t.Fatalf("second EnsureStarted after stop: %v", err)
 	}
@@ -405,7 +373,6 @@ func TestEnsureStarted_RestartsAfterStop(t *testing.T) {
 	})
 }
 
-// 回归测试：同上，但覆盖熔断（StateFailed）而不是正常停止后的重启路径
 func TestEnsureStarted_RestartsAfterCircuitBreak(t *testing.T) {
 	sp := newCtrlSpawner()
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
@@ -420,7 +387,6 @@ func TestEnsureStarted_RestartsAfterCircuitBreak(t *testing.T) {
 	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
 		t.Fatalf("first EnsureStarted: %v", err)
 	}
-	// 连续崩溃直到熔断（阈值 crashThreshold）
 	for i := 0; i < crashThreshold; i++ {
 		waitFor(t, time.Second, func() bool { return sp.starts(unit) >= i+1 })
 		sp.crash(unit)
@@ -431,7 +397,6 @@ func TestEnsureStarted_RestartsAfterCircuitBreak(t *testing.T) {
 	})
 	startsBeforeRetry := sp.starts(unit)
 
-	// 修复前这一步会 panic("unhandled default case")
 	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
 		t.Fatalf("EnsureStarted after circuit break: %v", err)
 	}

@@ -1,10 +1,8 @@
-// 见 doc.go 的包说明
+// 本文件是运行期权限授予/撤销：GrantUser（危险）
+// 权限的 (Package, 权限) -> GrantState 状态机，持久化到 registry 目录，并把撤销
+// motion 组权限联动到 control 撤租 + 递增 motion epoch。
 //
-// 本文件是运行期权限授予/撤销（应用层架构决策 §6.2/§6.3/§6.4）：GrantUser（危险）
-// 权限的 (Package, 权限) → GrantState 状态机，持久化到 registry 目录，并把「撤销
-// motion 组权限」联动到 control 撤租 + 递增 motion epoch。
-//
-// 这是「我们独有、Android 没有」的立即撤销能力（§6.4）：撤销后靠写时复制 + 原子指针
+// 这是我们独有、Android 没有的立即撤销能力：撤销后靠写时复制 + 原子指针
 // 让下一次 Allowed 立刻看到，无需等进程重启。
 package permission
 
@@ -22,8 +20,8 @@ import (
 const grantStateFile = "_grants.json"
 
 // LeaseRevoker 是撤销 motion 组权限时对 control 的窄接口依赖：撤销某 Package 持有的
-// 全部 ControlLease，由 control 递增 motion epoch（应用层架构决策 §6.4）。permission
-// 【不直接碰 gate】——epoch 语义归 motion 撤销，不归权限。为 nil 时跳过（未接线阶段）
+// 全部 ControlLease，由 control 递增 motion epoch。permission
+// 不直接碰 gate - epoch 语义归 motion 撤销，不归权限。为 nil 时跳过（未接线阶段）
 type LeaseRevoker interface {
 	RevokeByPackage(pkgID string) error
 }
@@ -38,7 +36,7 @@ type grantKey struct {
 //
 // 与 Registry 的 install-set（写时复制原子指针）分开：install-set 由 pkgregistry
 // 全量投影驱动，而运行期状态由用户确认/撤销驱动，二者更新源不同。grantStore 用
-// 普通锁 + 每次变更落盘——授予/撤销不是高频路径，不需要无锁读
+// 普通锁 + 每次变更落盘 - 授予/撤销不是高频路径，不需要无锁读
 type grantStore struct {
 	mu       sync.RWMutex
 	stateDir string       // 落盘目录（/var/lib/nervus/registry）；空表示不持久化（测试/未接线）
@@ -58,7 +56,7 @@ type diskGrant struct {
 	State      GrantState `json:"state"`
 }
 
-// load 从 stateDir 读回运行期授予状态；文件不存在或损坏都当作「空」（保守：读不出
+// load 从 stateDir 读回运行期授予状态；文件不存在或损坏都当作空（保守：读不出
 // 来的授予绝不能被当成已授予）
 func (g *grantStore) load() {
 	if g.stateDir == "" {
@@ -112,10 +110,10 @@ func (g *grantStore) persistLocked() error {
 	return writeFileAtomic(filepath.Join(g.stateDir, grantStateFile), data, 0o600)
 }
 
-// set 更新 (pkg, perm) 的运行期状态并落盘。若这是把一个 motion 组权限转为【非授予】
-// （撤销/拒绝），联动 revoker 撤租 + 递增 motion epoch（§6.4）
+// set 更新 (pkg, perm) 的运行期状态并落盘。若这是把一个 motion 组权限转为非授予
+// （撤销/拒绝），联动 revoker 撤租 + 递增 motion epoch
 //
-// isMotionGroup 由调用方（Registry，持有 Catalog）判定后传入——grantStore 自己不持
+// isMotionGroup 由调用方（Registry，持有 Catalog）判定后传入 - grantStore 自己不持
 // Catalog，避免它既管状态又管定义两件事
 func (g *grantStore) set(pkg, perm string, state GrantState, isMotionGroup bool) error {
 	g.mu.Lock()
@@ -134,7 +132,7 @@ func (g *grantStore) set(pkg, perm string, state GrantState, isMotionGroup bool)
 	}
 	g.mu.Unlock()
 
-	// 从「已授予」转到「非授予」= 撤销。motion 组权限撤销必须让 control 撤掉该包
+	// 从已授予转到非授予= 撤销。motion 组权限撤销必须让 control 撤掉该包
 	// 的全部 lease（含递增 epoch），否则已拿到 lease 的 App 还能继续让机器人动
 	revoked := prev == GrantStateGranted && state != GrantStateGranted
 	if revoked && isMotionGroup && g.revoker != nil {
@@ -154,8 +152,8 @@ func (g *grantStore) set(pkg, perm string, state GrantState, isMotionGroup bool)
 	return nil
 }
 
-// clearPackage 删除某 Package 的全部运行期授予状态并落盘。卸载时调用——否则同 ID
-// 重装会继承旧的危险权限授予（§P1 修复）
+// clearPackage 删除某 Package 的全部运行期授予状态并落盘。卸载时调用 - 否则同 ID
+// 重装会继承旧的危险权限授予（ 修复）
 func (g *grantStore) clearPackage(pkg string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()

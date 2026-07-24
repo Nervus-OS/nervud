@@ -15,8 +15,6 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// ---- 测试替身 -------------------------------------------------------------
-
 type fakePkgService struct {
 	installTx  []pkgregistry.InstallTransaction
 	installErr error
@@ -63,8 +61,6 @@ func (f *fakePermSetter) SetRuntimeState(pkg, perm string, state permission.Gran
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// startServer 起一个真实 UDS 上的 admin.Server，返回客户端、fakes 与 staging 根。
-// adminUID 默认取当前进程 uid（=允许）；overrides 可改。
 func startServer(t *testing.T, adminUID uint32) (*adminwire.Client, *fakePkgService, *fakeLister, *fakePermSetter, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -99,8 +95,6 @@ func startServer(t *testing.T, adminUID uint32) (*adminwire.Client, *fakePkgServ
 	return adminwire.NewClient(sock), pkgs, reg, perms, stagingRoot
 }
 
-// ---- 测试 -----------------------------------------------------------------
-
 func TestBeginStagingCreatesChildDir(t *testing.T) {
 	client, _, _, _, stagingRoot := startServer(t, uint32(os.Getuid()))
 	resp, err := client.Do(adminwire.Request{Cmd: adminwire.CmdBeginStaging})
@@ -129,7 +123,6 @@ func TestInstallHappyPath(t *testing.T) {
 		GrantedPermissions: []string{"perm.a"},
 	}
 
-	// begin-staging → 写 manifest/sig → install。
 	begin, _ := client.Do(adminwire.Request{Cmd: adminwire.CmdBeginStaging})
 	staging := begin.StagingDir
 	if err := os.WriteFile(filepath.Join(staging, pkgregistry.ManifestFileName), []byte(`{"schema":1}`), 0o644); err != nil {
@@ -161,17 +154,15 @@ func TestInstallHappyPath(t *testing.T) {
 	}
 }
 
-// 路径逃逸：staging 不是 staging 根的直接子目录，一律 CodeBadRequest，且不触碰
-// pkgregistry。
 func TestInstallRejectsPathEscape(t *testing.T) {
 	client, pkgs, _, _, stagingRoot := startServer(t, uint32(os.Getuid()))
 	cases := []string{
-		"/etc",                                   // 完全在外
-		filepath.Join(stagingRoot, "..", "evil"), // 折叠后逃出
-		stagingRoot,                              // 根本身，不是子目录
-		filepath.Join(stagingRoot, "a", "b"),     // 孙目录，非直接子
-		"relative/path",                          // 非绝对
-		"",                                       // 空
+		"/etc",
+		filepath.Join(stagingRoot, "..", "evil"),
+		stagingRoot,
+		filepath.Join(stagingRoot, "a", "b"),
+		"relative/path",
+		"",
 	}
 	for _, sd := range cases {
 		resp, err := client.Do(adminwire.Request{Cmd: adminwire.CmdInstall, StagingDir: sd})
@@ -187,10 +178,9 @@ func TestInstallRejectsPathEscape(t *testing.T) {
 	}
 }
 
-// install 失败时，nervud 补偿删除 CLI 解出的 staging 树（不留孤儿）。
 func TestInstallCleansStagingOnFailure(t *testing.T) {
 	client, pkgs, _, _, _ := startServer(t, uint32(os.Getuid()))
-	pkgs.installErr = context.DeadlineExceeded // 任意失败
+	pkgs.installErr = context.DeadlineExceeded
 
 	begin, _ := client.Do(adminwire.Request{Cmd: adminwire.CmdBeginStaging})
 	staging := begin.StagingDir
@@ -275,8 +265,6 @@ func TestUnknownCommandRejected(t *testing.T) {
 	}
 }
 
-// 对端 UID 不是被许可的运维身份：拒绝，且回 CodeUnauthorized。用 adminUID = 当前
-// uid+1 模拟「连进来的人不是运维」。
 func TestRejectsNonAdminUID(t *testing.T) {
 	client, pkgs, _, _, _ := startServer(t, uint32(os.Getuid())+1)
 	resp, err := client.Do(adminwire.Request{Cmd: adminwire.CmdList})

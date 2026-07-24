@@ -1,5 +1,5 @@
 // 本文件实现 ResolveEndpoint：Caller 把 interface_id 解析成本连接作用域的
-// endpoint_id，解析时完成一次权限裁决（设计方案 §5.2）
+// endpoint_id，并在绑定前完成权限裁决
 package endpoint
 
 import (
@@ -9,7 +9,7 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
-// ResolveEndpoint 处理一次 Caller 发现（设计方案 §5.2）
+// ResolveEndpoint 处理一次 Caller 发现并返回连接作用域的绑定
 func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *ipcv1.ResolveEndpoint) *ipcv1.ResolveEndpointResult {
 	reqID := req.GetRequestId()
 	if m == nil {
@@ -19,7 +19,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 
 	interfaceID := req.GetInterfaceId()
 
-	// 决策 1（设计方案 §6.1）：explicit_component 在 v1 恒 PERMISSION_DENIED——
+	// explicit_component 在 v1 恒为 PERMISSION_DENIED，因为
 	// manifest 目前没有字段能声明"绑定某个具体 Component"，非空必然找不到对应
 	// 声明，直接拒绝即是正确行为，不构成技术债
 	if req.GetExplicitComponent() != "" {
@@ -57,7 +57,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 					ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_VERSION_MISMATCH)
 			}
 
-			// 步骤 5：权限裁决——架构总览 §7 待办列表里等待的那次真正调用
+			// 步骤 5：绑定前查询当前授权，避免 Resolve 只依赖安装期裁决
 			if requiredPermission != "" && !m.perm.Allowed(caller.PackageID, requiredPermission) {
 				m.mu.Unlock()
 				m.audit(caller, "endpoint.ResolveEndpoint", true, errPermissionDenied, requiredPermission)
@@ -90,7 +90,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 					InterfaceMinor:      cand.ifaceMinor,
 					InterfaceSchemaHash: cand.schemaHash,
 					// resource_handle 是已解析的公开 Resource 句柄（来自 Selector 校验，
-					// 见 resolveSelector），不是 Service 注册时上报的原始值——v1 二者在
+					// 见 resolveSelector），不是 Service 注册时上报的原始值 - v1 二者在
 					// base.main 场景下总相等，但语义上前者才是"这次 Resolve 解析到的"
 					ResourceHandle: resourceHandle,
 				},
@@ -120,7 +120,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 					ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_RESOURCE_NOT_FOUND)
 			}
 
-			// 被唤醒：回到候选检查，不假设"广播即成功"（设计方案 §5.2 第 6 步）
+			// 被唤醒：回到候选检查，不假设"广播即成功"
 			continue
 
 		default:
@@ -135,8 +135,8 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 
 // resolveSelector 校验 ResourceSelector 并返回对应的 resource_handle
 //
-// 留空视为隐式取 {type=nervus.resource.motion.base, role=main}（设计方案
-// §5.2 第 2 步 / Resource模块设计方案.md §4.2）；非空则把 Selector 的
+// 留空时使用 {type=nervus.resource.motion.base, role=main} 作为隐式默认值；
+// 非空时把 Selector 的
 // type/role 原样交给 m.resources.Resolve 精确匹配。这条"空 selector 等于
 // 哪个默认值"的规则属于 ResolveEndpoint 这个 wire 消息自身的协议层语义，
 // 因此翻译逻辑留在这里，不下沉进 internal/resource

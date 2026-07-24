@@ -1,14 +1,14 @@
 // 本文件把 .nspkg（zstd 压缩的 tar）解包进一个目标目录。
 //
-// 安全职责（CLI 侧唯一的重活）：解包发生在【提交给 nervud 复核之前】，因此这里
-// 必须严防 tar-slip / zip-slip —— 一个恶意 .nspkg 若带 "../.." 或绝对路径条目，
+// 安全职责（CLI 侧唯一的重活）：解包发生在提交给 nervud 复核之前，因此这里
+// 必须严防 tar-slip / zip-slip - 一个恶意 .nspkg 若带 "../.." 或绝对路径条目，
 // 解包时就能写到目标目录之外（CLI 以 root 运行时后果尤重）。因此逐条目校验：
-// 名字必须是「干净的相对路径、不逃出目标目录」，且只接受普通文件与目录，拒绝
+// 名字必须是干净的相对路径、不逃出目标目录，且只接受普通文件与目录，拒绝
 // 符号链接/硬链接/设备等一切可用于逃逸或提权的类型。
 //
 // 注意分工：nervud 会对 staging 里的每个文件按 manifest.Digests 重新做内容复核
-// （VerifyDigests），因此内容层面的信任锚在 nervud，不在这里；本文件只保证「解包
-// 这一步本身不越界」。
+// （VerifyDigests），因此内容层面的信任锚在 nervud，不在这里；本文件只保证解包
+// 这一步本身不越界。
 package main
 
 import (
@@ -27,7 +27,7 @@ import (
 // 正常 App 载荷绰绰有余；真正的包大小约束由 nervud/manifest 侧负责。
 const maxEntryBytes = 64 << 20
 
-// maxTotalEntries 是一个 .nspkg 允许的条目数上限，挡住「海量小条目」式炸弹。
+// maxTotalEntries 是一个 .nspkg 允许的条目数上限，挡住海量小条目式炸弹。
 const maxTotalEntries = 10000
 
 // unpackNspkg 把 nspkgPath 指向的 .nspkg 解包进 destDir（须已存在）。destDir 由
@@ -45,7 +45,7 @@ func unpackNspkg(nspkgPath, destDir string) error {
 	}
 	defer zr.Close()
 
-	// destDir 的绝对、清理形式，用于逐条目的「不逃出」校验。
+	// destDir 的绝对、清理形式，用于逐条目的不逃出校验。
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
 		return err

@@ -1,8 +1,6 @@
-// 见 doc.go 的包说明
-//
-// 本文件是 manifest.sig 的 wire 格式（应用层架构决策 §2.3/§2.4）：多角色并列签名
+// 本文件是 manifest.sig 的 wire 格式：多角色并列签名
 // 与密钥血统（lineage）的数据模型与结构性校验。这里只解析与查结构，不做任何
-// 密码学验证——真正的验签、信任根解析与 lineage 链式核对在 signature.go
+// 密码学验证 - 真正的验签、信任根解析与 lineage 链式核对在 signature.go
 package pkgregistry
 
 import (
@@ -18,20 +16,20 @@ const (
 	// lineageFormatV1 是本版本认识的唯一 lineage 格式号
 	lineageFormatV1 = 1
 
-	// maxSignatures 一份 manifest.sig 里的签名条目上限（应用层架构决策 §2.3）
+	// maxSignatures 一份 manifest.sig 里的签名条目上限
 	maxSignatures = 8
-	// maxLineageNodes 一条血统链的节点上限，防超长链打爆 CPU（应用层架构决策 §2.4）
+	// maxLineageNodes 一条血统链的节点上限，防超长链打爆 CPU
 	maxLineageNodes = 16
 )
 
-// 签名域分隔前缀：防跨协议签名重用（应用层架构决策 §2.3/§2.4）
+// 签名域分隔前缀：防跨协议签名重用
 //
 //   - manifestSigDomain 覆盖 manifest.json 原始字节
-//   - lineageSigDomain  覆盖 “被授权接替的下一节点” 的 key_id||key
+//   - lineageSigDomain 覆盖 被授权接替的下一节点 的 key_id||key
 //   - lineageBindDomain 把整条血统绑进 developer 签名（见 developerSignMessage）：
-//     否则 developer 只签 manifest 原始字节，血统就是可替换的——中间人能给一份
-//     真实 B 签名的包换上任意 A_evil→B 血统、把 root 毒化成自己的密钥，之后合法
-//     B 升级因 root 不同被拒，形成持久升级 DoS / 身份劫持（P1-5）
+//     否则 developer 只签 manifest 原始字节，血统就是可替换的 - 中间人能给一份
+//     真实 B 签名的包换上任意 A_evil -> B 血统、把 root 毒化成自己的密钥，之后合法
+//     B 升级因 root 不同被拒，形成持久升级 DoS / 身份劫持
 //
 // 这三个常量是签名与验签双方必须逐字节一致的协议真源，改动即破坏兼容。
 // 用 const string（而非 var []byte）：既是真正的常量、不可被运行期改写，也避开
@@ -42,9 +40,9 @@ const (
 	lineageBindDomain = "nervus-lineage-bind-v1\x00"
 )
 
-// SignerRole 是签名者的角色，决定它能证明的最高信任（应用层架构决策 §2.2）
+// SignerRole 是签名者的角色，决定它能证明的最高信任
 //
-// 角色按“权限影响面”而非“组件类型”划分：组件是 app 还是 service 由 manifest 的
+// 角色按权限影响面而非组件类型划分：组件是 app 还是 service 由 manifest 的
 // component.type 表达，用密钥再表达一遍就是两个真相源
 type SignerRole string
 
@@ -55,7 +53,7 @@ const (
 	RoleOEMService        SignerRole = "oem-service"        // OEM：硬件 Provider Service
 	RoleOEMApp            SignerRole = "oem-app"            // OEM：系统软件
 	// RoleOEMTrustSoftware OEM 为普通软件/服务背书（副署）；仍只发 Ordinary 信任，
-	// 作用是“OEM 认可这个第三方包可以装在我的设备上”（应用层架构决策 §2.5）
+	// 作用是OEM 认可这个第三方包可以装在我的设备上
 	RoleOEMTrustSoftware SignerRole = "oem-trust-software"
 )
 
@@ -70,7 +68,7 @@ func (r SignerRole) valid() bool {
 }
 
 // SigAlg 是签名算法。v1 只允许 ed25519；保留字段是为了将来的算法敏捷性，
-// 未知取值一律拒绝，不做“尽量兼容”
+// 未知取值一律拒绝，不做尽量兼容
 type SigAlg string
 
 const SigAlgEd25519 SigAlg = "ed25519"
@@ -88,7 +86,7 @@ var (
 	ErrLineageMalformed = errors.New("pkgregistry: malformed lineage")
 )
 
-// Signature 是 manifest.sig 里的一条签名（应用层架构决策 §2.3）
+// Signature 是 manifest.sig 里的一条签名
 type Signature struct {
 	Role  SignerRole `json:"role"`
 	Alg   SigAlg     `json:"alg"`
@@ -99,7 +97,7 @@ type Signature struct {
 	Sig string `json:"sig"`
 }
 
-// LineageNode 是一条血统链上的一个节点（应用层架构决策 §2.4）
+// LineageNode 是一条血统链上的一个节点
 type LineageNode struct {
 	KeyID string `json:"key_id"`
 	Key   string `json:"key"`
@@ -123,7 +121,7 @@ type SignatureBlock struct {
 
 // ParseSignatureBlock 反序列化 manifest.sig 并做结构性校验
 //
-// 只校验“形状是否合法”：格式号、空字段、条目数上限、key_id 去重、算法/角色可识别、
+// 只校验形状是否合法：格式号、空字段、条目数上限、key_id 去重、算法/角色可识别、
 // lineage 节点上限与首节点无 signed_by_prev。密码学验签在 signature.go
 func ParseSignatureBlock(data []byte) (SignatureBlock, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))

@@ -17,8 +17,6 @@ import (
 	"github.com/nervus-os/nervud/internal/permission"
 )
 
-// --- 签名与 ABI 测试辅助 ---------------------------------------------------
-
 func newDevKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(nil)
@@ -28,7 +26,6 @@ func newDevKey(t *testing.T) ed25519.PrivateKey {
 	return priv
 }
 
-// signManifest 用 developer 密钥对 manifest 原始字节产出一份单签名 manifest.sig
 func signManifest(t *testing.T, priv ed25519.PrivateKey, manifestBytes []byte) []byte {
 	t.Helper()
 	pub := priv.Public().(ed25519.PublicKey)
@@ -50,8 +47,6 @@ func signManifest(t *testing.T, priv ed25519.PrivateKey, manifestBytes []byte) [
 	return data
 }
 
-// testABI 返回当前 Host 的 ABI token；非目标平台（开发机）回落到一个合法 token，
-// 反正 checkHostABI 在 host=="" 时放行
 func testABI() string {
 	if tok := hostABIToken(); tok != "" {
 		return tok
@@ -105,9 +100,6 @@ type fakeAuditor struct{ events []audit.Event }
 
 func (f *fakeAuditor) Record(_ context.Context, ev audit.Event) { f.events = append(f.events, ev) }
 
-// fakePermissionArbiter 默认放行全部请求权限（透传），镜像 Arbitrate 改造前
-// Decision.GrantedPerms 的直通行为，好让不关心权限裁决细节的既有测试不必
-// 改动断言；需要覆盖裁决细节的测试单独构造自己的 intersect 函数
 type fakePermissionArbiter struct {
 	intersect func(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string)
 	replaced  [][]permission.Grant
@@ -151,10 +143,6 @@ func newTestInstallerWithPerm(t *testing.T) (*Module, *fakeInstaller, *fakeIdent
 	return mod, auth, idReg, aud, perm
 }
 
-// newValidStaging 构造一份内容与 manifest digest 一致、并带 developer 签名的
-// staging，返回 (staging 目录, manifest 原始字节, manifest.sig 字节)。用一把随机
-// 密钥、固定 version_code=100，适合只安装一次的用例；需要升级连续性的用例请用
-// newValidStagingWithKey 显式共享同一把密钥
 func newValidStaging(t *testing.T, root, packageID, version string) (string, []byte, []byte) {
 	t.Helper()
 	return newValidStagingWithKey(t, root, packageID, version, 100, newDevKey(t))
@@ -183,8 +171,6 @@ func newValidStagingWithKey(
 	return staging, mb, sig
 }
 
-// writeStagingMetadata 把 manifest.json/manifest.sig 写进 staging，满足 Install 的
-// verifyStagingMetadata（落盘树里的元数据必须与验签字节逐字节一致）
 func writeStagingMetadata(t *testing.T, staging string, manifestBytes, sig []byte) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(staging, ManifestFileName), manifestBytes, 0o644); err != nil {
@@ -213,7 +199,6 @@ func TestInstall_Success(t *testing.T) {
 	if entry.Manifest.PackageID != "com.example.app" || entry.ActiveVersion != "1.0.0" {
 		t.Fatalf("got entry %+v", entry)
 	}
-	// 动态安装永远只能拿 Ordinary（架构 §7），即便未来签名验证落地也不改变这点
 	if entry.Trust != identity.TrustOrdinary {
 		t.Fatalf("Trust = %v, want TrustOrdinary", entry.Trust)
 	}
@@ -231,7 +216,6 @@ func TestInstall_Success(t *testing.T) {
 		t.Fatalf("Registry.Len() = %d, want 1", mod.registry.Len())
 	}
 
-	// 审计必须记到一次成功
 	found := false
 	for _, ev := range aud.events {
 		if ev.Action == "pkgregistry.Install" && !ev.Denied {
@@ -248,7 +232,6 @@ func TestInstall_RejectsOnDigestMismatch(t *testing.T) {
 	root := t.TempDir()
 	staging, manifestBytes, sig := newValidStaging(t, root, "com.example.app", "1.0.0")
 
-	// 篡改 staging 里的文件内容，使其与 manifest 声明的 digest 不再一致
 	if err := os.WriteFile(filepath.Join(staging, "bin"), []byte("tampered"), 0o755); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
@@ -259,15 +242,14 @@ func TestInstall_RejectsOnDigestMismatch(t *testing.T) {
 	if !errors.Is(err, ErrDigestMismatch) {
 		t.Fatalf("err = %v, want ErrDigestMismatch", err)
 	}
-	// digest 复核失败必须在触碰 Authority 之前就短路，不留半成品
 	if len(auth.installed) != 0 || len(auth.dataDirs) != 0 {
-		t.Fatalf("Authority 不该被调用: installed=%d dataDirs=%d", len(auth.installed), len(auth.dataDirs))
+		t.Fatalf("Authority should not be called: installed=%d dataDirs=%d", len(auth.installed), len(auth.dataDirs))
 	}
 	if len(idReg.replaced) != 0 {
-		t.Fatal("identity 不该被更新")
+		t.Fatal("identity should not be updated")
 	}
 	if mod.registry.Len() != 0 {
-		t.Fatal("Registry 不该被更新")
+		t.Fatal("Registry should not be updated")
 	}
 }
 
@@ -282,7 +264,7 @@ func TestInstall_RejectsMalformedManifest(t *testing.T) {
 		t.Fatalf("err = %v, want ErrEmptyPackageID", err)
 	}
 	if len(auth.installed) != 0 {
-		t.Fatal("Authority 不该被调用")
+		t.Fatal("Authority should not be called")
 	}
 }
 
@@ -300,10 +282,10 @@ func TestInstall_PropagatesAuthorityFailure(t *testing.T) {
 		t.Fatal("want error")
 	}
 	if mod.registry.Len() != 0 {
-		t.Fatal("Authority 失败后不该提交 Registry")
+		t.Fatal("Registry should not be committed after an Authority failure")
 	}
 	if len(idReg.replaced) != 0 {
-		t.Fatal("Authority 失败后不该更新 identity")
+		t.Fatal("identity should not be updated after an Authority failure")
 	}
 
 	found := false
@@ -317,9 +299,6 @@ func TestInstall_PropagatesAuthorityFailure(t *testing.T) {
 	}
 }
 
-// Install 必须把 permission.Intersect 的裁决结果（而不是请求权限的直通拷贝）
-// 写进 Entry.GrantedPermissions，并把被拒绝的部分记入审计——这是本次改造要
-// 补上的、此前被丢弃的那步计算（见 arbitrate.go 顶部注释）
 func TestInstall_ComputesGrantedPermissions(t *testing.T) {
 	mod, _, _, aud, perm := newTestInstallerWithPerm(t)
 	perm.intersect = func(requested []string, _ identity.TrustProfile, _ []string) (granted, denied []string) {
@@ -365,15 +344,13 @@ func TestInstall_ComputesGrantedPermissions(t *testing.T) {
 	}
 
 	if len(perm.replaced) != 1 || len(perm.replaced[0]) != 1 {
-		t.Fatalf("permission 投影未被正确推送: %+v", perm.replaced)
+		t.Fatalf("permission projection was not published correctly: %+v", perm.replaced)
 	}
 	if got := perm.replaced[0][0]; got.PackageID != "com.example.app" || len(got.Permissions) != 1 {
-		t.Fatalf("投影内容 = %+v", got)
+		t.Fatalf("projection content = %+v", got)
 	}
 }
 
-// 同一个 Package 重复安装新版本必须覆盖旧版本，而不是在 Registry 里堆积两条。
-// 升级必须用同一把 developer 密钥（签名连续性），version_code 单调递增
 func TestInstall_UpgradeReplacesOldVersion(t *testing.T) {
 	mod, _, _, _ := newTestInstaller(t)
 	key := newDevKey(t)
@@ -395,7 +372,7 @@ func TestInstall_UpgradeReplacesOldVersion(t *testing.T) {
 	}
 
 	if mod.registry.Len() != 1 {
-		t.Fatalf("Len() = %d, want 1（升级应覆盖，不应堆积）", mod.registry.Len())
+		t.Fatalf("Len() = %d, want 1 because an upgrade should replace rather than accumulate", mod.registry.Len())
 	}
 	e, ok := mod.registry.Lookup("com.example.app")
 	if !ok || e.ActiveVersion != "2.0.0" || e.VersionCode != 200 {

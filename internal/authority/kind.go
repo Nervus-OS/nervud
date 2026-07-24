@@ -75,7 +75,7 @@ func (s Subject) String() string {
 //
 // # Kind 用于审计归类；Validate 做与调用者无关的自检
 //
-// 可选扩展：请求类型若额外实现 interface{ Detail() string }，返回值会进入
+// 可选扩展：请求类型若额外实现 interface{ Detail string }，返回值会进入
 // 审计记录的 Detail 字段（如目标路径）
 type Request interface {
 	Kind() Kind

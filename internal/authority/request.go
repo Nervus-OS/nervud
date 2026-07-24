@@ -9,7 +9,7 @@
 // EnableFsVerity）的请求形状由各自的第一个真实调用者（identity / service）
 // 落地时倒逼出来，现在定义只会是猜测。特别地 StopProcess 必须等 service 定型：
 // 裸 PID 有复用竞态（PID 被回收后杀错进程），正解是 service 在 spawn 时持有
-// pidfd、Authority 对 pidfd 发信号——那会直接改变请求字段。EnableFsVerity
+// pidfd、Authority 对 pidfd 发信号 - 那会直接改变请求字段。EnableFsVerity
 // 同样推迟：fs-verity 属于加固而非 v1 装包主链路的阻断项
 package authority
 
@@ -21,7 +21,7 @@ import (
 // ---- CreatePrivateDataDirectory ------------------------------------------
 
 // CreateDataDirRequest 创建一个 App 私有数据目录
-// 父目录必须已存在：不做 MkdirAll——每一级目录的创建都应是一次显式的特权操作
+// 父目录必须已存在：不做 MkdirAll - 每一级目录的创建都应是一次显式的特权操作
 type CreateDataDirRequest struct {
 	Path string // 必须位于 Invariants.DataRoot 之下（斜杠分隔的 Linux 绝对路径）
 	UID  uint32 // 属主，必须落在 App UID 段
@@ -51,7 +51,7 @@ func (r CreateDataDirRequest) Validate(inv *Invariants) error {
 	return nil
 }
 
-// DirHandle 是已创建目录的句柄。刻意不暴露裸 fd——
+// DirHandle 是已创建目录的句柄。刻意不暴露裸 fd -
 // 裸 fd 传出包外后任何模块都能对它 write/mmap，Gate 就白设了
 type DirHandle struct{ Path string }
 
@@ -116,15 +116,15 @@ func (g *Gate) Reboot(ctx context.Context, subj Subject, req RebootRequest) erro
 
 // ---- InstallVerifiedPackage -------------------------------------------
 
-// InstallVerifiedPackageRequest 把 pkgregistry 已经独立复核过（签名/digest/
-// 裁决，见 internal/pkgregistry）的 staging 目录原子提交为最终只读代码目录
+// InstallVerifiedPackageRequest 把已经完成签名、digest 和权限裁决的 staging
+// 目录原子提交为最终只读代码目录，避免 Authority 重复实现包验证
 //
-// 本请求只做"移动 + 收紧顶层属主"，不做压缩/展开/复核——压缩展开是
+// 本请求只做"移动 + 收紧顶层属主"，不做压缩/展开/复核 - 压缩展开是
 // pkgmanagerd 的职责，复核是 pkgregistry 的职责，Authority 只负责这一步
 // 唯一有权跨越信任边界的落盘动作
 //
 // 故意不带 UID/GID 字段：最终代码目录的属主是 nervud 自身（见 ops.go 的
-// finishInstalledPackage），不是该 Package 的 App UID——只读代码目录必须
+// finishInstalledPackage），不是该 Package 的 App UID - 只读代码目录必须
 // 让"谁也不能是自己代码的属主"这条底线成立，把属主设成 App UID 反而会让
 // 被攻破的 App 有能力 chmod 回可写、修改自己的可执行代码
 type InstallVerifiedPackageRequest struct {

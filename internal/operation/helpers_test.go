@@ -14,7 +14,6 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
-// 状态码短别名，让断言读起来更紧凑。
 const (
 	acceptedCode  = ipcv1.StatusCode_STATUS_CODE_ACCEPTED
 	okCode        = ipcv1.StatusCode_STATUS_CODE_OK
@@ -26,9 +25,6 @@ const (
 	internalCode  = ipcv1.StatusCode_STATUS_CODE_INTERNAL
 )
 
-// --- fake 依赖 -----------------------------------------------------------
-
-// fakeAuditor 记录全部审计事件，供断言"非法转移/拒绝/终结都记一条"。
 type fakeAuditor struct {
 	mu     sync.Mutex
 	events []audit.Event
@@ -54,19 +50,16 @@ func (f *fakeAuditor) count(action string) int {
 
 func (f *fakeAuditor) has(action string) bool { return f.count(action) > 0 }
 
-// fakeResource 是 ResourceValidator 的测试实现。
 type fakeResource struct{ valid map[string]bool }
 
 func (f fakeResource) Valid(h string) bool { return f.valid[h] }
 
-// fakeLease 是 LeaseValidator 的测试实现。ok 决定是否接受；calls 记录被问过的参数。
 type fakeLease struct {
 	ok bool
 }
 
 func (f fakeLease) ValidLease(_, _ uint64, _ string) bool { return f.ok }
 
-// clock 是可控时钟，供 deadline/超时测试确定性推进。
 type clock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -84,8 +77,6 @@ func (c *clock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// --- 构造 ---------------------------------------------------------------
-
 const testResource = "arm.main"
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -98,10 +89,8 @@ func otherCaller() identity.Caller {
 	return identity.Caller{PackageID: "com.other.app", Trust: identity.TrustOrdinary, UID: 20002}
 }
 
-func systemCaller() identity.Caller { return identity.Caller{} } // 空 PackageID = kernel
+func systemCaller() identity.Caller { return identity.Caller{} }
 
-// newTestManager 构造一个带可控时钟、接受 arm.main 资源、接受 lease 的 Manager。
-// 不启动后台 goroutine：需要 deadline/收敛的测试直接调 scanDeadlines/convergeSupersede。
 func newTestManager(t *testing.T, leaseOK bool) (*Manager, *fakeAuditor, *clock) {
 	t.Helper()
 	aud := &fakeAuditor{}
@@ -125,7 +114,6 @@ func testOrigin() OriginBinding {
 	}
 }
 
-// createMotion 创建一个运动类 operation（leaseID != 0）并断言 ACCEPTED。
 func createMotion(t *testing.T, m *Manager, conn ConnHandle, caller identity.Caller, epoch uint64) uint64 {
 	t.Helper()
 	deadline := m.now().Add(time.Minute)

@@ -1,12 +1,12 @@
-// Package service 管理 App / Service 组件的生命周期（应用层架构决策 §5）。
+// Package service 管理 App / Service 组件的生命周期。
 //
-// 它是「装完的包能不能真正跑起来」的关键一环：pkgregistry 负责把包验证、裁决、
+// 它是装完的包能不能真正跑起来的关键一环：pkgregistry 负责把包验证、裁决、
 // 登记进 Registry，service.Manager 负责把 Registry 里 enabled 的组件经 authority
-// →systemd 拉起成沙箱进程、监视其崩溃并按 criticality 分级处置，并维护一份
-// unit→组件 的反查索引（byUnit）解锁 ipc.verifyComponent（§5.5）。
+// -> systemd 拉起成沙箱进程、监视其崩溃并按 criticality 分级处置，并维护一份
+// unit -> 组件 的反查索引（byUnit）解锁 ipc.verifyComponent。
 //
-// 依赖方向：service → authority（起停进程）、pkgregistry（读 Registry）、
-// audit。它【不】import safety，Vital 组件熔断经窄接口 SafetyEscalator 通知
+// 依赖方向：service -> authority（起停进程）、pkgregistry（读 Registry）、
+// audit。它不import safety，Vital 组件熔断经窄接口 SafetyEscalator 通知
 // （由 main.go 用适配器接到 safety.Trip），避免把 safety 的 ReasonCode 语义
 // 渗进本包。
 package service
@@ -23,7 +23,7 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// State 是一个组件实例的生命周期状态（应用层架构决策 §5.3）
+// State 是一个组件实例的生命周期状态
 type State uint8
 
 const (
@@ -74,10 +74,10 @@ type Instance struct {
 	State  State
 	Handle authority.ProcessHandle
 
-	// crashes 是最近的崩溃时间戳（滑动窗口），用于「<10s 内 5 次 → 熔断」判定
+	// crashes 是最近的崩溃时间戳（滑动窗口），用于<10s 内 5 次 -> 熔断判定
 	crashes []time.Time
 
-	// stopCh 由 requestStop 关闭，通知本实例的 supervisor：这是【预期内】停止，
+	// stopCh 由 requestStop 关闭，通知本实例的 supervisor：这是预期内停止，
 	// WaitProcess 返回后不要重启
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -110,8 +110,8 @@ type PackageLookup interface {
 	List() []pkgregistry.Entry
 }
 
-// SafetyEscalator 在 Vital 组件熔断时被调用，触发 Safety 锁存（§5.4）。
-// service 不 import safety——main.go 用适配器把 Trip() 接到
+// SafetyEscalator 在 Vital 组件熔断时被调用，触发 Safety 锁存。
+// service 不 import safety - main.go 用适配器把 Trip 接到
 // safety.Trip(ReasonSupervisorEscalation)
 type SafetyEscalator interface {
 	Trip()
@@ -131,7 +131,7 @@ type Manager struct {
 
 	mu     sync.Mutex
 	byKey  map[componentKey]*Instance
-	byUnit map[string]*Instance // ← verifyComponent 的反查索引
+	byUnit map[string]*Instance // <- verifyComponent 的反查索引
 
 	// ctx/cancel 控制全部 supervisor goroutine 的 WaitProcess 与退避等待；
 	// Stop 时 cancel 让阻塞中的 WaitProcess 立刻返回
@@ -139,9 +139,9 @@ type Manager struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// fatal 实现 kernel.FatalReporter 的接缝：容量 1。注意组件崩溃【绝不】写它——
-	// §5.4 明确「服务崩溃不能带走内核」，崩溃只会重启/熔断/（Vital）升级 Safety，
-	// 而非 kill nervud。它保留给「Manager 监视基础设施本身不可恢复」这类真·致命，
+	// fatal 实现 kernel.FatalReporter 的接缝：容量 1。注意组件崩溃绝不写它 -
+	// 明确服务崩溃不能带走内核，崩溃只会重启/熔断/（Vital）升级 Safety，
+	// 而非 kill nervud。它保留给 Manager 监视基础设施本身不可恢复这类真正致命、
 	// v1 尚无此路径，故该 channel 目前永不触发
 	fatal chan error
 
@@ -175,9 +175,9 @@ func (m *Manager) Name() string { return "service" }
 // Fatal 实现 kernel.FatalReporter：supervisor 的致命错误经此上报，触发内核反序关闭
 func (m *Manager) Fatal() <-chan error { return m.fatal }
 
-// Start 拉起全部 enabled 且 always-on 的组件（§5.6：注册在 safety 之后、ipc 之前）
+// Start 拉起全部 enabled 且 always-on 的组件（注册在 safety 之后、ipc 之前）
 //
-// 单个组件启动失败只记审计、不阻断整条启动——一个坏组件不该拖垮内核启动。真正
+// 单个组件启动失败只记审计、不阻断整条启动 - 一个坏组件不该拖垮内核启动。真正
 // 阻断启动的是装配级错误（如 auth/pkgs 为 nil），那在 New 之前就该暴露
 func (m *Manager) Start(_ context.Context) error {
 	for _, e := range m.pkgs.List() {
@@ -197,7 +197,7 @@ func (m *Manager) Start(_ context.Context) error {
 }
 
 // Stop 反序停全部实例：先请求每个实例停（intentional），再 cancel 让 WaitProcess
-// 返回，最后 join 全部 supervisor（§5.6 关闭反序：ipc→service→safety）
+// 返回，最后 join 全部 supervisor（ 关闭反序：ipc -> service -> safety）
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	if m.stopped {
@@ -233,7 +233,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// LookupByUnit 按 systemd unit 名反查组件实例快照（解锁 ipc.verifyComponent，§5.5）
+// LookupByUnit 按 systemd unit 名反查组件实例快照，供 IPC 核对 Component 身份
 func (m *Manager) LookupByUnit(unit string) (Instance, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -244,7 +244,7 @@ func (m *Manager) LookupByUnit(unit string) (Instance, bool) {
 	return inst.snapshot(), true
 }
 
-// EnsureStarted 拉起一个 on-demand 组件（Resolve 到其 endpoint 时调用，§5.3）。
+// EnsureStarted 在 endpoint 解析到 on-demand 组件时拉起它。
 // 已在运行则幂等返回
 func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
 	m.mu.Lock()
@@ -275,10 +275,10 @@ func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
 	return nil
 }
 
-// ReloadPackage 在升级后把某 Package 的运行实例切换到新版本（应用层架构决策 §4.3）：
-// 停掉全部旧实例并等它们彻底退出（unit 停稳），再用【当前 Registry 的新版本】重起
-// always-on 组件。先停后起是必须的——组件 unit 名与版本无关，旧 unit 未停就起新版本
-// 会在同一个 unit 名上发生起/停竞态（§P1 升级修复）
+// ReloadPackage 在升级后把某 Package 的运行实例切换到新版本：
+// 停掉全部旧实例并等它们彻底退出（unit 停稳），再用当前 Registry 的新版本重起
+// always-on 组件。先停后起是必须的 - 组件 unit 名与版本无关，旧 unit 未停就起新版本
+// 会在同一个 unit 名上发生起/停竞态（ 升级修复）
 func (m *Manager) ReloadPackage(ctx context.Context, pkg string) error {
 	// 1. 摘下并请求停掉该包全部旧实例
 	m.mu.Lock()
@@ -294,7 +294,7 @@ func (m *Manager) ReloadPackage(ctx context.Context, pkg string) error {
 	m.mu.Unlock()
 
 	// 2. 等旧 supervisor 彻底退出（它们自会 stopProc 停掉 unit）。不持 mu 等待，
-	//    否则与 supervisor 的 setState/onStarted 争锁死锁
+	//  否则与 supervisor 的 setState/onStarted 争锁死锁
 	for _, inst := range olds {
 		select {
 		case <-inst.done:

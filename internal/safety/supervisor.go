@@ -11,7 +11,7 @@ import (
 // Safety Contract 超时与升级、以及 re-arm 的观察。
 //
 // 全部字段只在 Supervisor goroutine 内读写（reconcile/onReport/onTick 都在该 goroutine
-// 串行执行），因此无需同步——唯一对外发布的只读量是 phase（用 atomic 供 SafetySnapshot）。
+// 串行执行），因此无需同步 - 唯一对外发布的只读量是 phase（用 atomic 供 SafetySnapshot）。
 type supervisor struct {
 	gate     *motiongate.Gate
 	ring     *auditRing
@@ -40,7 +40,7 @@ func (s *supervisor) reconcile(now time.Time) {
 	st, ep := s.gate.Snapshot()
 	switch st {
 	case motiongate.StateSafetyLatched:
-		// 新锁存，或恢复阶段被新触发重新锁存（epoch 变了）→ 开新一轮跟踪。
+		// 新锁存，或恢复阶段被新触发重新锁存（epoch 变了） -> 开新一轮跟踪。
 		if !s.active || ep != s.haltEpoch {
 			s.beginHalt(ep, now)
 		}
@@ -53,8 +53,8 @@ func (s *supervisor) reconcile(now time.Time) {
 		}
 	case motiongate.StateOEMRecovery, motiongate.StateRearmRequired:
 		// 仍在安全语义下。通常在 SafetyLatched 阶段就已开跟踪；但若操作序把
-		// latch→(OEMRecovery/RearmRequired) 抢在 Supervisor 处理这一轮之前完成，
-		// beginHalt 就从未跑过——这里补跟踪一次，保证 RevokeAll 与停机审计不因抢跑
+		// latch -> (OEMRecovery/RearmRequired) 抢在 Supervisor 处理这一轮之前完成，
+		// beginHalt 就从未跑过 - 这里补跟踪一次，保证 RevokeAll 与停机审计不因抢跑
 		// 而被整轮跳过。相位从 Requested 起（本轮物理进度未知，只能保守），其 re-arm
 		// 需由超时或 Provider 证据推进落定后才放行。
 		if !s.active || ep != s.haltEpoch {
@@ -113,7 +113,7 @@ func (s *supervisor) onReport(r ProviderReport, _ time.Time) {
 	}
 }
 
-// onTick 周期性检查 Safety Contract 的超时并升级（NRCP §14.4）。任何升级都不清除
+// onTick 周期性检查 Safety Contract 的超时并升级。任何升级都不清除
 // Safety latch、不恢复旧 Lease；只推进跟踪并留审计，实际切电/报警由设备策略与 MCU 承接。
 func (s *supervisor) onTick(now time.Time) {
 	if !s.active || s.tracker.terminal {
@@ -128,7 +128,7 @@ func (s *supervisor) onTick(now time.Time) {
 		elapsed > s.contract.ProviderAcceptTimeout {
 		s.esc.acceptTimeout = true
 		s.push(evProviderAcceptTimeout, ReasonSupervisorEscalation, s.tracker.phase, s.haltEpoch)
-		// 标 Provider/Resource FAULT、停普通 Dispatch —— 留待 resource/service 落地接线，v1 仅审计。
+		// 标 Provider/Resource FAULT、停普通 Dispatch - 留待 resource/service 落地接线，v1 仅审计。
 	}
 
 	// device_stop_ack_timeout：尚未 OUTPUT_DISABLED。

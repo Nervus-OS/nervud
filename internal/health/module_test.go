@@ -10,8 +10,6 @@ import (
 	"github.com/nervus-os/nervud/internal/service"
 )
 
-// ---- 测试替身（同 internal/endpoint 的 fakePkgs/fakePerm/fakeStarter 风格）----
-
 type fakeSafetyObserver struct {
 	snap safety.Snapshot
 }
@@ -33,8 +31,6 @@ func (f fakeServiceObserver) Instances() []service.Instance { return f.instances
 func normalSafety() safety.Snapshot {
 	return safety.Snapshot{State: motiongate.StateNormal, Epoch: 1}
 }
-
-// ---- deriveStatus 三档规则 ----
 
 func TestDeriveStatus_HealthyWhenNormalAndNoFailedComponents(t *testing.T) {
 	comps := []service.Instance{{State: service.StateRunning}, {State: service.StateStopped}}
@@ -65,9 +61,6 @@ func TestDeriveStatus_FaultWhenSafetyNotNormal(t *testing.T) {
 	}
 }
 
-// TestDeriveStatus_FaultOutranksDegraded 锁住"Safety 优先于组件熔断"这个前提：
-// 即使同时存在 StateFailed 组件，只要 Safety 不是 NORMAL 就必须报 Fault，
-// 不能被组件级信号盖过
 func TestDeriveStatus_FaultOutranksDegraded(t *testing.T) {
 	comps := []service.Instance{{State: service.StateFailed}}
 	snap := safety.Snapshot{State: motiongate.StateSafetyLatched}
@@ -76,8 +69,6 @@ func TestDeriveStatus_FaultOutranksDegraded(t *testing.T) {
 	}
 }
 
-// TestDeriveStatus_NonFailedStatesIgnored 锁住"只有 StateFailed 才计入 Degraded"：
-// 其余组件状态不应被误判为 Degraded
 func TestDeriveStatus_NonFailedStatesIgnored(t *testing.T) {
 	comps := []service.Instance{
 		{State: service.StateStopped},
@@ -102,7 +93,6 @@ func TestReport_NilObserversFailClosed(t *testing.T) {
 }
 
 func TestReport_PartialNilObserverStillFailsClosed(t *testing.T) {
-	// safety 缺失，即使 control/service 都装配好了，也不能被误判成 Healthy
 	m := New(nil, fakeControlObserver{}, fakeServiceObserver{})
 	r := m.Report()
 	if r.Status != StatusFault {
@@ -117,8 +107,6 @@ func TestReport_NilModuleFailSafe(t *testing.T) {
 		t.Fatalf("(*Module)(nil).Report().Status = %v, want Fault", r.Status)
 	}
 }
-
-// ---- 聚合正确性：原样透传，未被二次改写 ----
 
 func TestReport_AggregatesWithoutRewriting(t *testing.T) {
 	wantSafety := safety.Snapshot{State: motiongate.StateNormal, Epoch: 7, StopPhase: safety.PhaseUnspecified}
@@ -137,8 +125,6 @@ func TestReport_AggregatesWithoutRewriting(t *testing.T) {
 	if r.Control != wantControl {
 		t.Fatalf("Report().Control = %+v, want %+v", r.Control, wantControl)
 	}
-	// service.Instance 含未导出的 slice/channel 字段（crashes/stopCh/done），
-	// 不可比较，因此只断言透传到 Report 的可见状态未被二次改写
 	if len(r.Components) != len(wantComps) {
 		t.Fatalf("Report().Components = %+v, want %+v", r.Components, wantComps)
 	}
@@ -168,8 +154,6 @@ func TestStatusString(t *testing.T) {
 		}
 	}
 }
-
-// ---- Module 生命周期 ----
 
 func TestModuleLifecycle(t *testing.T) {
 	m := New(fakeSafetyObserver{normalSafety()}, fakeControlObserver{}, fakeServiceObserver{})

@@ -1,4 +1,4 @@
-// 本文件是 Gate 与四步流水线 do() 的实现；请求类型见 request.go
+// 本文件是 Gate 与四步流水线 do 的实现；请求类型见 request.go
 // 平台实现见 ops_linux.go / ops_other.go
 package authority
 
@@ -29,7 +29,7 @@ type UnitManager interface {
 // 而不在于挡住已经拿到执行权的攻击者
 //
 // Gate 是 设施 而非 kernel.Module：它没有需要启停的后台循环
-// 由 assemble()直接构造，并注入给各模块，生命周期与进程一致
+// 由 assemble直接构造，并注入给各模块，生命周期与进程一致
 // 注入时按消费者需要给 窄接口，不要把 Gate 整个传下去
 type Gate struct {
 	auditor audit.Recorder
@@ -42,7 +42,7 @@ type Gate struct {
 
 type Config struct {
 	Auditor    audit.Recorder
-	Invariants *Invariants // nil 则用 DefaultInvariants()
+	Invariants *Invariants // nil 则用 DefaultInvariants
 	Log        *slog.Logger
 	// Spawner 是 systemd unit 管理后端（生产由 main.go 用 systemd.Dial 构造并注入）。
 	// nil 时 Gate 仍可用于非进程类操作（装包/删树/设属主/重启）
@@ -75,7 +75,7 @@ func New(cfg Config) (*Gate, error) {
 // 由 internal/permission 的 capability 执法负责，不走这里
 // Policy 的真实客户是 scheduler（RT 优先级授予）与 safety（收紧 OEM Safety Contract，NRCP）
 //
-// 全部导出操作都必须经由本函数：“查了不变量、写了审计”由结构保证，而不是靠开发者自觉
+// 全部导出操作都必须经由本函数：查了不变量、写了审计由结构保证，而不是靠开发者自觉
 // 泛型仅为消除逐操作的重复流水线；Res 为无返回值的操作时取 struct{
 //
 // run 是包内不可导出的平台实现，不接受外部注入

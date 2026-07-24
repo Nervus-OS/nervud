@@ -50,9 +50,6 @@ func TestValid(t *testing.T) {
 	}
 }
 
-// TestMultiEntry_RoutesIndependently 锁住"实现是通用查表，不是单条记录的特化
-// 逻辑"这个设计前提（设计方案 §7）：即使 v1 只发一条，NewRegistry 传两条不
-// 冲突的 Entry 时 Resolve/Valid 都要能正确路由到各自的记录
 func TestMultiEntry_RoutesIndependently(t *testing.T) {
 	reg, err := NewRegistry([]Entry{
 		{Handle: "base.main", Type: "nervus.resource.motion.base", Role: "main", AccessMode: "exclusive_control"},
@@ -120,16 +117,14 @@ func TestNewRegistry_RejectsInconsistentTable(t *testing.T) {
 	}
 }
 
-// ---- 零值 / 未初始化 fail-safe ------------------------------------------------
-
 func TestNilRegistry_FailSafe(t *testing.T) {
 	var r *Registry
 
 	if _, ok := r.Resolve("t", "r"); ok {
-		t.Fatal("nil Registry 的 Resolve 不该命中")
+		t.Fatal("Resolve on a nil Registry should not match")
 	}
 	if r.Valid("base.main") {
-		t.Fatal("nil Registry 的 Valid 不该为 true")
+		t.Fatal("Valid on a nil Registry should not return true")
 	}
 }
 
@@ -137,13 +132,13 @@ func TestNilModule_FailSafe(t *testing.T) {
 	var m *Module
 
 	if _, ok := m.Resolve("t", "r"); ok {
-		t.Fatal("nil Module 的 Resolve 不该命中")
+		t.Fatal("Resolve on a nil Module should not match")
 	}
 	if m.Valid("base.main") {
-		t.Fatal("nil Module 的 Valid 不该为 true")
+		t.Fatal("Valid on a nil Module should not return true")
 	}
 	if err := m.Stop(context.Background()); err != nil {
-		t.Fatalf("nil Module 的 Stop 不该报错: %v", err)
+		t.Fatalf("Stop on a nil Module should not return an error: %v", err)
 	}
 }
 

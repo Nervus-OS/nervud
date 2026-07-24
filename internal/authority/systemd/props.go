@@ -1,10 +1,10 @@
-// 本文件是 StartTransientUnit 的属性构造与本地白名单校验（应用层架构决策 §5.2）。
+// 本文件是 StartTransientUnit 的属性构造与本地白名单校验。
 //
 // 这里只做纯数据变换（UnitSpec -> []property）与形状校验，不发起任何 D-Bus 调用，
-// 因此可在没有 systemd 的环境下完整单测——把「哪些 sandbox/limit 属性、什么类型」
-// 这一层与「真正打 D-Bus」（systemd.go）分开，是为了让最容易写错的属性映射有回归锁。
+// 因此可在没有 systemd 的环境下完整单测 - 把哪些 sandbox/limit 属性、什么类型
+// 这一层与真正打 D-Bus（systemd.go）分开，是为了让最容易写错的属性映射有回归锁。
 //
-// 依赖边界：本子包是【全仓库唯一】允许 import github.com/godbus/dbus/v5 的地方
+// 依赖边界：本子包是全仓库唯一允许 import github.com/godbus/dbus/v5 的地方
 // （.golangci.yml 的 godbus-boundary depguard 规则），它属于 nervud 的 TCB，
 // 按内核依赖对待（固定版本、提交 go.sum、纳入 SBOM）。
 package systemd
@@ -37,7 +37,7 @@ const (
 	RuntimeJVM
 )
 
-// Limits 是传给 systemd 的资源上限（应用层架构决策 §3.4/§5.2）。零值表示不设该项
+// Limits 是传给 systemd 的资源上限。零值表示不设该项
 type Limits struct {
 	MemoryMaxBytes uint64
 	// CPUQuotaPercent 是 CPU 配额百分比（100 = 一个核）。转成 CPUQuotaPerSecUSec
@@ -45,13 +45,13 @@ type Limits struct {
 	TasksMax        uint64
 }
 
-// Sandbox 是进程的隔离 profile（应用层架构决策 §5.2）。字段直接映射 systemd 属性；
+// Sandbox 是进程的隔离 profile。字段直接映射 systemd 属性；
 // 由 authority 按 trust/组件类型填好后传入，systemd 子包只负责把它翻成 D-Bus 属性
 type Sandbox struct {
-	// ReadWritePaths 在 ProtectSystem=strict 下【必须】列出组件可写的目录——strict
+	// ReadWritePaths 在 ProtectSystem=strict 下必须列出组件可写的目录 - strict
 	// 把整个文件系统设为只读，不显式放行则连自己的私有数据目录都写不了
 	ReadWritePaths []string
-	// ReadOnlyPaths / InaccessiblePaths 让「其它 Package 的目录」不可读写
+	// ReadOnlyPaths / InaccessiblePaths 让其它 Package 的目录不可读写
 	ReadOnlyPaths     []string
 	InaccessiblePaths []string
 }
@@ -70,7 +70,7 @@ type UnitSpec struct {
 	Sandbox     Sandbox
 	// BindToUnit 非空时给瞬态 unit 加 BindsTo/After=<该 unit>：绑定的 unit 一旦
 	// inactive/failed（含 nervud 被 SIGKILL 后 nervud.service 进入 failed），systemd
-	// 会连带停掉本 unit，杜绝「nervud 死了、组件还归 systemd 持有继续跑」。生产设为
+	// 会连带停掉本 unit，杜绝nervud 死了、组件还归 systemd 持有继续跑。生产设为
 	// nervud.service；测试留空（避免绑一个不存在的 unit 导致起不来）
 	BindToUnit string
 }
@@ -96,8 +96,8 @@ type restrictSet struct {
 	Values    []string
 }
 
-// validateSpec 做发起 D-Bus 前的本地白名单校验（§5.1「本地白名单校验，不接受调用方
-// 传任意 systemd property」）。返回 nil 才允许构造属性
+// validateSpec 做发起 D-Bus 前的本地白名单校验（本地白名单校验，不接受调用方
+// 传任意 systemd property）。返回 nil 才允许构造属性
 func validateSpec(spec UnitSpec) error {
 	if !validUnitName(spec.Name) {
 		return fmt.Errorf("%w: %q", ErrInvalidUnitName, spec.Name)
@@ -123,9 +123,9 @@ func validateSpec(spec UnitSpec) error {
 
 // BuildProperties 把 UnitSpec 翻成 StartTransientUnit 的属性数组
 //
-// 属性集固定（§5.2）：调用方只能通过 UnitSpec 的受限字段影响 exec/uid/limits/沙箱
+// 属性集固定：调用方只能通过 UnitSpec 的受限字段影响 exec/uid/limits/沙箱
 // 路径，不能注入任意 systemd property。沙箱硬项（NoNewPrivileges/ProtectSystem=strict/
-// PrivateDevices/…）无条件加上，不给放宽入口
+// PrivateDevices/...）无条件加上，不给放宽入口
 func BuildProperties(spec UnitSpec) ([]property, error) {
 	if err := validateSpec(spec); err != nil {
 		return nil, err
@@ -140,7 +140,7 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 		{"Group", dbus.MakeVariant(fmt.Sprintf("%d", spec.GID))},
 		{"WorkingDirectory", dbus.MakeVariant(spec.WorkingDir)},
 
-		// ---- §5.2 通用沙箱硬项（无条件）----
+		// ---- 通用沙箱硬项（无条件）----
 		{"NoNewPrivileges", dbus.MakeVariant(true)},
 		{"ProtectSystem", dbus.MakeVariant("strict")},
 		{"ProtectHome", dbus.MakeVariant("yes")},
@@ -152,7 +152,7 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 		{"RestrictSUIDSGID", dbus.MakeVariant(true)},
 		{"RestrictRealtime", dbus.MakeVariant(true)},
 		// SystemCallFilter=@system-service（whitelist）已排除 @mount/@module/@raw-io/
-		// @privileged/@debug（§5.2）
+		// @privileged/@debug
 		{"SystemCallFilter", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"@system-service"}})},
 		// 仅允许 UNIX/INET/INET6：堵住 raw/packet socket 等
 		{"RestrictAddressFamilies", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"AF_UNIX", "AF_INET", "AF_INET6"}})},

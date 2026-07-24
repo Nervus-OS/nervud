@@ -55,7 +55,6 @@ func TestVerifyDigests_DetectsMismatch(t *testing.T) {
 
 func TestVerifyDigests_DetectsMissing(t *testing.T) {
 	root := t.TempDir()
-	// bin/app 被 manifest 声明，但从未写入磁盘
 	diff, err := VerifyDigests(root, map[string]string{"bin/app": hashOf("x")})
 	if err != nil {
 		t.Fatalf("VerifyDigests: %v", err)

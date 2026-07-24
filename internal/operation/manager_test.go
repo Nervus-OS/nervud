@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-// --- Create 前置校验（spec §5/§10） --------------------------------------
-
 func TestCreate_Validation(t *testing.T) {
 	t.Run("no resources", func(t *testing.T) {
 		m, aud, _ := newTestManager(t, true)
@@ -94,7 +92,6 @@ func TestCreate_Validation(t *testing.T) {
 	})
 }
 
-// TestCreate_MonotonicIDs id 单调递增、不复用、从 1 起（0 为无效哨兵）。
 func TestCreate_MonotonicIDs(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	var prev uint64
@@ -110,29 +107,22 @@ func TestCreate_MonotonicIDs(t *testing.T) {
 	}
 }
 
-// --- 可见性（spec §5：跨 caller 返回 NOT_FOUND，不可区分投影） ----------
-
 func TestVisibility(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
 
-	// 创建者可见。
 	if _, ok := m.Get(testCaller(), id); !ok {
 		t.Fatal("owner must see its own operation")
 	}
-	// 跨 caller 不可见（Get）。
 	if _, ok := m.Get(otherCaller(), id); ok {
 		t.Fatal("cross-caller Get must return not-found")
 	}
-	// 跨 caller Cancel → NOT_FOUND。
 	if code := m.Cancel(otherCaller(), id); code != notFoundCode {
 		t.Fatalf("cross-caller Cancel code=%v, want NOT_FOUND", code)
 	}
-	// 系统（空 PackageID）可见。
 	if _, ok := m.Get(systemCaller(), id); !ok {
 		t.Fatal("system caller must see any operation")
 	}
-	// 跨 caller Subscribe 返回已关闭空通道（不可区分投影）。
 	ch, cancel := m.Subscribe(otherCaller(), id)
 	defer cancel()
 	if _, open := <-ch; open {
@@ -140,22 +130,18 @@ func TestVisibility(t *testing.T) {
 	}
 }
 
-// --- 取消语义（spec §10） -----------------------------------------------
-
 func TestCancel_ThenProviderCancelled(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
 	if err := m.Accept(id, 1); err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	// Cancel → CANCEL_REQUESTED（ACCEPTED ≠ 已取消）。
 	if code := m.Cancel(testCaller(), id); code != acceptedCode {
 		t.Fatalf("Cancel code=%v, want ACCEPTED", code)
 	}
 	if op, _ := m.Get(testCaller(), id); op.State != StateCancelRequested {
 		t.Fatalf("state=%v, want cancel_requested", op.State)
 	}
-	// Provider 确认取消 → CANCELLED。
 	if err := m.Cancelled(id); err != nil {
 		t.Fatalf("Cancelled: %v", err)
 	}
@@ -165,8 +151,6 @@ func TestCancel_ThenProviderCancelled(t *testing.T) {
 	}
 }
 
-// TestSucceedBeforeCancelArrives 设备在取消送达前已完成：Succeed 抢先终结，
-// 随后到达的 Cancel 只是 no-op ACCEPTED，不改终态（spec §3/§10）。
 func TestSucceedBeforeCancelArrives(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
@@ -174,7 +158,6 @@ func TestSucceedBeforeCancelArrives(t *testing.T) {
 	if err := m.Succeed(id, []byte("done")); err != nil {
 		t.Fatalf("Succeed: %v", err)
 	}
-	// 取消送达：已终结，ACCEPTED 但状态不变。
 	if code := m.Cancel(testCaller(), id); code != acceptedCode {
 		t.Fatalf("late Cancel code=%v, want ACCEPTED (received, but no-op)", code)
 	}
@@ -187,20 +170,16 @@ func TestSucceedBeforeCancelArrives(t *testing.T) {
 	}
 }
 
-// --- deadline 超时（spec §10） ------------------------------------------
-
 func TestDeadlineExceeded(t *testing.T) {
 	m, aud, clk := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
 	_ = m.Accept(id, 1)
 
-	// 尚未到期：一次扫描不改变状态。
 	m.scanDeadlines()
 	if op, _ := m.Get(testCaller(), id); op.State != StateRunning {
 		t.Fatalf("before deadline state=%v, want running", op.State)
 	}
 
-	// 推进过 deadline → 扫描收敛为 FAILED(DEADLINE_EXCEEDED)。
 	clk.advance(2 * time.Minute)
 	m.scanDeadlines()
 	op, _ := m.Get(testCaller(), id)
@@ -211,8 +190,6 @@ func TestDeadlineExceeded(t *testing.T) {
 		t.Error("deadline timeout must be audited")
 	}
 }
-
-// --- 连接断开清理（spec §10） -------------------------------------------
 
 func TestReleaseByConn(t *testing.T) {
 	m, aud, _ := newTestManager(t, true)
@@ -229,7 +206,6 @@ func TestReleaseByConn(t *testing.T) {
 	if opA.State != StateFailed {
 		t.Fatalf("conn-A op state=%v, want failed (converged)", opA.State)
 	}
-	// 只清理断开连接名下的 operation，别的连接不受影响。
 	opB, _ := m.Get(testCaller(), idB)
 	if opB.State != StateRunning {
 		t.Fatalf("conn-B op state=%v, want running (untouched)", opB.State)
@@ -238,8 +214,6 @@ func TestReleaseByConn(t *testing.T) {
 		t.Error("conn cleanup must be audited")
 	}
 }
-
-// --- 订阅 fan-out --------------------------------------------------------
 
 func TestSubscribe_ReceivesEventsAndClosesOnTerminal(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
@@ -258,13 +232,11 @@ func TestSubscribe_ReceivesEventsAndClosesOnTerminal(t *testing.T) {
 	if ev.Kind != EventProgress || string(ev.Payload) != "50%" {
 		t.Fatalf("progress event = %+v", ev)
 	}
-	// Origin 绑定必须随事件投影，供 SDK 重连解码。
 	if ev.Origin.InterfaceID != "nervus.manipulator" {
 		t.Fatalf("event must carry origin binding, got %+v", ev.Origin)
 	}
 
 	_ = m.Succeed(id, nil)
-	// 终态事件 + 通道随后关闭。
 	got := false
 	for e := range ch {
 		if e.Kind == EventState && e.State == StateSucceeded {
@@ -275,8 +247,6 @@ func TestSubscribe_ReceivesEventsAndClosesOnTerminal(t *testing.T) {
 		t.Fatal("did not observe terminal succeeded event before channel closed")
 	}
 }
-
-// --- Module 生命周期（spec §8） -----------------------------------------
 
 func TestModule_StartStopConvergesInflight(t *testing.T) {
 	m, aud, _ := newTestManager(t, true)
@@ -298,7 +268,6 @@ func TestModule_StartStopConvergesInflight(t *testing.T) {
 	}
 }
 
-// TestStop_RejectsNewCreate 停机后不再受理新 operation。
 func TestStop_RejectsNewCreate(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	if err := m.Start(context.Background()); err != nil {

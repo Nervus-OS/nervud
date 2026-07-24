@@ -1,4 +1,4 @@
-// 本文件是 interface 级权限门槛表（设计方案 §4）：endpoint_id/method_id →
+// 本文件是 interface 级权限门槛表：endpoint_id/method_id ->
 // permission ID 的映射手段在 v1 的落地形态，只做到 interface 粒度。方法级
 // （method_id 级）permission/大小上限的 Method Registry 是随 .proto schema
 // 演进的细粒度目录，留待 nervus-ipc 的 schema 工具链落地时接入，不在这里手写
@@ -15,7 +15,7 @@ type InterfaceCatalogEntry struct {
 // InterfaceCatalog 是编译期小表：interface_id -> 权限门槛
 //
 // 零值 InterfaceCatalog（nil map）fail-safe 视为"没有任何已注册接口"，
-// Lookup 一律未命中——与 permission.Catalog 对未初始化状态的处理同一思路
+// Lookup 一律未命中 - 与 permission.Catalog 对未初始化状态的处理同一思路
 type InterfaceCatalog struct {
 	entries map[string]InterfaceCatalogEntry
 }
@@ -37,8 +37,8 @@ func (c InterfaceCatalog) Lookup(id string) (InterfaceCatalogEntry, bool) {
 
 // DefaultInterfaceCatalog 返回编译期硬编码的最小 interface 目录
 //
-// 照抄 permission.DefaultCatalog 的自洽性原则——不要在没有产品侧输入之前
-// 往这里堆更多看起来完备的条目。这里只登记 [REWRITE-v1] 唯一存在的
+// 照抄 permission.DefaultCatalog 的自洽性原则 - 不要在没有产品侧输入之前
+// 往这里堆更多看起来完备的条目。这里只登记 v1 唯一存在的
 // 标准接口，权限 ID 必须与 permission.DefaultCatalog 中登记的一致
 func DefaultInterfaceCatalog() InterfaceCatalog {
 	return NewInterfaceCatalog([]InterfaceCatalogEntry{

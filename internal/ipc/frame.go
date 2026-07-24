@@ -1,11 +1,9 @@
-// 本文件是架构 10.3 的分帧层：控制面 Frame 的字节布局读写
+// 本文件是的分帧层：控制面 Frame 的字节布局读写
 //
-//	┌─────────────────────────────┬──────────────────────────────┐
-//	│ 4-byte uint32 big-endian N  │ N bytes Protobuf Envelope    │
-//	└─────────────────────────────┴──────────────────────────────┘
+// Frame layout: 4-byte big-endian uint32 N, followed by N bytes of Protobuf Envelope.
 //
 // 本层不解码 Envelope，也不认识 endpoint/method，只把字节流切成完整的
-// Envelope 字节块。这样分层让它可以在 net.Pipe() 上完整测试，不需要真 socket
+// Envelope 字节块。这样分层让它可以在 net.Pipe 上完整测试，不需要真 socket
 package ipc
 
 import (
@@ -31,7 +29,7 @@ const lengthPrefixBytes = 4
 // 本层的错误全部是协议违规：出现即关闭连接，不生成 Response
 //
 // 理由：长度字段一旦不可信，后续 Frame 的边界就无法确定，这条连接上的字节流
-// 已经失去意义，回一条错误响应也无处安放——它自己也要靠长度前缀才能被读到
+// 已经失去意义，回一条错误响应也无处安放 - 它自己也要靠长度前缀才能被读到
 var (
 	ErrZeroLength    = errors.New("ipc: frame length is zero")
 	ErrFrameTooLarge = errors.New("ipc: frame length exceeds hard limit")
@@ -42,8 +40,8 @@ var (
 // 它与 ReadFrameBody 必须成对调用，中间那一刻是设置正文 deadline 的唯一时机，
 // 也是本层拆成两个函数的全部理由：
 //
-//	空闲 deadline —— 等下一个 Frame 到来，可以很长（由 Ping/Pong 维持）
-//	正文 deadline —— 已经宣称有 N 字节在路上，必须很短
+//	空闲 deadline - 等下一个 Frame 到来，可以很长（由 Ping/Pong 维持）
+//	正文 deadline - 已经宣称有 N 字节在路上，必须很短
 //
 // 用一个 deadline 同时覆盖两段，等于把空闲容忍度送给了 slowloris：攻击者发完
 // 4 字节长度后每秒挤一个字节，就能长期占住连接、goroutine 和读缓冲
@@ -60,7 +58,7 @@ func ReadFrameHeader(r io.Reader) (uint32, error) {
 		return 0, ErrZeroLength
 	case n > MaxFrameBytes:
 		// 超限立即返回，不分配、也不为了把连接读干净去排空攻击者自称的正文
-		// ——那正是他想要的免费带宽和 CPU。此刻正文一个字节都还没碰过
+		// - 那正是他想要的免费带宽和 CPU。此刻正文一个字节都还没碰过
 		return 0, fmt.Errorf("%w: %d > %d", ErrFrameTooLarge, n, MaxFrameBytes)
 	}
 	return n, nil
@@ -71,7 +69,7 @@ func ReadFrameHeader(r io.Reader) (uint32, error) {
 // buf 由调用方提供并按连接复用，因此稳态下本函数零堆分配
 // n 必须来自同一连接上刚刚成功返回的 ReadFrameHeader
 //
-// 一次 read() 可能只带回半个 Frame，也可能一次带回好几个：UDS 是字节流，
+// 一次 read 可能只带回半个 Frame，也可能一次带回好几个：UDS 是字节流，
 // read 的返回边界不是消息边界，所以必须 ReadFull
 func ReadFrameBody(r io.Reader, buf []byte, n uint32) ([]byte, error) {
 	if int(n) > len(buf) {
@@ -86,10 +84,10 @@ func ReadFrameBody(r io.Reader, buf []byte, n uint32) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// WriteFrame 写出「长度 + 正文」
+// WriteFrame 写出长度 + 正文
 //
 // 调用约束：每条连接只能有一个 writer goroutine 调用本函数。本函数不加锁，
-// 也不打算加——两个 goroutine 并发写同一个 stream，哪怕各自一次 Write 写满，
+// 也不打算加 - 两个 goroutine 并发写同一个 stream，哪怕各自一次 Write 写满，
 // 两个 Frame 的字节也会交错，接收方从此再也找不回边界。串行化是连接层的职责
 //
 // w 应当是 writer goroutine 持有的缓冲 writer，让长度与正文合并成一次系统调用。

@@ -11,12 +11,10 @@ import (
 	"github.com/nervus-os/nervud/internal/sysprobe"
 )
 
-// selfOwner 返回当前进程的 uid/gid，测试用它当「nervud 自身」
 func selfOwner() (uint32, uint32) {
 	return uint32(os.Geteuid()), uint32(os.Getegid())
 }
 
-// baseCfg 造一个只含给定规则、属主为当前进程的 Config
 func baseCfg(rules ...Rule) Config {
 	uid, gid := selfOwner()
 	return Config{Rules: rules, OwnerUID: uid, OwnerGID: gid}
@@ -89,7 +87,6 @@ func TestReadOnlyWrongPermIsFatalNotCorrected(t *testing.T) {
 	if err := Run(cfg); !errors.Is(err, ErrPreflight) {
 		t.Fatalf("want ErrPreflight, got %v", err)
 	}
-	// 关键：只读区【不自动修】——权限必须仍是 0777，证明没有掩盖入侵痕迹
 	st, _ := sysprobe.LstatPath(dir)
 	if st.Perm != 0o777 {
 		t.Fatalf("read-only path was modified: got %#o, must stay 0777", st.Perm)
@@ -98,8 +95,6 @@ func TestReadOnlyWrongPermIsFatalNotCorrected(t *testing.T) {
 
 func TestForeignOwnerIsFatal(t *testing.T) {
 	dir := t.TempDir()
-	// 声明一个不同于当前进程的属主，模拟「被别的进程抢建」——即便可写区也 fatal，
-	// 不 chown 洗白
 	uid, gid := selfOwner()
 	cfg := Config{
 		OwnerUID: uid + 1, OwnerGID: gid,
@@ -128,7 +123,6 @@ func TestSymlinkRejected(t *testing.T) {
 
 func TestFileKindMismatchIsFatal(t *testing.T) {
 	root := t.TempDir()
-	// 规则说这里应是目录，实际放个普通文件
 	f := filepath.Join(root, "x")
 	if err := os.WriteFile(f, []byte("hi"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -142,7 +136,6 @@ func TestFileKindMismatchIsFatal(t *testing.T) {
 func TestNonExactPermOnlyChecksGroupOtherWrite(t *testing.T) {
 	root := t.TempDir()
 	f := filepath.Join(root, "bin")
-	// 0o555：group/other 不可写，non-exact 应放行
 	if err := os.WriteFile(f, []byte("x"), 0o555); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -151,7 +144,6 @@ func TestNonExactPermOnlyChecksGroupOtherWrite(t *testing.T) {
 		t.Fatalf("0555 should pass non-exact check: %v", err)
 	}
 
-	// 0o757：other 可写，non-exact 只读区应 fatal
 	if err := os.Chmod(f, 0o757); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}

@@ -33,36 +33,36 @@ type Scheduler struct {
 	wg     sync.WaitGroup     // 等待全部 lane 真正退出（join）
 }
 
-// SpawnDedicated 启动一个「专属线程 + 实时优先级」的长期运行 goroutine
+// SpawnDedicated 启动一个专属线程 + 实时优先级的长期运行 goroutine
 //
 // 流程说明：
 //
-//	go func() {                     // 1) 新开一个 goroutine
-//	    runtime.LockOSThread()      // 2) 把它钉死在一个专属 OS 线程上：
-//	                                //    此后 Go 调度器不会把别的 goroutine 调度到
-//	                                //    这个线程，也不会把当前 goroutine 搬到别的线程
-//	                                //    这是「让调度优先级稳定生效」的前提
-//	                                //    注意：这里【故意不】defer UnlockOSThread —— 因为
-//	                                //    这个线程被赋予了实时优先级，不能再归还给 Go 运行时
-//	                                //    复用（否则普通 goroutine 会意外继承高优先级）
-//	                                //    fn 返回后让该线程随 goroutine 一起结束最干净
-//	    lane.applySelf()            // 3) 对当前(已锁定)线程设置 SCHED_FIFO/RR + 优先级
-//	    ready <- err                // 4) 把设置结果同步回报给调用方
-//	    fn(ctx)                     // 5) 运行实际循环，直到 Shutdown 取消 ctx
+//	go func {           // 1) 新开一个 goroutine
+//	  runtime.LockOSThread   // 2) 把它钉死在一个专属 OS 线程上：
+//	                //  此后 Go 调度器不会把别的 goroutine 调度到
+//	                //  这个线程，也不会把当前 goroutine 搬到别的线程
+//	                //  这是让调度优先级稳定生效的前提
+//	                //  注意：这里故意不defer UnlockOSThread - 因为
+//	                //  这个线程被赋予了实时优先级，不能再归还给 Go 运行时
+//	                //  复用（否则普通 goroutine 会意外继承高优先级）
+//	                //  fn 返回后让该线程随 goroutine 一起结束最干净
+//	  lane.applySelf      // 3) 对当前(已锁定)线程设置 SCHED_FIFO/RR + 优先级
+//	  ready <- err        // 4) 把设置结果同步回报给调用方
+//	  fn(ctx)           // 5) 运行实际循环，直到 Shutdown 取消 ctx
 //	}(
 //
-// 本函数是【同步握手】的：它阻塞到步骤 4)，因此返回时可以确定优先级已经设好
-// （或已确定设不上）。这样调用方才可能对「Safety Lane 没有实时优先级」做出反应
+// 本函数是同步握手的：它阻塞到步骤 4)，因此返回时可以确定优先级已经设好
+// （或已确定设不上）。这样调用方才可能对Safety Lane 没有实时优先级做出反应
 // 而不是只在日志里看到一行错误
 //
-// panic 策略：lane 内 panic 【不 recover】。nervud 整体崩溃退出，由 systemd 重启 +
-// MCU 心跳刹停兜底。禁止 recover 后继续运行——状态不明的 Safety 路径比死掉的更危险
+// panic 策略：lane 内 panic 不 recover。nervud 整体崩溃退出，由 systemd 重启 +
+// MCU 心跳刹停兜底。禁止 recover 后继续运行 - 状态不明的 Safety 路径比死掉的更危险
 //
 // 参数：
-//   - name     Lane 名称，用于日志与诊断
-//   - policy   调度策略（FIFO/RR/NORMAL）
+//   - name   Lane 名称，用于日志与诊断
+//   - policy  调度策略（FIFO/RR/NORMAL）
 //   - priority 实时优先级（1..99；NORMAL 时被忽略并置 0）
-//   - fn       长期运行的循环，必须在 ctx.Done() 时尽快返回
+//   - fn    长期运行的循环，必须在 ctx.Done 时尽快返回
 //
 // 注意 fn 收到的 ctx 是 Scheduler 自己的 ctx，不是根信号 ctx
 func (s *Scheduler) SpawnDedicated(name string, policy Policy, priority int, fn func(context.Context)) error {
@@ -112,12 +112,12 @@ func (s *Scheduler) SpawnDedicated(name string, policy Policy, priority int, fn 
 // 为什么必须显式 join：lane 跑在专属 OS 线程上，如果 main 直接返回，进程立即结束
 // lane 的收尾逻辑（撤权、刹停确认、审计落盘）不保证跑完。Go 不会等任何 goroutine
 //
-// 调用时机固定为「Kernel.Run 返回之后」，形成确定的关闭序：
+// 调用时机固定为Kernel.Run 返回之后，形成确定的关闭序：
 //
 //	SIGTERM -> Kernel.stopAll（反序停模块）-> Kernel.Run 返回 -> Shutdown（回收 lane）-> main 返回
 //
 // lane 是最底层基建，因此最后回收；ctx 用于给这一步加上限，超时即放弃等待并返回
-// error——此时进程仍会退出，安全性由 systemd 重启与 MCU 心跳刹停兜底
+// error - 此时进程仍会退出，安全性由 systemd 重启与 MCU 心跳刹停兜底
 func (s *Scheduler) Shutdown(ctx context.Context) error {
 	s.cancel()
 

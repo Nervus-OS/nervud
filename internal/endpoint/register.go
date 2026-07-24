@@ -1,5 +1,4 @@
 // 本文件实现 RegisterEndpoint：Service 向 nervud 报到一个它已实现的 Interface
-// （设计方案 §5.1）
 package endpoint
 
 import (
@@ -11,7 +10,7 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// RegisterEndpoint 处理一次 Service 报到（设计方案 §5.1）
+// RegisterEndpoint 处理一次 Service 报到
 func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *ipcv1.RegisterEndpoint) *ipcv1.RegisterEndpointResult {
 	reqID := req.GetRequestId()
 	if m == nil {
@@ -25,7 +24,7 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 		return registerFailure(reqID, code)
 	}
 
-	// 步骤 1：该连接必须已握手完成（caller.ComponentID 非空，见 ipc §5.5 的组件核对）
+	// 步骤 1：该连接必须已握手完成（caller.ComponentID 非空，见 ipc 的组件核对）
 	if caller.ComponentID == "" {
 		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION, "handshake not complete: no component id")
 	}
@@ -67,14 +66,14 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "missing permission "+permID)
 	}
 
-	// 步骤 4：resource_handle 校验——空字符串表示未指定、视为合法，非空则必须
-	// 是 Resource Registry 里的一个已知句柄（Resource模块设计方案.md §4.3）
+	// 步骤 4：resource_handle 校验。空字符串表示未指定，非空值必须
+	// 是 Resource Registry 里的已知句柄，避免注册悬空路由
 	resourceHandle := req.GetResourceHandle()
 	if resourceHandle != "" && !m.resources.Valid(resourceHandle) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT, "unsupported resource_handle")
 	}
 
-	// 步骤 5：schema_hash 只记录、不比对（见设计方案 §6.5）
+	// 步骤 5：schema_hash 只记录、不比对，因为 v1 尚无权威 schema Registry
 	var schemaHash []byte
 	if h := req.GetInterfaceSchemaHash(); len(h) > 0 {
 		schemaHash = append([]byte(nil), h...)

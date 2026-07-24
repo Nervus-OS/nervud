@@ -1,4 +1,3 @@
-// 见 doc.go 的包说明。本文件是 staging 根的孤儿清扫：CLI 在 begin-staging 之后、
 // install 之前崩溃/放弃时，会在 staging 根留下未提交的目录。它们不影响正确性
 // （install 只认显式提交的路径），但会占磁盘，因此每次 begin-staging 时best-effort
 // 回收太老的。
@@ -11,8 +10,8 @@ import (
 	"time"
 )
 
-// staleStagingAge 是 staging 目录被视为「孤儿、可回收」的年龄阈值。取 1 小时：
-// 远长于任何正常「begin → 解包 → install」的耗时（秒级），又不至于让孤儿长期
+// staleStagingAge 是 staging 目录被视为孤儿、可回收的年龄阈值。取 1 小时：
+// 远长于任何正常begin -> 解包 -> install的耗时（秒级），又不至于让孤儿长期
 // 堆积。清扫是best-effort，宁可漏删也绝不误删正在用的。
 const staleStagingAge = time.Hour
 

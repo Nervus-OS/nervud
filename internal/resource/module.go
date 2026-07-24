@@ -1,5 +1,3 @@
-// 见 doc.go 的包说明
-//
 // 本文件把 resource 接入 kernel.Module 生命周期
 package resource
 
@@ -7,19 +5,19 @@ import "context"
 
 // Module 把 resource 接入 kernel.Module 生命周期，并把 *Registry 的
 // Resolve/Valid 转发出去，使 *Module 本身即可满足 internal/endpoint 定义的
-// ResourceResolver 窄接口（设计方案 §6 main.go 装配示例）
+// ResourceResolver 窄接口
 //
 // v1 的 Registry 内容在构造时就完全确定（编译期常量，见 DefaultRegistry），
-// 没有需要启动的后台循环，也没有需要停机时收尾的状态——Start/Stop 都是空
-// 操作。做成 Module 而不是像 identity 现在这样的裸库，是为了不让"库 →
-// Module 外壳"这个技术债在 resource 身上重演一次（设计方案 §2）
+// 没有需要启动的后台循环，也没有需要停机时收尾的状态 - Start/Stop 都是空
+// 操作。做成 Module 而不是像 identity 现在这样的裸库，是为了不让"库 ->
+// Module 外壳"这个技术债在 resource 身上重演一次
 type Module struct {
 	registry *Registry
 }
 
 // New 构造 resource 的 Module
 //
-// registry 由调用方在装配阶段构造后传入（通常是 DefaultRegistry()），
+// registry 由调用方在装配阶段构造后传入（通常是 DefaultRegistry），
 // 与 permission.New(registry) 的既有范式一致
 func New(registry *Registry) *Module {
 	return &Module{registry: registry}

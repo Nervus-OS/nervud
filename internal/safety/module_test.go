@@ -31,7 +31,7 @@ func TestStart_SpawnsTwoLanesThenStops(t *testing.T) {
 }
 
 func TestStart_InvalidContractFailsFast(t *testing.T) {
-	m := moduleWith(&fakeSpawner{}, Contract{}) // 全零 = 非法
+	m := moduleWith(&fakeSpawner{}, Contract{})
 	if err := m.Start(context.Background()); err == nil {
 		t.Fatal("Start with invalid contract should fail")
 	}
@@ -54,7 +54,6 @@ func TestLane_UnexpectedExitReportsFatal(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// 模拟「关闭序被打乱」：sched ctx 在模块 Stop 之前被取消 → lane 经 ctx 退出。
 	cancel()
 
 	select {
@@ -65,11 +64,11 @@ func TestLane_UnexpectedExitReportsFatal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected a Fatal report after unexpected lane exit")
 	}
-	_ = m.Stop(context.Background()) // 收尾，让 auditDrain 退出
+	_ = m.Stop(context.Background())
 }
 
 func TestStop_CleanExitNoFatal(t *testing.T) {
-	sp := &fakeSpawner{run: true, ctx: context.Background()} // ctx 永不取消
+	sp := &fakeSpawner{run: true, ctx: context.Background()}
 	m := moduleWith(sp, DefaultContract())
 	if err := m.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -77,7 +76,6 @@ func TestStop_CleanExitNoFatal(t *testing.T) {
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	// 给 lane goroutine 经 stopCh 退出的时间；laneFn 不应上报 Fatal。
 	time.Sleep(50 * time.Millisecond)
 	select {
 	case err := <-m.Fatal():
@@ -91,7 +89,6 @@ func TestAuditDrain_RecordsHaltDelivered(t *testing.T) {
 	m := New(&fakeSpawner{}, motiongate.New(), rec, nil,
 		DefaultContract(), NopPath(), NopReports(), nil)
 
-	// 不起真实 Lane：直接跑一次投递，再手动排空一次（模拟 auditDrain 的一次轮询）。
 	m.deliverHalt()
 	m.drainAll()
 
@@ -113,7 +110,6 @@ func TestObserverAndController(t *testing.T) {
 		t.Fatalf("initial snapshot = %+v, want NORMAL/epoch 1", snap)
 	}
 
-	// RequestStop 同步锁存（不依赖任何 Lane 运行）。
 	m.RequestStop(ReasonOperatorEStop)
 
 	snap := m.SafetySnapshot()
@@ -122,22 +118,20 @@ func TestObserverAndController(t *testing.T) {
 	}
 }
 
-// TestRearmRequiresSettledStopProgress 内核在 re-arm 上只守一条硬前置：停止进度必须
-// 已经落定。停止还在途中就解开 latch，等于在还不知道输出有没有关掉的情况下重新放行运动
 func TestRearmRequiresSettledStopProgress(t *testing.T) {
 	tests := []struct {
 		phase StopPhase
 		allow bool
 	}{
-		{phase: PhaseUnspecified},      // Supervisor 还没开始跟踪
-		{phase: PhaseRequested},        // 刚锁存，停止帧还没发
-		{phase: PhaseSent},             // 发了，没人确认
-		{phase: PhaseProviderAccepted}, // Provider 收了，设备未必停
-		{phase: PhaseMCUAcked},         // MCU 收了，输出未必关
+		{phase: PhaseUnspecified},
+		{phase: PhaseRequested},
+		{phase: PhaseSent},
+		{phase: PhaseProviderAccepted},
+		{phase: PhaseMCUAcked},
 		{phase: PhaseOutputDisabled, allow: true},
 		{phase: PhaseStandstillConfirmed, allow: true},
-		{phase: PhaseDeliveryFault, allow: true},     // 终态：已经必须人工处置
-		{phase: PhaseStandstillTimeout, allow: true}, // 同上，不能永久锁死设备
+		{phase: PhaseDeliveryFault, allow: true},
+		{phase: PhaseStandstillTimeout, allow: true},
 	}
 
 	for _, tc := range tests {
@@ -150,7 +144,6 @@ func TestRearmRequiresSettledStopProgress(t *testing.T) {
 			if !m.gate.RequireRearm() {
 				t.Fatal("RequireRearm should succeed from SAFETY_LATCHED")
 			}
-			// 相位必须绑定到当前这一轮的 halt epoch，否则 Rearm 会因 epoch 不符而拒绝
 			m.phase.Store(packPhase(tc.phase, m.gate.Epoch()))
 
 			if got := m.Rearm(); got != tc.allow {

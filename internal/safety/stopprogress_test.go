@@ -31,10 +31,9 @@ func TestStopTracker_RejectsBackward(t *testing.T) {
 
 func TestStopTracker_CapWithoutEvidence(t *testing.T) {
 	var tr stopTracker
-	tr.begin(false) // 无停稳证据能力
+	tr.begin(false)
 	tr.advance(PhaseOutputDisabled)
 
-	// StandstillConfirmed 被封顶：不接受伪停稳，最多停在 OUTPUT_DISABLED。
 	if tr.advance(PhaseStandstillConfirmed) {
 		t.Fatal("standstill without evidence should not advance past OUTPUT_DISABLED")
 	}
@@ -44,7 +43,6 @@ func TestStopTracker_CapWithoutEvidence(t *testing.T) {
 }
 
 func TestStopTracker_CapWithoutEvidence_FromEarlier(t *testing.T) {
-	// 无证据能力时，StandstillConfirmed 也能把还没到 OUTPUT_DISABLED 的推进到封顶。
 	var tr stopTracker
 	tr.begin(false)
 	tr.advance(PhaseProviderAccepted)

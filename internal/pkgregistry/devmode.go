@@ -1,6 +1,4 @@
-// 见 doc.go 的包说明
-//
-// 本文件是开发者选项里【影响安装裁决】的那几个开关（应用层架构决策 §8.1）。
+// 本文件是开发者选项里影响安装裁决的那几个开关。
 //
 // 为什么权威状态在内核而不是 settingsd：这些开关直接放宽安装裁决，必须由内核
 // 自己持有、自己读取，不能是一个可被普通配置写权限改动的文件。它落在
@@ -30,17 +28,17 @@ type DevMode struct {
 	SkipOEMCountersign       bool `json:"skip_oem_countersign"`
 }
 
-// 磁盘形态：{ "enabled": bool, "options": { ... } }（应用层架构决策 §8.1）
+// 磁盘形态：{ "enabled": bool, "options": { ... } }
 type devModeFile struct {
 	Enabled bool    `json:"enabled"`
 	Options DevMode `json:"options"`
 }
 
-// loadDevMode 读取 devmode 记账文件；文件不存在或损坏都返回“全关”
+// loadDevMode 读取 devmode 记账文件；文件不存在或损坏都返回全关
 //
 // 每次安装现读而不是缓存：devmode 可在运行期由系统设置切换，缓存会让刚关掉的
-// 开关在下一次安装仍然生效。损坏时保守地当作“全关”——一个读不出来的 devmode
-// 绝不能被当成“放宽全部”
+// 开关在下一次安装仍然生效。损坏时保守地当作全关 - 一个读不出来的 devmode
+// 绝不能被当成放宽全部
 func loadDevMode(stateDir string) DevMode {
 	data, err := os.ReadFile(filepath.Join(stateDir, devModeStateFile))
 	if err != nil {

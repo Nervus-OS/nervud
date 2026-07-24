@@ -1,23 +1,22 @@
-// Package systemd 是 nervud 对 systemd（Linux PID 1）的 D-Bus 客户端封装
-// （nervud 内核与系统服务架构决策 §8）。
+// Package systemd 是 nervud 对 systemd（Linux PID 1）的 D-Bus 客户端封装。
 //
-// 职责边界（架构 §8「systemd D-Bus 客户端依赖」）：
+// 职责边界（ D-Bus 客户端依赖）：
 //   - 只允许本子包 import github.com/godbus/dbus/v5：它是对 systemd 的 D-Bus 客户端，
 //     属于 TCB。固定精确版本、提交 go.sum、纳入 SBOM。
 //   - 对传给 StartTransientUnit 的 unit 名、路径、UID、env、property 做本地白名单
 //     校验（见 props.go），禁止调用者传入任意 systemd property。
-//   - D-Bus 断开或返回不确定结果时默认失败，不把「请求已发送」当「进程已安全启动」。
+//   - D-Bus 断开或返回不确定结果时默认失败，不把请求已发送当进程已安全启动。
 //
 // 进程生命周期由 systemd 拥有：本封装用瞬态 .service unit 起进程（StartTransientUnit），
-// 用 StopUnit 停。这【偏离】§5.1 的 pidfd 草图，是刻意的——unit 名是 reuse-safe 的
-// 稳定句柄，systemd 不会像内核回收 PID 那样把 unit 名复用给另一个进程，因此 §5.1 用
-// pidfd 想解决的「裸 PID 复用竞态」在 systemd 托管模型下本就不存在。
+// 用 StopUnit 停。这偏离 的 pidfd 草图，是刻意的 - unit 名是 reuse-safe 的
+// 稳定句柄，systemd 不会像内核回收 PID 那样把 unit 名复用给另一个进程，因此 用
+// pidfd 想解决的裸 PID 复用竞态在 systemd 托管模型下本就不存在。
 //
-// 【为什么用轮询而非 JobRemoved 信号确认作业完成】：godbus 的共享连接在信号缓冲满时会
+// 为什么用轮询而非 JobRemoved 信号确认作业完成：godbus 的共享连接在信号缓冲满时会
 // 静默丢弃信号，而 systemd Manager.Subscribe 会引发持续的信号流（尤其在 degraded 系统上），
-// 二者叠加会让「等某个 job 的 JobRemoved」既可能因丢信号而卡到超时、又可能让 drain 逻辑
-// 陷入活锁。改为在 ctx 界定的超时内轮询 unit 的 ActiveState 直到 active/failed——这既是
-// 「不把请求已发送当已启动」的等价（甚至更强：直接确认 unit 真的 active）保证，又对信号
+// 二者叠加会让等某个 job 的 JobRemoved既可能因丢信号而卡到超时、又可能让 drain 逻辑
+// 陷入活锁。改为在 ctx 界定的超时内轮询 unit 的 ActiveState 直到 active/failed - 这既是
+// 不把请求已发送当已启动的等价（甚至更强：直接确认 unit 真的 active）保证，又对信号
 // 投递可靠性零依赖。轮询间隔远小于起停延迟，起停也非高频路径。
 package systemd
 
@@ -37,7 +36,7 @@ const (
 
 	// startStopPollInterval 是起停确认的轮询间隔；要快，起停延迟通常在百毫秒级
 	startStopPollInterval = 50 * time.Millisecond
-	// waitPollInterval 是「等一个长期运行组件退出」的轮询间隔；要省，崩溃检测容忍
+	// waitPollInterval 是等一个长期运行组件退出的轮询间隔；要省，崩溃检测容忍
 	// 秒级延迟，没必要每 50ms 拍一次每个运行中组件的状态
 	waitPollInterval = 1 * time.Second
 )
@@ -78,8 +77,8 @@ type auxUnit struct {
 	Properties []property
 }
 
-// StartTransientUnit 以瞬态 .service unit 起一个受沙箱约束的进程，并【轮询确认】
-// unit 真正进入 active（或 failed）才返回（架构 §8：不把请求已发送当已启动）
+// StartTransientUnit 以瞬态 .service unit 起一个受沙箱约束的进程，并轮询确认
+// unit 真正进入 active（或 failed）才返回（不把请求已发送当已启动）
 func (c *Conn) StartTransientUnit(ctx context.Context, spec UnitSpec) error {
 	props, err := BuildProperties(spec)
 	if err != nil {
@@ -93,7 +92,7 @@ func (c *Conn) StartTransientUnit(ctx context.Context, spec UnitSpec) error {
 	}
 	return c.pollUntil(ctx, spec.Name, startStopPollInterval, func(info ExitInfo, exists bool) (bool, error) {
 		if !exists {
-			// unit 消失：可能是极短命进程起后即退。视作「起过了」，交给 WaitUnit 收尾
+			// unit 消失：可能是极短命进程起后即退。视作起过了，交给 WaitUnit 收尾
 			return true, nil
 		}
 		switch info.ActiveState {

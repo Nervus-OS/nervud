@@ -1,13 +1,13 @@
 // Command nervusctl 是 nervud 的本地特权运维 CLI：装包/卸载/列表/停用启用/授撤权。
 //
-// 它【不常驻、不持有 Registry 真源】。真源永远是 nervud 进程内的 pkgregistry
-// （架构红线 §10：单写者）。nervusctl 只把命令经特权管理通道（internal/adminwire）
-// 投递给 nervud，由 nervud 执行并复核——签名验证/裁决全部在 nervud，不在 CLI。
+// 它不常驻、不持有 Registry 真源。真源永远是 nervud 进程内的 pkgregistry，
+// 否则多个写者会造成权威状态分叉。nervusctl 只把命令经特权管理通道（internal/adminwire）
+// 投递给 nervud，由 nervud 执行并复核 - 签名验证/裁决全部在 nervud，不在 CLI。
 //
 // 唯一由 CLI 承担的重活是把 .nspkg 解包成 staging 目录（zstd+tar，含防 tar-slip
 // 逃逸），且解包目标是 nervud 经 begin-staging 发回的、它自己掌控的目录。nervud
 // 随后对 staging 里的每个文件重新做 digest 复核，因此 CLI 解包环节即便被做手脚也
-// 会在 nervud 侧被拒——CLI 不是信任锚。
+// 会在 nervud 侧被拒 - CLI 不是信任锚。
 package main
 
 import (
@@ -25,7 +25,7 @@ func main() {
 }
 
 // usage 打印命令总览。放进变量以便 -h 与参数错误共用。
-const usage = `nervusctl — nervud Local privileged O&M tool
+const usage = `nervusctl - nervud local privileged O&M tool
 
 Usage:
   nervusctl [--sock PATH] <command> [arguments...]
@@ -98,7 +98,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// usageErr 标注「参数用法错误」，与运行期失败区分：前者退出 2 并打印用法，
+// usageErr 标注参数用法错误，与运行期失败区分：前者退出 2 并打印用法，
 // 后者退出 1。
 type usageErr struct{ msg string }
 

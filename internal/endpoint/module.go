@@ -1,5 +1,5 @@
-// 本文件把 endpoint 接入 kernel.Module 生命周期，并持有 Register/Resolve/Route
-// 共用的窄接口依赖与内部状态操作（设计方案 §2/§7）
+// 本文件把 endpoint 接入 kernel.Module 生命周期，并集中持有 Register、Resolve
+// 和 Route 共用的窄接口依赖与内部状态
 package endpoint
 
 import (
@@ -14,25 +14,24 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// resourceTypeMotionBase/resourceRoleMain 是空 Selector 时的隐式默认值
-// （Resource模块设计方案.md §4.2）："空 selector 等于哪个默认值"是
-// ResolveEndpoint 这个 wire 消息自身的协议层语义，不属于"Registry 里有哪些
-// 资源"，因此不下沉进 internal/resource，仍留在 endpoint 包内
+// resourceTypeMotionBase/resourceRoleMain 是空 Selector 时的隐式默认值。
+// 默认值属于 ResolveEndpoint 的 wire 语义，不属于 Registry 持有的 Resource
+// 数据，因此常量放在 endpoint 而不是 resource
 const (
 	resourceTypeMotionBase = "nervus.resource.motion.base"
 	resourceRoleMain       = "main"
 )
 
 // perm.service.register(.private) 的权限 ID 必须与 permission.DefaultCatalog
-// 中登记的一致（应用层架构决策 §6.5）。不在这里 import permission 只为两个
+// 中登记的一致。不在这里 import permission 只为两个
 // 字符串常量，避免额外耦合
 const (
 	permServiceRegister        = "perm.service.register"
 	permServiceRegisterPrivate = "perm.service.register.private"
 )
 
-// onDemandStartTimeout 是等待 on-demand 组件完成启动并 RegisterEndpoint 的
-// 上限（设计方案 §5.2 第 6 步："有界超时（如 3s）"）
+// onDemandStartTimeout 限制等待 on-demand 组件启动并 RegisterEndpoint 的时间，
+// 避免一次解析永久占住调用方
 const onDemandStartTimeout = 3 * time.Second
 
 // 诊断/审计用哨兵错误
@@ -46,7 +45,7 @@ var (
 	errOnDemandTimeout   = errors.New("endpoint: timed out waiting for on-demand component to register")
 )
 
-// ---- 窄接口依赖（消费者定义，具体类型隐式满足，设计方案 §2）-----------------
+// 窄接口由消费者定义，具体类型隐式满足，避免 endpoint 依赖完整实现
 
 // PackageLookup 是对 pkgregistry.Registry 的窄接口：读已装包
 //
@@ -72,8 +71,8 @@ type ComponentStarter interface {
 }
 
 // ResourceResolver 是对 resource.Registry 的窄接口：把 (resource_type, role)
-// 解析成 resource_handle，并校验一个 handle 当前是否已知（Resource模块设计
-// 方案.md §2/§6）。实现由 *resource.Registry（或转发它的 *resource.Module）
+// 解析成 resource_handle，并校验一个 handle 当前是否已知。实现由
+// *resource.Registry（或转发它的 *resource.Module）
 // 隐式满足，同 PackageLookup/PermissionChecker/ComponentStarter 的既有模式
 type ResourceResolver interface {
 	Resolve(resourceType, role string) (handle string, ok bool)
@@ -84,7 +83,7 @@ type ResourceResolver interface {
 // 全部运行期状态
 //
 // v1 的 Start/Stop 基本是空操作：它不持有自己的 RT Lane 或后台循环，全部状态
-// 都挂在每条 IPC 连接的生命周期上，随连接创建/销毁（设计方案 §2）
+// 都挂在每条 IPC 连接的生命周期上，随连接创建或销毁
 type Module struct {
 	pkgs      PackageLookup
 	perm      PermissionChecker
@@ -104,7 +103,7 @@ type Module struct {
 	pendingStarts map[componentKey][]chan struct{}
 
 	// generations 记录每个 (pkg,comp,interface) 三元组已经历过的注册次数，
-	// 供 serviceRegistration.generation 使用（设计方案 §4）
+	// 供 serviceRegistration.generation 使用
 	generations map[registrationKey]uint64
 }
 
@@ -126,10 +125,10 @@ func New(pkgs PackageLookup, perm PermissionChecker, starter ComponentStarter, r
 
 func (m *Module) Name() string { return "endpoint" }
 
-// Start 无后台循环需要起——全部状态挂在连接生命周期上（设计方案 §2）
+// Start 无后台循环需要起 - 全部状态挂在连接生命周期上
 func (m *Module) Start(context.Context) error { return nil }
 
-// Stop 只做一次日志层面的"还有 N 个存活 binding"诊断输出（设计方案 §2）
+// Stop 只做一次日志层面的"还有 N 个存活 binding"诊断输出
 func (m *Module) Stop(context.Context) error {
 	if m == nil {
 		return nil
@@ -168,7 +167,7 @@ func (m *Module) connStateLocked(conn ConnHandle) *connState {
 }
 
 // removeFromInterfaceIndexLocked 把 reg 从 byInterface 索引摘掉。调用方必须
-// 持有 m.mu。reg.live 由调用方另行置为 false——两者一起做才是一次完整的失效
+// 持有 m.mu。reg.live 由调用方另行置为 false - 两者一起做才是一次完整的失效
 func (m *Module) removeFromInterfaceIndexLocked(reg *serviceRegistration) {
 	list := m.byInterface[reg.interfaceID]
 	for i, r := range list {
@@ -186,7 +185,7 @@ func (m *Module) removeFromInterfaceIndexLocked(reg *serviceRegistration) {
 
 // visibleCandidatesLocked 返回 byInterface[interfaceID] 中对 callerPkg 可见的
 // registration：跨包只看 VisibilityPublic，同包再加 VisibilityPackage
-// （设计方案 §5.2 第 3 步）。调用方必须持有 m.mu
+// 。调用方必须持有 m.mu
 func (m *Module) visibleCandidatesLocked(callerPkg, interfaceID string) []*serviceRegistration {
 	var out []*serviceRegistration
 	for _, reg := range m.byInterface[interfaceID] {
@@ -198,9 +197,9 @@ func (m *Module) visibleCandidatesLocked(callerPkg, interfaceID string) []*servi
 }
 
 // findOnDemandCandidate 在已装包里找哪个 (pkg, comp) 的 manifest 声明了
-// Exports 含 interfaceID 且对 callerPkg 可见（设计方案 §5.2 第 6 步）
+// Exports 含 interfaceID 且对 callerPkg 可见
 //
-// 不持有 m.mu：pkgs.List() 是 pkgregistry 自己的原子读，不需要 endpoint 的锁
+// 不持有 m.mu：pkgs.List 是 pkgregistry 自己的原子读，不需要 endpoint 的锁
 func (m *Module) findOnDemandCandidate(callerPkg, interfaceID string) (pkg, comp string, found bool) {
 	for _, e := range m.pkgs.List() {
 		for _, c := range e.Manifest.Components {
@@ -224,7 +223,6 @@ func (m *Module) findOnDemandCandidate(callerPkg, interfaceID string) (pkg, comp
 //
 // 等待 channel 必须在调用 EnsureStarted 之前登记，否则组件启动得足够快时，
 // RegisterEndpoint 的广播可能发生在我们登记等待者之前，永远等不到唤醒
-// （设计方案 §5.2 第 6 步）
 func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, err error) {
 	key := componentKey{pkg: pkg, comp: comp}
 	ch := make(chan struct{})

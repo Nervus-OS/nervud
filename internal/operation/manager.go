@@ -1,5 +1,3 @@
-// 见 doc.go 的包说明
-//
 // 本文件是 Operation Manager 的本体：kernel.Module 生命周期、对外操作面
 // （Create/Get/Cancel/Subscribe）、消费者定义的窄接口（ResourceValidator/
 // LeaseValidator）、订阅 fan-out、后台收敛 goroutine，以及无阻塞的 Safety
@@ -32,10 +30,9 @@ type ResourceValidator interface {
 // 的运动，且 epoch 新鲜（= 与活跃 motion epoch 一致）。任何存疑一律返回 false
 // （fail-closed）。
 //
-// v1 尚无 operation 的 wire proto，leaseID↔control 的 lease 句柄（[16]byte +
-// ConnID）映射由 dispatch(B1) 在 proto 冻结后提供；因此 main.go 目前注入一个
-// fail-closed 占位实现，运动类 operation 在 dispatch 接线前一律被前置拒绝。
-// 见 TODO(A-operation-proto) / TODO(B1-dispatch)。
+// v1 尚无 operation 的 wire proto，leaseID <-> control 的 lease 句柄（[16]byte +
+// ConnID）映射要等 dispatch 接线后提供。因此 main.go 目前注入 fail-closed
+// 占位实现，运动类 operation 在 wire 接线前一律被前置拒绝。
 type LeaseValidator interface {
 	ValidLease(leaseID, epoch uint64, resource string) bool
 }
@@ -45,8 +42,8 @@ type LeaseValidator interface {
 // operation，代价可忽略。
 const deadlineScanInterval = 100 * time.Millisecond
 
-// subBuffer 是每个订阅通道的缓冲深度。fan-out 用非阻塞发送，满即丢弃（§9：
-// 别反压——慢消费者不能拖住状态机，更不能拖住 Safety 收敛）。
+// subBuffer 是每个订阅通道的缓冲深度。fan-out 用非阻塞发送，满即丢弃（
+// 别反压 - 慢消费者不能拖住状态机，更不能拖住 Safety 收敛）。
 const subBuffer = 16
 
 // maxDeadlineHorizon 是 Create 允许的最长时效上限。防止一个荒谬的远期 deadline
@@ -65,11 +62,11 @@ type subscription struct {
 	closed bool
 }
 
-// Manager 是 nervud 的 Operation Manager，同时是 kernel.Module（spec §5/§8）。
+// Manager 是 nervud 的 Operation Manager，同时实现 kernel.Module。
 //
-// 并发：一把 mu 保护 ops 与 subs（v1 量小优先简单，spec §9）。终态转移是
-// mu 下的 compare-and-set——只有当前非终态且转移合法才写入，并发的
-// Succeed/Fail/Cancelled 由 mu 决出唯一胜者（铁律 2）。
+// 一把 mu 保护 ops 与 subs；v1 数量小，单锁能保持状态转移和订阅发布一致。终态转移是
+// mu 下的 compare-and-set - 只有当前非终态且转移合法才写入，并发的
+// Succeed/Fail/Cancelled 由 mu 决出唯一胜者。
 type Manager struct {
 	res   ResourceValidator
 	lease LeaseValidator
@@ -89,7 +86,7 @@ type Manager struct {
 	// supersedeEpoch 是 Safety 投递来的"接管边界"：所有 MotionEpoch < 它的
 	// 在跑运动类 operation 都应被收敛为 FAILED。SafetySupersede 只做一次
 	// 原子 max 写 + 一次非阻塞 wake，绝不碰 mu，因此绝不阻塞 Safety Lane
-	// （铁律 4 / §9）。实际收敛在后台 goroutine 里做。
+	// 实际收敛在后台 goroutine 里做，避免阻塞 Safety 调用方。
 	supersedeEpoch atomic.Uint64
 
 	// wake 唤醒后台 goroutine 立刻做一轮收敛（buffered 1 + 非阻塞发送）。
@@ -122,8 +119,8 @@ func New(res ResourceValidator, lease LeaseValidator, aud audit.Recorder, log *s
 func (m *Manager) Name() string { return "operation" }
 
 // Start 起后台收敛 goroutine。它同时负责 deadline 到期扫描与 Safety supersede
-// 收敛。按内核模块生命周期契约（红线 #8 / spec §8），循环退出【只】听 Stop()
-// 关的 stopCh，不听 Start(ctx) 的 ctx——否则会与 stopAll 被同一个信号并行唤醒，
+// 收敛。循环退出只听 Stop
+// 关的 stopCh，不听 Start(ctx) 的 ctx - 否则会与 stopAll 被同一个信号并行唤醒，
 // 停机顺序不再由反序 Stop 唯一决定，收尾（收敛未终结 operation、审计）可能被截断。
 func (m *Manager) Start(_ context.Context) error {
 	go m.loop()
@@ -133,7 +130,7 @@ func (m *Manager) Start(_ context.Context) error {
 	return nil
 }
 
-// Stop 停掉后台 goroutine，并把未终结 operation 按策略收敛为 FAILED（spec §8）。
+// Stop 停掉后台 goroutine，并把未终结 operation 按策略收敛为 FAILED。
 // 停机后不留在跑 operation：新 host session 从空开始，与 motion epoch 语义一致。
 func (m *Manager) Stop(_ context.Context) error {
 	m.stopOnce.Do(func() { close(m.stopCh) })
@@ -174,17 +171,17 @@ func (m *Manager) loop() {
 }
 
 // -------------------------------------------------------------------------
-// 对外操作面（spec §5）
+// 对外操作面
 // -------------------------------------------------------------------------
 
 // Create 创建一个 operation（由 dispatch 在遇到 operation-returning method 时调用）。
 //
-// 校验（spec §5）：resource 有效（ResourceValidator.Valid）、运动类（leaseID != 0）
+// 校验：resource 有效（ResourceValidator.Valid）、运动类（leaseID != 0）
 // 需有效 ControlLease 且 epoch 新鲜、deadline 合理。成功返回 (id, ACCEPTED)；
-// 失败返回 (0, 前置错误码)——前置失败不签发 id、不落库，只记一条审计
+// 失败返回 (0, 前置错误码) - 前置失败不签发 id、不落库，只记一条审计
 // （等价于状态图的 reject-before-start，但无可追踪句柄，见完成记录）。
 //
-// conn 是拥有本 operation 的连接（供连接断开时收敛，spec §5 ListByConn）；
+// conn 是拥有本 operation 的连接，供连接断开时收敛；
 // 系统内部创建传 nil。
 func (m *Manager) Create(conn ConnHandle, caller identity.Caller, origin OriginBinding,
 	resources []string, leaseID, epoch uint64, deadline time.Time) (uint64, ipcv1.StatusCode) {
@@ -196,7 +193,7 @@ func (m *Manager) Create(conn ConnHandle, caller identity.Caller, origin OriginB
 
 	now := m.now()
 	id := m.nextID.Add(1)
-	// 类型绑定归 Manager 所有（铁律 6）：深拷贝 SchemaHash，断开与调用方共享的
+	// 类型绑定归 Manager 所有：深拷贝 SchemaHash，断开与调用方共享的
 	// 底层数组，否则调用方事后改切片就篡改了权威绑定、还会与订阅者读并发成竞态。
 	origin.SchemaHash = cloneBytes(origin.SchemaHash)
 	op := &Operation{
@@ -256,7 +253,7 @@ func (m *Manager) validateCreate(caller identity.Caller, resources []string,
 		return ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT
 	}
 
-	// 运动类：leaseID != 0（数据驱动，见 doc.go）。必须有有效 lease + 新鲜 epoch，
+	// 运动类由 leaseID != 0 数据驱动，必须有有效 lease 和新鲜 epoch，
 	// 且绑定到本 operation 的 resource（v1 单 resource）。
 	if leaseID != 0 {
 		if m.lease == nil {
@@ -273,7 +270,7 @@ func (m *Manager) validateCreate(caller identity.Caller, resources []string,
 }
 
 // Get 快照一个 operation（含 Origin 绑定，供 SDK 重连恢复解码）。
-// 只有创建者 caller 或系统可见；跨 caller 返回未命中（不可区分投影，spec §5）。
+// 只有创建者 caller 或系统可见；跨 caller 返回未命中，避免泄露 operation 是否存在。
 func (m *Manager) Get(caller identity.Caller, id uint64) (Operation, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -284,11 +281,11 @@ func (m *Manager) Get(caller identity.Caller, id uint64) (Operation, bool) {
 	return op.clone(), true
 }
 
-// Cancel 请求取消（→ CANCEL_REQUESTED）。返回 ACCEPTED ≠ 已取消（铁律 5）：
+// Cancel 请求取消（ -> CANCEL_REQUESTED）。返回 ACCEPTED != 已取消：
 // 它只表示取消请求已受理，真正的 CANCELLED 要等 Provider 确认（reporter.Cancelled）。
 //
 // 可见性：跨 caller 返回 NOT_FOUND。已终结的 operation：取消是 no-op，仍返回
-// ACCEPTED（请求已收到，但状态不会变，符合"ACCEPTED≠已取消"语义）。
+// ACCEPTED（请求已收到，但状态不会变，符合"ACCEPTED != 已取消"语义）。
 func (m *Manager) Cancel(caller identity.Caller, id uint64) ipcv1.StatusCode {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -311,7 +308,7 @@ func (m *Manager) Cancel(caller identity.Caller, id uint64) ipcv1.StatusCode {
 // Subscribe 订阅某 operation 的状态/进度事件。返回 (只读通道, 取消函数)。
 //
 // 取消函数幂等：调用即从 fan-out 摘除本订阅并关闭通道。连接断开时由 ipc 调它
-// 清理（spec §5 "连接断开即清理"）。operation 到终态时通道也会被自动关闭。
+// 清理，避免订阅泄漏。operation 到终态时通道也会被自动关闭。
 // 跨 caller 或不存在：返回一个已关闭的空通道 + no-op 取消函数（不可区分投影）。
 func (m *Manager) Subscribe(caller identity.Caller, id uint64) (<-chan Event, func()) {
 	m.mu.Lock()
@@ -322,9 +319,9 @@ func (m *Manager) Subscribe(caller identity.Caller, id uint64) (<-chan Event, fu
 		close(closed)
 		return closed, func() {}
 	}
-	// 若 operation 已终结：没有未来事件可等，直接返回一个已关闭的空通道，【不】
+	// 若 operation 已终结：没有未来事件可等，直接返回一个已关闭的空通道，不
 	// 注册进 m.subs。否则该订阅会一直挂在 fan-out 名单里，只关闭不摘除，调用方若
-	// 不再调 cancel 就永久残留——接上 IPC 后可被反复 Subscribe 撑成内存 DoS。
+	// 不再调 cancel 就永久残留 - 接上 IPC 后可被反复 Subscribe 撑成内存 DoS。
 	if op.State.Terminal() {
 		closed := make(chan Event)
 		close(closed)
@@ -341,7 +338,7 @@ func (m *Manager) Subscribe(caller identity.Caller, id uint64) (<-chan Event, fu
 }
 
 // ReleaseByConn 把某条连接名下所有未终结 operation 收敛为 FAILED（运动类的相关
-// 控制由 control 侧撤租，本包不碰 gate）。连接断开时由 ipc 调用（spec §5）。
+// 控制由 control 侧撤租，本包不碰 gate）。连接断开时由 ipc 调用。
 func (m *Manager) ReleaseByConn(conn ConnHandle) {
 	if conn == nil {
 		return
@@ -358,18 +355,18 @@ func (m *Manager) ReleaseByConn(conn ConnHandle) {
 }
 
 // -------------------------------------------------------------------------
-// Safety 接管（铁律 4 / spec §6/§9）
+// Safety 接管
 // -------------------------------------------------------------------------
 
 // SafetySupersede 由 control/safety 侧在 Safety 触发时调用：把该 epoch 之前所有
 // 在跑的运动类 operation 标记为 FAILED（被接管）。
 //
-// 【绝不阻塞 Safety Lane】：本函数只做一次原子 max 写 + 一次非阻塞 wake 投递即
+// 绝不阻塞 Safety Lane：本函数只做一次原子 max 写 + 一次非阻塞 wake 投递即
 // 返回，不取 mu、不做 fan-out、不做任何可能阻塞的操作。真正的状态收敛在后台
 // goroutine 的 convergeSupersede 里做（用 mu + 非阻塞 fan-out）。因此即便存在
-// 会阻塞的慢订阅者，Safety 路径也不被拖住（spec §10 用会阻塞的 fake 订阅者证明）。
+// 会阻塞的慢订阅者，Safety 路径也不被拖住。
 //
-// epoch 是 Safety 递增【之后】的新 motion epoch：MotionEpoch < epoch 的运动类
+// epoch 是 Safety 递增之后的新 motion epoch：MotionEpoch < epoch 的运动类
 // operation 都诞生于这条撤销边界之前，一律被接管。
 func (m *Manager) SafetySupersede(epoch uint64) {
 	// 原子 max：多次触发只抬高边界，不会被晚到的旧值倒写回去。
@@ -390,7 +387,7 @@ func (m *Manager) SafetySupersede(epoch uint64) {
 }
 
 // convergeSupersede 把 MotionEpoch < supersedeEpoch 的在跑运动类 operation 收敛为
-// FAILED。在后台 goroutine 里跑，可以安全地取 mu 与做 fan-out——它不在 Safety 路径上。
+// FAILED。在后台 goroutine 里跑，可以安全地取 mu 与做 fan-out - 它不在 Safety 路径上。
 func (m *Manager) convergeSupersede() {
 	boundary := m.supersedeEpoch.Load()
 	if boundary == 0 {
@@ -444,7 +441,7 @@ func (m *Manager) reapTerminal() {
 // 内部：转移、终态写入、订阅 fan-out、审计（均要求持有 mu）
 // -------------------------------------------------------------------------
 
-// transitionLocked 应用一次【非终态】转移并 fan-out EventState。调用方须已确认
+// transitionLocked 应用一次非终态转移并 fan-out EventState。调用方须已确认
 // canTransition。终态转移走 terminateLocked（带载荷 + CAS 语义）。
 func (m *Manager) transitionLocked(op *Operation, to State) {
 	op.State = to
@@ -457,7 +454,7 @@ func (m *Manager) transitionLocked(op *Operation, to State) {
 	})
 }
 
-// terminateLocked 是终态写入的唯一入口，compare-and-set 语义（铁律 2）：只有当前
+// terminateLocked 是终态写入的唯一入口，compare-and-set 语义：只有当前
 // 非终态且转移合法才写入。它设置终态载荷、fan-out 终态事件、关闭并摘除全部订阅、
 // 记审计。已是终态或转移非法时是安全 no-op（幂等），不覆盖既有终态。
 func (m *Manager) terminateLocked(op *Operation, to State, status ipcv1.StatusCode,
@@ -469,7 +466,7 @@ func (m *Manager) terminateLocked(op *Operation, to State, status ipcv1.StatusCo
 	op.State = to
 	op.UpdatedAt = m.now()
 	op.TerminalStatus = status
-	// 终态载荷归 Manager 所有（铁律 2/6）：深拷贝，断开与 Provider 调用方共享的
+	// 终态载荷归 Manager 所有：深拷贝，断开与 Provider 调用方共享的
 	// 底层数组，写入后不可被外部改动。
 	switch to {
 	case StateSucceeded:
@@ -492,11 +489,11 @@ func (m *Manager) terminateLocked(op *Operation, to State, status ipcv1.StatusCo
 }
 
 // emitLocked 把一条事件非阻塞 fan-out 给该 operation 的全部订阅者。通道满即丢弃
-// （§9：不反压，慢消费者可随时 Get 补齐）。
+// （不反压，慢消费者可随时 Get 补齐）。
 //
 // 事件里的 byte 切片先深拷贝一份再投递：让订阅者拿到的副本与权威记录的
-// SchemaHash/result/error 底层数组【不共享】——某个订阅者若违约改动切片，只会
-// 弄坏它自己那份，不会篡改记录或与记录的读并发成竞态（铁律 6）。同一批订阅者共享
+// SchemaHash/result/error 底层数组不共享 - 某个订阅者若违约改动切片，只会
+// 弄坏它自己那份，不会篡改记录或与记录的读并发成竞态。同一批订阅者共享
 // 这一份副本，Event 对接收方按只读约定使用。
 func (m *Manager) emitLocked(op *Operation, ev Event) {
 	subs := m.subs[op.ID]
@@ -561,7 +558,7 @@ func (m *Manager) stopping() bool {
 }
 
 // canSee 报告 caller 是否可见 op：系统（空 PackageID = kernel）或创建者本人。
-// 跨 caller 一律不可见（不可区分投影，不泄露他人 operation 存在，spec §5）。
+// 跨 caller 一律不可见，避免泄露他人的 operation 是否存在。
 func canSee(caller identity.Caller, op *Operation) bool {
 	if caller.PackageID == "" {
 		return true // 系统/内核
@@ -570,7 +567,7 @@ func canSee(caller identity.Caller, op *Operation) bool {
 }
 
 // -------------------------------------------------------------------------
-// 审计（spec §6）
+// 审计
 // -------------------------------------------------------------------------
 
 // 审计 Action 名。离线规则按 "operation.<Action>" 匹配。

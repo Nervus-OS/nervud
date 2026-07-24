@@ -1,14 +1,12 @@
-// 见 doc.go 的包说明
-//
-// 本文件是签名验证的密码学核心（应用层架构决策 §2）：Ed25519 多角色并列验签、
-// 密钥血统（lineage）链式核对，以及三层信任根（内嵌平台根 → trust bundle →
+// 本文件是签名验证的密码学核心：Ed25519 多角色并列验签、
+// 密钥血统（lineage）链式核对，以及三层信任根（内嵌平台根 -> trust bundle ->
 // 各 Package 签名）的加载与裁决。
 //
 // 边界纪律：
-//   - 验签一律【针对字节】——覆盖的是 signDomain || manifest.json 原始字节，
+//   - 验签一律针对字节 - 覆盖的是 signDomain || manifest.json 原始字节，
 //     绝不把解析后的 Manifest 重新序列化回去比对（sigblock.go 已重申这条）。
 //   - 信任根不放在可被文件写权限改动的数据里：平台根编译进二进制，bundle 由它
-//     签名，验不过即 fail-closed（应用层架构决策 §2.1）。
+//     签名，验不过即 fail-closed。
 package pkgregistry
 
 import (
@@ -26,8 +24,8 @@ import (
 )
 
 var (
-	// ErrSignatureInvalid 一条签名的密码学验签失败——这是“已执行验证但不通过”，
-	// 与“无法验证”不同：前者是真正的攻击线索/损坏，必须 fail-closed 且记违规
+	// ErrSignatureInvalid 一条签名的密码学验签失败 - 这是已执行验证但不通过，
+	// 与无法验证不同：前者是真正的攻击线索/损坏，必须 fail-closed 且记违规
 	ErrSignatureInvalid = errors.New("pkgregistry: signature verification failed")
 
 	// ErrKeyIDMismatch 内嵌公钥与其自报的 key_id 不一致（key_id 必须等于公钥的 sha256）
@@ -43,7 +41,7 @@ var (
 	// ErrDeveloperKeyNotCurrent developer 签名不是由 lineage 最后一个节点（当前有效密钥）产生
 	ErrDeveloperKeyNotCurrent = errors.New("pkgregistry: developer signature not from current lineage key")
 
-	// ErrNoDeveloperSignature 动态安装包缺少 developer 角色签名——它是身份与
+	// ErrNoDeveloperSignature 动态安装包缺少 developer 角色签名 - 它是身份与
 	// 血统的锚点，没有它就无法做 TOFU/防身份劫持
 	ErrNoDeveloperSignature = errors.New("pkgregistry: package has no developer signature")
 
@@ -57,12 +55,12 @@ func keyIDOf(pub ed25519.PublicKey) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// developerSignMessage 返回 developer 签名【应当覆盖】的字节
+// developerSignMessage 返回 developer 签名应当覆盖的字节
 //
 // 无 lineage（单节点 TOFU）：只覆盖 manifestSigDomain || manifestBytes，向下兼容。
-// 有 lineage：额外把整条血统摘要绑进来——否则 developer 只签 manifest，血统字段
-// 就是可替换的，中间人能给一份真实 B 签名的包换上任意 A_evil→B 血统、毒化 root
-// （P1-5，应用层架构决策 §2.4/§2.6）。绑定用血统全部节点 key_id 的有序摘要：
+// 有 lineage：额外把整条血统摘要绑进来 - 否则 developer 只签 manifest，血统字段
+// 就是可替换的，中间人能给一份真实 B 签名的包换上任意 A_evil -> B 血统、毒化 root
+// 绑定使用血统全部节点 key_id 的有序摘要：
 // 每个 key_id 后接 NUL 分隔（key_id 是 "sha256:hex"，不含 NUL，无歧义）
 func developerSignMessage(manifestBytes []byte, l *Lineage) []byte {
 	msg := append(append([]byte{}, manifestSigDomain...), manifestBytes...)
@@ -92,7 +90,7 @@ func decodePubKey(b64 string) (ed25519.PublicKey, error) {
 }
 
 // DevIdentity 是 developer 角色的身份与血统摘要，供升级期 TOFU/防身份劫持记账
-// （应用层架构决策 §2.4/§2.6）。无 lineage 时 = 单节点，Root==Current，Len==1
+// 。无 lineage 时 = 单节点，Root==Current，Len==1
 type DevIdentity struct {
 	RootKeyID    string
 	CurrentKeyID string
@@ -102,22 +100,22 @@ type DevIdentity struct {
 
 // SignerSet 是一次多角色验签的结论
 type SignerSet struct {
-	// Trust 是这些签名【单独】能证明的最高信任。注意 Arbitrate 还会与安装来源
-	// 求交：动态安装即便带 platform 签名也只能是 Ordinary（应用层架构决策 §2.2 红线 1）
+	// Trust 是这些签名单独能证明的最高信任。Arbitrate 还会与安装来源
+	// 求交，因此动态安装即便带 platform 签名也只能是 Ordinary
 	Trust        identity.TrustProfile
 	HasDeveloper bool
-	// HasOEM 表示存在一条【授予 OEM 信任】的签名（oem-service / oem-app）。
-	// 注意 oem-trust-software 不计入这里——它只是副署，仍是 Ordinary（见 HasOEMCountersign）
+	// HasOEM 表示存在一条授予 OEM 信任的签名（oem-service / oem-app）。
+	// 注意 oem-trust-software 不计入这里 - 它只是副署，仍是 Ordinary（见 HasOEMCountersign）
 	HasOEM bool
 	// HasPlatform 表示存在一条授予 Platform 信任的签名（platform-release / platform-systemapp）
 	HasPlatform bool
 	// HasOEMCountersign 表示存在任意一条 OEM 角色签名（oem-service / oem-app /
-	// oem-trust-software）——满足设备策略 require_oem_countersign 的准入门槛。
-	// 与 HasOEM 分开：oem-trust-software 是“OEM 认可第三方包可装”的副署，满足副署
-	// 要求但【不提升 trust】（应用层架构决策 §2.5）
+	// oem-trust-software） - 满足设备策略 require_oem_countersign 的准入门槛。
+	// 与 HasOEM 分开：oem-trust-software 是OEM 认可第三方包可装的副署，满足副署
+	// 要求但不提升 trust
 	HasOEMCountersign bool
 	// Roles 是本次验签里出现的全部签名角色（去重前，按签名顺序）。供权限裁决的
-	// RequireSignerRole 用（应用层架构决策 §2.2）——某些最危险权限只给特定角色签的包
+	// RequireSignerRole 用 - 某些最危险权限只给特定角色签的包
 	Roles []SignerRole
 	// Dev 仅当存在 developer 角色签名时非 nil
 	Dev *DevIdentity
@@ -133,7 +131,7 @@ func (s SignerSet) RoleStrings() []string {
 	return out
 }
 
-// Policy 是设备级签名策略，来自 trust bundle（应用层架构决策 §2.5）
+// Policy 是设备级签名策略，来自 trust bundle
 type Policy struct {
 	RequireOEMCountersign bool `json:"require_oem_countersign"`
 }
@@ -144,12 +142,12 @@ type trustedKey struct {
 	roles map[SignerRole]struct{}
 }
 
-// TrustStore 是三层信任根的运行期视图（应用层架构决策 §2.1/§2.2）
+// TrustStore 是三层信任根的运行期视图
 //
 // 零值不可用；由 LoadTrustStore 或（测试用）newTrustStore 构造
 type TrustStore struct {
 	// byKeyID 是 bundle 里全部被授权签名密钥（平台中间密钥 + OEM 密钥），
-	// 各自带被授权担任的角色集合。developer 角色不在此表——它自签，公钥内嵌在
+	// 各自带被授权担任的角色集合。developer 角色不在此表 - 它自签，公钥内嵌在
 	// manifest.sig 里，key_id 即公钥 sha256
 	byKeyID map[string]trustedKey
 	policy  Policy
@@ -157,11 +155,11 @@ type TrustStore struct {
 
 func (ts TrustStore) policyRequireOEMCountersign() bool { return ts.policy.RequireOEMCountersign }
 
-// ---- trust bundle wire 格式（应用层架构决策 §2.1）------------------------
+// ---- trust bundle wire 格式------------------------
 
 const trustBundleFormatV1 = 1
 
-// bundleKey 是 bundle 里一条被授权密钥。roles 声明它能担任哪些角色——一把
+// bundleKey 是 bundle 里一条被授权密钥。roles 声明它能担任哪些角色 - 一把
 // platform-release 密钥不能拿来冒充 oem-service，反之亦然（最小授权）
 type bundleKey struct {
 	KeyID string       `json:"key_id"`
@@ -171,9 +169,9 @@ type bundleKey struct {
 
 // trustBundle 是 /usr/share/nervus/trust/trust-bundle.json 的内容
 //
-// v1 简化（相对方案 §2.2 的两层 OEM 委托）：把“OEM 根签 OEM 子密钥”这一层
+// v1 简化（相对方案 的两层 OEM 委托）：把OEM 根签 OEM 子密钥这一层
 // 折叠掉，bundle 直接列出全部被授权的叶子签名密钥（平台的与 OEM 的）各带角色。
-// 安全属性不变——授权谁能签仍然只由“平台根签过的 bundle”决定，而不是文件写权限。
+// 安全属性不变 - 授权谁能签仍然只由平台根签过的 bundle决定，而不是文件写权限。
 // 两层委托留待 v2 真有密钥管理需求时再加
 type trustBundle struct {
 	Format       int         `json:"format"`
@@ -182,24 +180,24 @@ type trustBundle struct {
 	Policy       Policy      `json:"policy"`
 }
 
-// embeddedPlatformRootB64 是编译进二进制的平台根公钥（应用层架构决策 §2.1）。
+// embeddedPlatformRootB64 是编译进二进制的平台根公钥。
 //
 // 生产构建通过 -ldflags "-X ...embeddedPlatformRootB64=<base64>" 注入，或直接改这里
 // 重新编译。空值 = 未注入（开发构建）：LoadTrustStore 会 fail-closed（拒绝装载
-// 任何 bundle），于是 scanSystemImage 拿不到非 Ordinary 信任——这正是“验不过就
-// fail-closed，绝不假装验证通过”的体现，而不是一个可被利用的松动开关
+// 任何 bundle），于是 scanSystemImage 拿不到非 Ordinary 信任 - 这正是验不过就
+// fail-closed，绝不假装验证通过的体现，而不是一个可被利用的松动开关
 // 必须是包级 var（不能是 const）：生产构建用 -ldflags "-X ...=<base64>" 注入，
-// 而 -X 只能改 var。gochecknoglobals 对此误报——这是 ldflags 注入点的既定形态
+// 而 -X 只能改 var。gochecknoglobals 对此误报 - 这是 ldflags 注入点的既定形态
 //
 //nolint:gochecknoglobals // ldflags -X injection target; cannot be const
 var embeddedPlatformRootB64 = ""
 
-// DefaultTrustDir 是只读镜像内的信任材料目录（应用层架构决策 §2.1）
+// DefaultTrustDir 是只读镜像内的信任材料目录
 const DefaultTrustDir = "/usr/share/nervus/trust"
 
-// LoadTrustStore 用【内嵌】平台根验证 dir 下的 trust bundle，构造 TrustStore
+// LoadTrustStore 用内嵌平台根验证 dir 下的 trust bundle，构造 TrustStore
 //
-// 验不过、缺文件或内嵌根为空 → 返回错误；调用方（main.go）据此 fail-closed：
+// 验不过、缺文件或内嵌根为空 -> 返回错误；调用方（main.go）据此 fail-closed：
 // 一切非 Ordinary 信任都发不出去，但系统仍能装/跑 Ordinary 包
 func LoadTrustStore(dir string) (TrustStore, error) {
 	if embeddedPlatformRootB64 == "" {
@@ -283,7 +281,7 @@ func parseTrustBundle(root ed25519.PublicKey, bundleBytes, sigB64 []byte) (Trust
 // VerifySignature 校验 manifestBytes 与其分离签名 sigBlock，返回多角色结论
 //
 // manifestBytes 必须是签名所覆盖的原始字节。任一条签名验签失败即整体错误
-// （ErrSignatureInvalid 等）——这是“已验证但不通过”，与“无法验证”不同，
+// （ErrSignatureInvalid 等） - 这是已验证但不通过，与无法验证不同，
 // 调用方据此记违规而非能力缺口
 func (ts TrustStore) VerifySignature(manifestBytes, sigBlock []byte) (SignerSet, error) {
 	sb, err := ParseSignatureBlock(sigBlock)
@@ -291,7 +289,7 @@ func (ts TrustStore) VerifySignature(manifestBytes, sigBlock []byte) (SignerSet,
 		return SignerSet{}, err
 	}
 
-	// 先把 lineage 链核对通过，拿到“当前有效 developer 密钥”
+	// 先把 lineage 链核对通过，拿到当前有效 developer 密钥
 	var currentDevKeyID string
 	var dev *DevIdentity
 	if sb.Lineage != nil {
@@ -331,7 +329,7 @@ func (ts TrustStore) VerifySignature(manifestBytes, sigBlock []byte) (SignerSet,
 				return SignerSet{}, fmt.Errorf("%w: sig key %q, current %q",
 					ErrDeveloperKeyNotCurrent, s.KeyID, currentDevKeyID)
 			}
-			verifyMsg = devMsg // developer 覆盖“manifest + 血统绑定”
+			verifyMsg = devMsg // developer 覆盖manifest + 血统绑定
 		default:
 			tk, ok := ts.byKeyID[s.KeyID]
 			if !ok {
@@ -372,8 +370,8 @@ func (ts TrustStore) VerifySignature(manifestBytes, sigBlock []byte) (SignerSet,
 			set.HasOEM = true
 			set.HasOEMCountersign = true
 		case RoleOEMTrustSoftware:
-			// 仅副署（OEM 认可第三方包可装）：满足副署门槛，但【不提升 trust】
-			// （应用层架构决策 §2.5）——故意不置 HasOEM
+			// 仅副署（OEM 认可第三方包可装）：满足副署门槛，但不提升 trust
+			// - 故意不置 HasOEM
 			set.HasOEMCountersign = true
 		}
 	}
@@ -395,11 +393,11 @@ func (ts TrustStore) VerifySignature(manifestBytes, sigBlock []byte) (SignerSet,
 	return set, nil
 }
 
-// verifyLineage 逐跳核对血统链，返回身份摘要（应用层架构决策 §2.4）
+// verifyLineage 逐跳核对血统链，返回身份摘要
 //
 // 每个节点的 key 必须与其 key_id 相符；非首节点的 signed_by_prev 必须是上一个
-// 节点对 (lineageSigDomain || key_id || key) 的有效签名——即“上一把密钥授权了
-// 下一把接替”。返回的 CurrentKeyID 是最后一个节点
+// 节点对 (lineageSigDomain || key_id || key) 的有效签名 - 即上一把密钥授权了
+// 下一把接替。返回的 CurrentKeyID 是最后一个节点
 func verifyLineage(l *Lineage) (*DevIdentity, error) {
 	keyIDs := make([]string, len(l.Nodes))
 	var prevPub ed25519.PublicKey

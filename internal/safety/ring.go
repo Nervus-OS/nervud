@@ -43,7 +43,7 @@ func (k eventKind) String() string {
 }
 
 // eventRecord 是一条固定大小、无指针的审计记录：可整块预分配、按值拷贝入 ring，
-// 写入零堆分配。语义细节（字符串化）留到普通优先级的 auditDrain（架构 §6 item4）。
+// 写入零堆分配。字符串化留到普通优先级的 auditDrain。
 type eventRecord struct {
 	kind   eventKind
 	reason ReasonCode
@@ -55,11 +55,11 @@ type eventRecord struct {
 // MPSC 用法）：
 //
 //   - 生产者 = Stop Lane(FIFO 95) + Supervisor(FIFO 90)，都在 RT 线程的热路径上；
-//     push 不加锁、不分配、绝不阻塞。ring 满则丢弃并计数（dropped）——审计延迟/丢失
-//     远优于拖住 RT 停机路径（架构 §6 item4；§10.11：审计可限速）。
+//     push 不加锁、不分配、绝不阻塞。ring 满则丢弃并计数（dropped），因为审计可限速，
+//     而阻塞 RT 停机路径会直接延迟安全响应。
 //   - 消费者 = auditDrain（普通优先级 SCHED_OTHER），pop 后再做字符串化与落库。
 //
-// 每个 cell 带一个 seq 序号，充当「该格当前属于哪一轮、可写还是可读」的门闩，
+// 每个 cell 带一个 seq 序号，充当该格当前属于哪一轮、可写还是可读的门闩，
 // 从而无需互斥锁即可安全交接。size 必须是 2 的幂。
 type auditRing struct {
 	buf     []ringCell
@@ -75,7 +75,7 @@ type ringCell struct {
 }
 
 // newAuditRing 构造容量为 size（须为 2 的幂）的 ring，并把每个 cell 的 seq 初始化为
-// 其下标——这是 Vyukov 队列「空队列」的起始条件。
+// 其下标 - 这是 Vyukov 队列空队列的起始条件。
 func newAuditRing(size int) *auditRing {
 	r := &auditRing{buf: make([]ringCell, size), mask: uint64(size - 1)}
 	for i := range r.buf {
@@ -97,7 +97,7 @@ func (r *auditRing) push(rec eventRecord) bool {
 			// 该格空闲且轮到本轮写：抢占写游标。
 			if r.enqPos.CompareAndSwap(pos, pos+1) {
 				cell.rec = rec
-				cell.seq.Store(pos + 1) // 发布：seq=pos+1 表示「可读」
+				cell.seq.Store(pos + 1) // 发布：seq=pos+1 表示可读
 				return true
 			}
 		case dif < 0:

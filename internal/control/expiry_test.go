@@ -8,10 +8,6 @@ import (
 	"github.com/nervus-os/nervud/internal/motiongate"
 )
 
-// TestExpiryReasons 到期与 deadman 失效必须记成【不同】的审计 Action
-//
-// 两者的产品含义完全不同：一个是「时限正常到了」，一个是「人或链路失联了」。
-// 混成一条，离线分析就再也分不出「遥控链路在抖」这种真正需要关注的信号
 func TestExpiryReasons(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -20,13 +16,13 @@ func TestExpiryReasons(t *testing.T) {
 		wantAction string
 	}{
 		{
-			name:       "deadline 到期",
+			name:       "deadline expiry",
 			req:        func() Request { r := aiReq(1); r.TTL = 50 * time.Millisecond; return r }(),
 			at:         func(l Lease) time.Time { return l.Deadline.Add(time.Millisecond) },
 			wantAction: actionExpired,
 		},
 		{
-			name:       "deadman 失效",
+			name:       "deadman expiry",
 			req:        humanReq(1),
 			at:         func(l Lease) time.Time { return l.IssuedAt.Add(400 * time.Millisecond) },
 			wantAction: actionDeadmanExpired,
@@ -53,12 +49,10 @@ func TestExpiryReasons(t *testing.T) {
 	}
 }
 
-// TestRefreshKeepsDeadmanAlive 持续的新鲜输入让 deadman 一直不触发
 func TestRefreshKeepsDeadmanAlive(t *testing.T) {
 	m, _, _ := newTestModule(t)
 	l := mustAcquire(t, m, humanReq(1))
 
-	// deadman 300ms：每 100ms 刷新一次，走满 900ms 也不该掉
 	for i := 1; i <= 9; i++ {
 		at := l.IssuedAt.Add(time.Duration(i) * 100 * time.Millisecond)
 		m.markFresh(at)
@@ -68,17 +62,12 @@ func TestRefreshKeepsDeadmanAlive(t *testing.T) {
 		}
 	}
 
-	// 停止刷新后 300ms 内必须掉
 	m.onTick(l.IssuedAt.Add(1300 * time.Millisecond))
 	if m.cur.Load() != nil {
 		t.Fatal("lease survived a deadman window with no fresh input")
 	}
 }
 
-// TestLaneIgnoresSafetyOwnedBoundaries Safety 已锁存时，Lane 不得抢着收租约
-//
-// 那条边界的 epoch 由 gate.Trip 递增过、租约由 RevokeAll 收走。Lane 若也动手，
-// 就会多递增一次 epoch 并记出重复审计
 func TestLaneIgnoresSafetyOwnedBoundaries(t *testing.T) {
 	m, g, _ := newTestModule(t)
 	mustAcquire(t, m, humanReq(1))
@@ -86,7 +75,6 @@ func TestLaneIgnoresSafetyOwnedBoundaries(t *testing.T) {
 	g.Trip()
 	epochAfterTrip := g.Epoch()
 
-	// 此刻租约还在槽里（RevokeAll 尚未被调用），且已经因锁存而失效
 	m.onTick(time.Now().Add(time.Hour))
 
 	if g.Epoch() != epochAfterTrip {
@@ -97,7 +85,6 @@ func TestLaneIgnoresSafetyOwnedBoundaries(t *testing.T) {
 	}
 }
 
-// TestControlSnapshot 有效控制来源的判定顺序（Agent 文档 §3.3）
 func TestControlSnapshot(t *testing.T) {
 	m, g, _ := newTestModule(t)
 
@@ -116,7 +103,6 @@ func TestControlSnapshot(t *testing.T) {
 		t.Fatalf("after HUMAN preempt = %+v, want HUMAN", s)
 	}
 
-	// Safety 压过一切：即便槽里还残留着租约，来源也必须是 SAFETY
 	g.Trip()
 	s = m.ControlSnapshot()
 	if s.Source != SourceSafety {

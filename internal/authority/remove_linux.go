@@ -1,12 +1,12 @@
 //go:build linux
 
 // 本文件是 RemovePackageTree 的 Linux 实现：递归删除一个已安装 Package 的代码或
-// 数据目录（卸载用，应用层架构决策 §4.2）。
+// 数据目录，供卸载路径使用。
 //
 // 与 ops.go 同一条路径解析纪律：先在指定 Root 下用 openat2(RESOLVE_BENEATH |
-// RESOLVE_NO_SYMLINKS) 拿到目标目录的 fd，之后【全程 dirfd 相对】遍历与 unlink，
-// 绝不回到完整字符串路径——否则删除过程中任一级被替换成 symlink，就可能把 rm -rf
-// 引到 Root 之外。这对「以 root 递归删除」的操作是硬要求
+// RESOLVE_NO_SYMLINKS) 拿到目标目录的 fd，之后全程 dirfd 相对遍历与 unlink，
+// 绝不回到完整字符串路径 - 否则删除过程中任一级被替换成 symlink，就可能把 rm -rf
+// 引到 Root 之外。这对以 root 递归删除的操作是硬要求
 package authority
 
 import (
@@ -39,14 +39,14 @@ func (g *Gate) osRemovePackageTree(_ context.Context, req RemovePackageTreeReque
 // removeChild 删除 parentFD 下名为 name 的条目（文件或目录树），全程相对 fd 操作
 //
 // 语义：先尝试当作非目录 unlinkat；EISDIR 则说明是目录，递归清空后 rmdir。用
-// AT_SYMLINK 语义的 unlinkat（默认不跟随 symlink）——删到一个 symlink 时删的是
+// AT_SYMLINK 语义的 unlinkat（默认不跟随 symlink） - 删到一个 symlink 时删的是
 // 链接本身，不会穿透到链接目标
 func removeChild(parentFD int, name string, depth int) error {
 	if depth > maxRemoveDepth {
 		return fmt.Errorf("%w: remove recursion exceeds depth %d", ErrInvariantViolated, maxRemoveDepth)
 	}
 
-	// 先按「非目录」删。unlinkat 默认不跟随 symlink，符号链接会在这里被安全删除
+	// 先按非目录删。unlinkat 默认不跟随 symlink，符号链接会在这里被安全删除
 	err := unix.Unlinkat(parentFD, name, 0)
 	if err == nil {
 		return nil

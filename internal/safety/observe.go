@@ -2,7 +2,7 @@ package safety
 
 import "github.com/nervus-os/nervud/internal/motiongate"
 
-// Snapshot 是安全态的一致只读快照，供 ①面向开发者的观察面使用。
+// Snapshot 是安全态的一致只读快照，供面向开发者的观察面使用。
 type Snapshot struct {
 	State     motiongate.State
 	Epoch     uint64
@@ -17,8 +17,8 @@ type Observer interface {
 	SafetySnapshot() Snapshot
 }
 
-// Controller 让受权限的调用方请求软件急停。权限由 nervud 在 IPC 层裁决——本接口
-// 只表达「存在一个可请求急停的能力」，不代表任何人都能调（HUMAN/UI 才可，且需授权）。
+// Controller 让受权限的调用方请求软件急停。权限由 nervud 在 IPC 层裁决 - 本接口
+// 只表达存在一个可请求急停的能力，不代表任何人都能调（HUMAN/UI 才可，且需授权）。
 //
 // *Module 实现本接口（RequestStop 即 Trip）。
 type Controller interface {

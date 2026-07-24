@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// validManifestJSON 是一份通过全部结构校验的 v1 manifest（应用层架构决策 §3.3）
 func validManifestJSON() string {
 	return `{
 		"schema": 1,
@@ -39,7 +38,6 @@ func TestParseManifest_Valid(t *testing.T) {
 	if m.Components[0].Runtime != RuntimeNative || m.Components[0].LaunchMode != LaunchOnDemand {
 		t.Fatalf("component fields not parsed: %+v", m.Components[0])
 	}
-	// Signer 永远不能从 JSON 里读到——它只能来自独立的签名验证
 	if m.Signer != "" {
 		t.Fatalf("Signer must never come from JSON, got %q", m.Signer)
 	}
@@ -51,7 +49,7 @@ func TestParseManifest_RejectsUnknownField(t *testing.T) {
 		"components":[{"id":"m","type":"app","entry":"x","runtime":"native","launch_mode":"manual"}],
 		"unknown_field":true}`
 	if _, err := ParseManifest([]byte(data)); err == nil {
-		t.Fatal("未知字段必须被拒绝，而不是静默忽略")
+		t.Fatal("an unknown field must be rejected rather than silently ignored")
 	}
 }
 
@@ -63,8 +61,6 @@ func TestParseManifest_RejectsUnsupportedSchema(t *testing.T) {
 	}
 }
 
-// min_nervus_api 高于平台时必须在“未知字段”之前给出清晰的 ErrPlatformTooOld
-// （应用层架构决策 §9.2 的两段解析）
 func TestParseManifest_PlatformTooOld(t *testing.T) {
 	data := `{"schema":1,"package_id":"a","version":"1","min_nervus_api":999,
 		"digests":{"x":"y"},"components":[{"id":"m","type":"app","entry":"x"}]}`
@@ -81,8 +77,6 @@ func TestParseManifest_RejectsEmptyPackageID(t *testing.T) {
 	}
 }
 
-// 恶意 package_id 必须在解析入口就被拒（应用层架构决策 §9.1）——它会被拼进
-// 记账文件名，非法字符等于路径写逃逸
 func TestParseManifest_RejectsInvalidPackageID(t *testing.T) {
 	cases := []string{"../../../tmp/evil", "Com.Example", "a/b", "a..b", "a.", ".a", "1abc", strings.Repeat("a", 129)}
 	for _, id := range cases {
@@ -112,7 +106,6 @@ func TestParseManifest_RejectsMissingVersionCode(t *testing.T) {
 	}
 }
 
-// supported_abis 必须是 canonical NSOS token；Android NDK 名（arm64-v8a）直接拒绝
 func TestParseManifest_RejectsInvalidABI(t *testing.T) {
 	for _, abi := range []string{"arm64-v8a", "aarch64", "amd64", ""} {
 		data := `{"schema":1,"package_id":"a","version":"1","version_code":1,"min_nervus_api":1,
@@ -167,7 +160,6 @@ func TestParseManifest_RejectsInvalidRuntime(t *testing.T) {
 	}
 }
 
-// app 不能声明 always-on，service 不能声明 manual（应用层架构决策 §3.4）
 func TestParseManifest_RejectsLaunchModeTypeMismatch(t *testing.T) {
 	appAlwaysOn := `{"schema":1,"package_id":"a","version":"1","version_code":1,"min_nervus_api":1,
 		"target_nervus_api":1,"supported_abis":["linux-x86_64"],"digests":{"x":"y"},
@@ -183,7 +175,6 @@ func TestParseManifest_RejectsLaunchModeTypeMismatch(t *testing.T) {
 	}
 }
 
-// 入口文件必须被 digests 覆盖，否则等于允许运行一个未经完整性复核的可执行文件
 func TestParseManifest_RejectsEntryNotInDigests(t *testing.T) {
 	data := `{"schema":1,"package_id":"a","version":"1","version_code":1,"min_nervus_api":1,
 		"target_nervus_api":1,"supported_abis":["linux-x86_64"],"digests":{"other":"y"},
@@ -193,7 +184,6 @@ func TestParseManifest_RejectsEntryNotInDigests(t *testing.T) {
 	}
 }
 
-// 入口路径解析后必须仍位于 Package 目录内（架构 §8）——路径穿越必须拒绝
 func TestParseManifest_RejectsEntryPathEscape(t *testing.T) {
 	cases := []string{"../../etc/passwd", "/etc/passwd", "..", "a/../../b"}
 	for _, entry := range cases {
@@ -205,7 +195,6 @@ func TestParseManifest_RejectsEntryPathEscape(t *testing.T) {
 	}
 }
 
-// digest 清单的键同样是包内相对路径，必须满足同一条安全规则
 func TestParseManifest_RejectsDigestPathEscape(t *testing.T) {
 	data := `{"schema":1,"package_id":"a","version":"1","digests":{"../../etc/passwd":"y"},
 		"components":[{"id":"m","type":"app","entry":"x"}]}`
@@ -224,14 +213,14 @@ func TestValidPackageID(t *testing.T) {
 		{"a", true},
 		{"a_b.c9", true},
 		{"", false},
-		{"Com.Example", false},       // 大写
-		{"../../../tmp/evil", false}, // 路径逃逸
-		{"a/b", false},               // 斜杠
-		{"a..b", false},              // 空段
-		{"a.", false},                // 尾空段
-		{".a", false},                // 首空段
-		{"1abc", false},              // 数字首字符
-		{"_x", false},                // 下划线首字符
+		{"Com.Example", false},
+		{"../../../tmp/evil", false},
+		{"a/b", false},
+		{"a..b", false},
+		{"a.", false},
+		{".a", false},
+		{"1abc", false},
+		{"_x", false},
 		{strings.Repeat("a", 129), false},
 	}
 	for _, c := range cases {
@@ -253,7 +242,7 @@ func TestValidRelPath(t *testing.T) {
 		{"..", false},
 		{"../x", false},
 		{"a/../../b", false},
-		{"a/../b", true}, // Clean 后仍在内
+		{"a/../b", true},
 		{".", false},
 	}
 	for _, c := range cases {

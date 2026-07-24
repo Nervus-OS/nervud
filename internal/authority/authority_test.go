@@ -10,7 +10,6 @@ import (
 	"github.com/nervus-os/nervud/internal/audit"
 )
 
-// fakeRecorder 捕获全部审计事件，供断言：该审计的都审计了
 type fakeRecorder struct{ events []audit.Event }
 
 func (f *fakeRecorder) Record(_ context.Context, ev audit.Event) { f.events = append(f.events, ev) }
@@ -28,7 +27,6 @@ func newTestGate(t *testing.T) (*Gate, *fakeRecorder) {
 	return g, rec
 }
 
-// validReq 是一个能通过全部不变量检查的请求
 func validReq() CreateDataDirRequest {
 	return CreateDataDirRequest{
 		Path: "/var/lib/nervus/package-data/com.example.app",
@@ -45,14 +43,12 @@ func TestNew_RequiresAuditorAndLog(t *testing.T) {
 	}
 }
 
-// --- do() 流水线 -----------------------------------------------------------
-
 func TestDo_InvariantDenied_NotExecutedButAudited(t *testing.T) {
 	g, rec := newTestGate(t)
 	executed := false
 
 	req := validReq()
-	req.UID = 0 // 违反不变量：App UID 0 永远禁止
+	req.UID = 0
 	_, err := do(context.Background(), g, SubjectKernel(), req,
 		func(context.Context, CreateDataDirRequest) (DirHandle, error) {
 			executed = true
@@ -126,8 +122,6 @@ func TestDo_ExecutionFailureIsAudited(t *testing.T) {
 	}
 }
 
-// --- 不变量 ----------------------------------------------------------------
-
 func TestCheckContained(t *testing.T) {
 	inv := DefaultInvariants()
 	cases := []struct {
@@ -140,7 +134,7 @@ func TestCheckContained(t *testing.T) {
 		{"root itself", "/var/lib/nervus/package-data", false},
 		{"prefix trick", "/var/lib/nervus/package-data-evil/x", false},
 		{"dotdot escape", "/var/lib/nervus/package-data/../../../etc/shadow", false},
-		{"dotdot inside", "/var/lib/nervus/package-data/app/../app2", true}, // Clean 后仍在内
+		{"dotdot inside", "/var/lib/nervus/package-data/app/../app2", true},
 		{"relative", "var/lib/nervus/package-data/app", false},
 		{"unrelated", "/etc/passwd", false},
 	}
@@ -174,7 +168,7 @@ func TestCheckUID(t *testing.T) {
 
 func TestCreateDataDirRequest_RejectsExposedPerm(t *testing.T) {
 	req := validReq()
-	req.Perm = 0o755 // group/other 可见 = 不是「私有」目录
+	req.Perm = 0o755
 	if err := req.Validate(DefaultInvariants()); !errors.Is(err, ErrInvariantViolated) {
 		t.Fatalf("want ErrInvariantViolated, got %v", err)
 	}

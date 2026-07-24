@@ -6,21 +6,17 @@ import (
 	"time"
 )
 
-// TestPreemptionMatrix 覆盖抢占矩阵的全部四格 + 同连接重复申请
-//
-// 唯一合法的抢占是 HUMAN 抢 AI（NRCP §10.5）。其余三格都必须拒绝，且拒绝原因要能
-// 区分出「现在是人在遥控」——上层据此才能去问用户要不要让出
 func TestPreemptionMatrix(t *testing.T) {
 	tests := []struct {
 		name    string
 		held    func(ConnID) Request
 		want    func(ConnID) Request
-		wantErr error // nil = 应当成功
+		wantErr error
 	}{
-		{name: "HUMAN 抢 AI", held: aiReq, want: humanReq},
-		{name: "AI 抢 HUMAN", held: humanReq, want: aiReq, wantErr: ErrHeldByHuman},
-		{name: "HUMAN 抢 HUMAN", held: humanReq, want: humanReq, wantErr: ErrHeldByHuman},
-		{name: "AI 抢 AI", held: aiReq, want: aiReq, wantErr: ErrHeldByAI},
+		{name: "HUMAN preempts AI", held: aiReq, want: humanReq},
+		{name: "AI cannot preempt HUMAN", held: humanReq, want: aiReq, wantErr: ErrHeldByHuman},
+		{name: "HUMAN cannot preempt HUMAN", held: humanReq, want: humanReq, wantErr: ErrHeldByHuman},
+		{name: "AI cannot preempt AI", held: aiReq, want: aiReq, wantErr: ErrHeldByAI},
 	}
 
 	for _, tc := range tests {
@@ -28,14 +24,12 @@ func TestPreemptionMatrix(t *testing.T) {
 			m, _, _ := newTestModule(t)
 			first := mustAcquire(t, m, tc.held(1))
 
-			// 用不同的 ConnID：同一连接的重复申请是幂等续租，不走抢占判定
 			second, err := m.Acquire(tc.want(2))
 
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("Acquire err = %v, want %v", err, tc.wantErr)
 				}
-				// 被拒之后原持有者必须完好无损
 				if _, err := m.Check(first.ID, first.Conn); err != nil {
 					t.Fatalf("incumbent lease broke after a denied acquire: %v", err)
 				}
@@ -45,8 +39,6 @@ func TestPreemptionMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Acquire: %v", err)
 			}
-			// 抢占成功后旧租约必须立刻失效，且不会「自动恢复」
-			// （Agent 文档 §3.4：HUMAN 退出时不恢复 AI 被打断前的旧动作）
 			if _, err := m.Check(first.ID, first.Conn); !errors.Is(err, ErrControlNotHeld) {
 				t.Fatalf("preempted lease Check = %v, want ErrControlNotHeld", err)
 			}
@@ -57,7 +49,6 @@ func TestPreemptionMatrix(t *testing.T) {
 	}
 }
 
-// TestReacquireSameConnIsIdempotent 同一连接重复申请：ID 不变、不算抢占
 func TestReacquireSameConnIsIdempotent(t *testing.T) {
 	m, _, _ := newTestModule(t)
 	first := mustAcquire(t, m, humanReq(1))
@@ -74,7 +65,6 @@ func TestReacquireSameConnIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestAcquireRejectsMalformed 申请本身不良构时一律 fail closed
 func TestAcquireRejectsMalformed(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -82,27 +72,27 @@ func TestAcquireRejectsMalformed(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "ConnID 为 0",
+			name:    "zero ConnID",
 			mutate:  func(r *Request) { r.Conn = 0 },
 			wantErr: ErrInvalidRequest,
 		},
 		{
-			name:    "Class 未指定（含试图申请 NONE）",
+			name:    "unspecified Class including NONE",
 			mutate:  func(r *Request) { r.Class = ClassUnspecified },
 			wantErr: ErrInvalidRequest,
 		},
 		{
-			name:    "Resource 不是 base.main",
+			name:    "Resource is not base.main",
 			mutate:  func(r *Request) { r.Resource = "arm.left" },
 			wantErr: ErrUnknownResource,
 		},
 		{
-			name:    "TTL 超出 Policy 上限",
+			name:    "TTL exceeds Policy limit",
 			mutate:  func(r *Request) { r.TTL = time.Hour },
 			wantErr: ErrPolicyViolation,
 		},
 		{
-			name:    "deadman 超出 Policy 上限",
+			name:    "deadman exceeds Policy limit",
 			mutate:  func(r *Request) { r.Deadman = time.Minute },
 			wantErr: ErrPolicyViolation,
 		},
@@ -119,7 +109,6 @@ func TestAcquireRejectsMalformed(t *testing.T) {
 			if _, err := m.Acquire(req); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Acquire err = %v, want %v", err, tc.wantErr)
 			}
-			// 被拒的申请不得留下任何痕迹：不签租约、不动 epoch
 			if m.cur.Load() != nil {
 				t.Fatal("rejected acquire must not publish a lease")
 			}
@@ -133,7 +122,6 @@ func TestAcquireRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestShorterThanPolicyIsAccepted 申请方可以主动要一个更严（更短）的窗口
 func TestShorterThanPolicyIsAccepted(t *testing.T) {
 	m, _, _ := newTestModule(t)
 
@@ -147,10 +135,6 @@ func TestShorterThanPolicyIsAccepted(t *testing.T) {
 	}
 }
 
-// TestAcquireDeniedWhileLatched 锁存期间不签发任何普通租约
-//
-// 恢复控制权只能走 OEM Recovery / re-arm，不能靠重新申请（NRCP §14.4：re-arm 后
-// 仍从 NONE 开始，由 HUMAN 或 AI 重新申请）
 func TestAcquireDeniedWhileLatched(t *testing.T) {
 	m, g, _ := newTestModule(t)
 	g.Trip()
@@ -162,14 +146,12 @@ func TestAcquireDeniedWhileLatched(t *testing.T) {
 		t.Fatal("no lease may be published while the gate is latched")
 	}
 
-	// 走完 REARM_REQUIRED → NORMAL 之后才能重新签发
 	if !g.RequireRearm() || !g.Rearm() {
 		t.Fatal("gate did not walk through rearm")
 	}
 	mustAcquire(t, m, humanReq(1))
 }
 
-// TestLeaseIsNotTransferable 租约绑定连接，不能转让：ID 对但连接不对一律拒绝
 func TestLeaseIsNotTransferable(t *testing.T) {
 	m, _, _ := newTestModule(t)
 	l := mustAcquire(t, m, humanReq(1))
@@ -185,7 +167,6 @@ func TestLeaseIsNotTransferable(t *testing.T) {
 	}
 }
 
-// TestLeaseIDsAreUnpredictable 两条先后签发的租约不得撞 ID，也不得是可猜的序号
 func TestLeaseIDsAreUnpredictable(t *testing.T) {
 	m, _, _ := newTestModule(t)
 

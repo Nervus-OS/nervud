@@ -45,7 +45,6 @@ func TestResponseRoundTrip(t *testing.T) {
 	}
 }
 
-// 超过硬上限的长度前缀必须被拒，且【不】为其分配缓冲。
 func TestReadFromRejectsOversizeHeader(t *testing.T) {
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], MaxMessageBytes+1)
@@ -58,7 +57,7 @@ func TestReadFromRejectsOversizeHeader(t *testing.T) {
 }
 
 func TestReadFromRejectsZeroLength(t *testing.T) {
-	var hdr [4]byte // 全零 = 长度 0
+	var hdr [4]byte
 	var v Request
 	if err := ReadFrom(bytes.NewReader(hdr[:]), &v); err == nil {
 		t.Fatal("want error on zero-length message")

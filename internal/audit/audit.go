@@ -1,5 +1,3 @@
-// 见 doc.go 的包说明
-//
 // audit 不 import 任何兄弟模块。依赖箭头永远指向 audit，结构上不可能出现 import cycle
 package audit
 

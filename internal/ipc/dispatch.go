@@ -1,17 +1,17 @@
-// 本文件实现架构 10.7 的 route 表:nervud 转发一个 Request 给某个 Service
+// 本文件实现的 route 表:nervud 转发一个 Request 给某个 Service
 // 连接时,用 route_id 记录 (源连接、源 request_id、目标连接、deadline),
 // 供 DispatchResult 到达、超时清道夫、连接断开三条路径共同消费
 //
-// 设计核心:“谁在表锁下成功删除了这条 entry,谁就是这次调用唯一的终结
-// Response 生产者”——三条路径统一走“查表并删除”语义,天然保证“每个 Request
-// 最多一个终结 Response”(架构 10.7),不需要额外的原子完成标记
+// 设计核心:谁在表锁下成功删除了这条 entry,谁就是这次调用唯一的终结
+// Response 生产者 - 三条路径统一走查表并删除语义,天然保证每个 Request
+// 最多一个终结 Response，因此不需要额外的原子完成标记
 //
-// 已知简化:架构设想的 route 表项还应记录“endpoint binding generation”用于
+// 已知简化:架构设想的 route 表项还应记录endpoint binding generation用于
 // 校验 DispatchResult 是否针对同一次绑定,但 endpoint.RouteInfo 没有暴露这个
-// 字段(且 internal/endpoint 不属于本次改动范围)。这里退化为“route_id 唯一 +
-// DispatchResult 必须来自登记的目标连接本身(指针身份比较)”。弱化场景:同一条
+// 字段(且 internal/endpoint 不属于本次改动范围)。这里退化为route_id 唯一 +
+// DispatchResult 必须来自登记的目标连接本身(指针身份比较)。弱化场景:同一条
 // 仍然打开的 Service 连接上,若 Provider 在旧 route 还在途时对同一 interface
-// 做了 unregister+重新 register,这里抓不住这次错位——范围小,不假装解决
+// 做了 unregister+重新 register,这里抓不住这次错位 - 范围小,不假装解决
 package ipc
 
 import (
@@ -41,11 +41,11 @@ type completeStatus int
 const (
 	// completeOK: 找到且 target 匹配,表项已被删除,调用方是唯一的完成者
 	completeOK completeStatus = iota
-	// completeNotFound: route_id 不存在——良性竞态(已被清道夫/另一次结果/
+	// completeNotFound: route_id 不存在 - 良性竞态(已被清道夫/另一次结果/
 	// 连接断开清理抢先完成),或本来就是伪造的 route_id,二者在这里无法区分
 	completeNotFound
 	// completeMismatch: route_id 存在,但送回结果的连接不是登记的目标连接。
-	// 没有合法解释——没有 Service 会被告知一个指向别的连接的 route_id
+	// 没有合法解释 - 没有 Service 会被告知一个指向别的连接的 route_id
 	completeMismatch
 )
 
@@ -54,7 +54,7 @@ type dispatchTable struct {
 	mu      sync.Mutex
 	entries map[uint64]*routeEntry
 
-	// nextID 从 1 开始,0 视为“从未分配”,呼应 request_id 的既有约定
+	// nextID 从 1 开始,0 视为从未分配,呼应 request_id 的既有约定
 	// (route_id 本身的 proto 注释没有明文保留 0,这是本实现引入的惯例)
 	nextID atomic.Uint64
 }
@@ -95,7 +95,7 @@ func (t *dispatchTable) complete(routeID uint64, target *conn) (*routeEntry, com
 }
 
 // completeAny 无条件完成一个 route(不校验来源),供清道夫与
-// handleRequest 自己的“刚创建就发现目标连接已经废了”路径使用——两者都已经
+// handleRequest 自己的刚创建就发现目标连接已经废了路径使用 - 两者都已经
 // 通过别的渠道确认这条 route 该结束,不需要再核对是谁在结束它
 func (t *dispatchTable) completeAny(routeID uint64) (*routeEntry, bool) {
 	t.mu.Lock()
@@ -109,8 +109,8 @@ func (t *dispatchTable) completeAny(routeID uint64) (*routeEntry, bool) {
 }
 
 // connClosed 摘除全部以 c 为 target 或 source 的表项,分类返回供调用方在释放
-// 表锁之后处理——表锁只保护这张 map 本身,不覆盖“把结果送进另一条连接的
-// outbox”这类连接 I/O(§10.8 明确禁止跨连接 I/O 时持锁)
+// 表锁之后处理 - 表锁只保护这张 map 本身,不覆盖把结果送进另一条连接的
+// outbox这类连接 I/O( 明确禁止跨连接 I/O 时持锁)
 func (t *dispatchTable) connClosed(c *conn) (asTarget, asSource []*routeEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -144,7 +144,7 @@ func (t *dispatchTable) reap(now time.Time) []*routeEntry {
 	return expired
 }
 
-// resolveRoute 是全部“完成一个 route”路径的共同尾声:归还 source 的 in-flight
+// resolveRoute 是全部完成一个 route路径的共同尾声:归还 source 的 in-flight
 // 计数,并把最终 Response 送进 source 的 outbox。返回值转发自 enqueue,只有
 // handleRequest 的同步路径关心它(用于决定是否继续读源连接)
 func resolveRoute(e *routeEntry, resp *ipcv1.Response) bool {
@@ -153,7 +153,7 @@ func resolveRoute(e *routeEntry, resp *ipcv1.Response) bool {
 }
 
 // dispatchConnClosed 处理某连接断开对 route 表的影响:
-//   - 该连接是某些 route 的 target:调用方等着的是它,不能拖到超时才发现——
+//   - 该连接是某些 route 的 target:调用方等着的是它,不能拖到超时才发现 -
 //     立刻合成 UNAVAILABLE 送回各自的 source
 //   - 该连接是某些 route 的 source:没有归宿可言,直接丢弃(不产生 Response,
 //     没有连接会去读它),并尽力通知对应 target 停止在途工作,避免一个已经
@@ -211,8 +211,8 @@ func (s *Server) runDispatchReaper() {
 	}
 }
 
-// auditDispatchRace 记一条“迟到/未知 route_id 的 DispatchResult 被丢弃”审计,
-// 用独立于 violationLog 的限速桶——这是预期内的正常竞态(清道夫或另一次结果
+// auditDispatchRace 记一条迟到/未知 route_id 的 DispatchResult 被丢弃审计,
+// 用独立于 violationLog 的限速桶 - 这是预期内的正常竞态(清道夫或另一次结果
 // 抢先完成),不该跟真正的协议违规信号抢占同一份审计预算
 func (s *Server) auditDispatchRace(subject string, routeID uint64) {
 	if !s.dispatchRaceLog.allow() {

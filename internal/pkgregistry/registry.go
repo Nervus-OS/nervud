@@ -1,5 +1,3 @@
-// 见 doc.go 的包说明
-//
 // 本文件是 pkgregistry 的权威内存态：装包/卸载/启动扫描之后，谁是已装
 // Package、拿到了什么 UID 和信任 profile 的唯一真源。identity.Registry
 // 只保存其中 ID/UID/Trust 的一份瘦投影用于 IPC 准入（见 module.go），
@@ -28,12 +26,12 @@ type Entry struct {
 	Source        Source
 
 	// GrantedPermissions 是 permission.Intersect 对 Manifest.Permissions 的裁决
-	// 结果（"请求 ∩ 已注册权限 ∩ trust 门槛"）。动态安装路径在 Install 时算一次
+	// 结果是请求权限、已注册权限与 trust 门槛的交集。动态安装路径在 Install 时算一次
 	// 并持久化，重启只读回、不重新裁决（见 module.go 的 commit 与 scan.go 的
 	// scanDynamicInstalls）
 	GrantedPermissions []string
 
-	// DisabledComponents 是被停用的 Component ID 集合（应用层架构决策 §7）。
+	// DisabledComponents 是被停用的 Component ID 集合。
 	// 停用按 Component；服务生命周期与 IPC 握手据此拒绝该组件
 	DisabledComponents []string
 }
@@ -51,8 +49,8 @@ func (e Entry) ComponentDisabled(compID string) bool {
 // Registry 是 pkgregistry 的权威内存态：Package ID -> Entry
 //
 // 照抄 identity.Registry 的写时复制 + 原子指针范式（读多写少：每次装包/
-// 卸载/启动扫描才写，其余都是读），全量替换而不是增量增删——增量接口会
-// 诱使调用方“先删后加”，中间存在一个查不到的窗口，架构上与 identity
+// 卸载/启动扫描才写，其余都是读），全量替换而不是增量增删 - 增量接口会
+// 诱使调用方先删后加，中间存在一个查不到的窗口，架构上与 identity
 // 面对的是同一类问题
 //
 // 零值不可用，必须经 NewRegistry 构造
@@ -75,8 +73,8 @@ func NewRegistry() *Registry {
 // 校验失败时整份拒绝、旧快照原样保留：宁可继续用上一份已知良好的状态，
 // 也不要装载一份自相矛盾的（与 identity.Registry.Replace 同一理由）
 //
-// UID 校验复用 authority.DefaultInvariants().CheckUID 而不是在本包另存
-// 一份 App UID 区段常量——两处各存一份、日后只改一处会悄悄漂移，而
+// UID 校验复用 authority.DefaultInvariants.CheckUID 而不是在本包另存
+// 一份 App UID 区段常量 - 两处各存一份、日后只改一处会悄悄漂移，而
 // pkgregistry 本来就需要依赖 authority 的请求类型（见 module.go），
 // 多依赖这一个只读校验函数不增加额外耦合面
 func (r *Registry) Replace(entries []Entry) error {
@@ -104,7 +102,7 @@ func (r *Registry) Replace(entries []Entry) error {
 // Lookup 按 Package ID 查 Entry
 //
 // 对未初始化的 Registry（零值 &Registry{} 或 typed-nil）fail-safe 返回
-// “查无此包”而不是 panic——一个装配 bug 不该被放大成启动路径崩溃，
+// 查无此包而不是 panic - 一个装配 bug 不该被放大成启动路径崩溃，
 // 与 identity.Registry.Lookup 的理由相同
 func (r *Registry) Lookup(id string) (Entry, bool) {
 	if r == nil {

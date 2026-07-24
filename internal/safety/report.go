@@ -1,10 +1,10 @@
 package safety
 
-// ReportKind 区分 ②OEM Provider 在 Safety 边界回传的事实类型（NRCP §14.3）。
+// ReportKind 区分 OEM Provider 在 Safety 边界回传的事实类型。
 type ReportKind uint8
 
 const (
-	// ReportHaltAccepted Provider 接受了停机要求（≠ 已物理停稳）。
+	// ReportHaltAccepted Provider 接受了停机要求（ != 已物理停稳）。
 	ReportHaltAccepted ReportKind = iota + 1
 	// ReportStopProgress 停止进度推进到某个相位。
 	ReportStopProgress
@@ -23,7 +23,7 @@ const (
 	FaultLinkLost    FaultCode = 2
 )
 
-// ProviderReport 是 Provider→nervud 的边界事实（镜像 safety.proto 的 HaltAccepted /
+// ProviderReport 是 Provider -> nervud 的边界事实（镜像 safety.proto 的 HaltAccepted /
 // StopProgress / StandstillConfirmed / ProviderFault）。它无指针、可按值传递，
 // 由 Supervisor 用来推进 StopProgress 状态机。
 //
@@ -41,8 +41,8 @@ type StopProgressSource interface {
 	Reports() <-chan ProviderReport
 }
 
-// NopReports 是 [REWRITE-v1] 无真实 Provider 时的 stub：返回 nil channel，
-// Supervisor 的 select 分支永不触发（即「没有任何上报」）。
+// NopReports 是 v1 无真实 Provider 时的 stub：返回 nil channel，
+// Supervisor 的 select 分支永不触发（即没有任何上报）。
 func NopReports() StopProgressSource { return nopReports{} }
 
 type nopReports struct{}

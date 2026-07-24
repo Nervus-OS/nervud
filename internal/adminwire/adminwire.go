@@ -1,14 +1,14 @@
-// Package adminwire 是 nervud 特权管理通道（nervusctl ↔ nervud）的线格式与客户端。
+// Package adminwire 是 nervud 特权管理通道（nervusctl <-> nervud）的线格式与客户端。
 //
-// 它【刻意】是一个叶子包：只依赖标准库与 net，不 import 任何 nervud 内核模块
-// （pkgregistry/permission/authority…）。这样 cmd/nervusctl 能只链接这一小片
+// 它刻意是一个叶子包：只依赖标准库与 net，不 import 任何 nervud 内核模块
+// （pkgregistry/permission/authority...）。这样 cmd/nervusctl 能只链接这一小片
 // 代码，而不是把整个内核 TCB 拖进 CLI 二进制。服务端（internal/admin）与客户端
 // （cmd/nervusctl）共用本包的 Request/Response/编解码，保证两侧永不漂移。
 //
-// 这条通道【不是】App 面向的跨语言控制面（那条永远走 nervus-ipc 的冻结 proto —
-// 见架构红线 §6.3「proto 是唯一 wire 真源」）。本通道是 nervud 与其【同仓 Go 特权
-// 运维工具】之间的内部边界：单进程写者仍是 nervud，nervusctl 只是把命令投递过去。
-// 因此这里用长度前缀 + JSON（对 Go↔Go、低频、root-only 的运维面足够），不引入
+// 这条通道不是 App 面向的跨语言控制面；后者只使用 nervus-ipc 的冻结 proto，
+// 避免出现两个不兼容的 wire 真源。本通道是 nervud 与其同仓 Go 特权
+// 运维工具之间的内部边界：单进程写者仍是 nervud，nervusctl 只是把命令投递过去。
+// 因此这里用长度前缀 + JSON（对 Go <-> Go、低频、root-only 的运维面足够），不引入
 // proto/method_id 那套跨语言机制。
 //
 // 帧格式：4 字节大端长度 N + N 字节 JSON。与 internal/ipc/frame.go 同布局，但本包
@@ -31,10 +31,10 @@ const (
 	// 绝对路径。CLI 随后把 .nspkg 解包进去，再发 CmdInstall。由 nervud 建目录
 	// （而非 CLI 自己在任意位置建）保证：位置与 PackageRoot 同一文件系统（安装
 	// 期 renameat2 才能成功）、属主/权限受控、且 install 时的路径逃逸校验有明确
-	// 的「必须是我发出的目录」判据。
+	// 的必须是我发出的目录判据。
 	CmdBeginStaging = "begin-staging"
 	// CmdInstall 触发对一个已 staging 目录的安装。签名/digest/裁决全部在 nervud
-	// 的 pkgregistry 里复核——CLI 不做任何安全判定。
+	// 的 pkgregistry 里复核 - CLI 不做任何安全判定。
 	CmdInstall = "install"
 	// CmdUninstall 卸载一个动态安装的 Package。
 	CmdUninstall = "uninstall"
@@ -61,11 +61,11 @@ const (
 	CodeBadRequest   = "bad-request"  // 命令/参数不合法（含路径逃逸）
 	CodeUnauthorized = "unauthorized" // 对端不是被许可的运维身份
 	CodeNotFound     = "not-found"    // 目标 Package/Component 不存在
-	CodeFailed       = "failed"       // 底层操作失败（安装裁决拒绝、IO 错误…）
+	CodeFailed       = "failed"       // 底层操作失败（安装裁决拒绝、IO 错误...）
 )
 
-// Request 是 CLI → nervud 的一条命令。一条连接一条命令（发一个 Request、收一个
-// Response、随即关闭），不做长连接状态机——运维面低频，简单胜过复用。
+// Request 是 CLI -> nervud 的一条命令。一条连接一条命令（发一个 Request、收一个
+// Response、随即关闭），不做长连接状态机 - 运维面低频，简单胜过复用。
 type Request struct {
 	Cmd         string `json:"cmd"`
 	StagingDir  string `json:"staging_dir,omitempty"`
@@ -76,7 +76,7 @@ type Request struct {
 	GrantState  string `json:"grant_state,omitempty"`
 }
 
-// Response 是 nervud → CLI 的结果。OK=false 时 Code/Message 说明原因。
+// Response 是 nervud -> CLI 的结果。OK=false 时 Code/Message 说明原因。
 type Response struct {
 	OK         bool          `json:"ok"`
 	Code       string        `json:"code,omitempty"`
@@ -106,7 +106,7 @@ const lengthPrefixBytes = 4
 // ErrMessageTooLarge 长度前缀超过硬上限。
 var ErrMessageTooLarge = errors.New("adminwire: message exceeds hard limit")
 
-// WriteTo 把 v 编码为 JSON 并以「4 字节长度 + 正文」写出。服务端写 Response、
+// WriteTo 把 v 编码为 JSON 并以4 字节长度 + 正文写出。服务端写 Response、
 // 客户端写 Request 都走它。
 func WriteTo(w io.Writer, v any) error {
 	body, err := json.Marshal(v)
@@ -127,7 +127,7 @@ func WriteTo(w io.Writer, v any) error {
 	return nil
 }
 
-// ReadFrom 读满一条「4 字节长度 + 正文」并解码进 v。服务端读 Request、客户端读
+// ReadFrom 读满一条4 字节长度 + 正文并解码进 v。服务端读 Request、客户端读
 // Response 都走它。长度超限即报错（不为攻击者自称的正文分配缓冲）。
 func ReadFrom(r io.Reader, v any) error {
 	var hdr [lengthPrefixBytes]byte
@@ -160,8 +160,8 @@ const (
 	ioTimeout   = 30 * time.Second // install 触发的裁决/落盘可能稍慢，留足余量
 )
 
-// Client 是 nervusctl 侧的最小客户端。不常驻、不持有任何状态——每条命令一次
-// Dial→写→读→关（真源永远是 nervud 进程内的 Registry，CLI 只投递）。
+// Client 是 nervusctl 侧的最小客户端。不常驻、不持有任何状态 - 每条命令一次
+// Dial -> 写 -> 读 -> 关（真源永远是 nervud 进程内的 Registry，CLI 只投递）。
 type Client struct {
 	sockPath string
 }

@@ -41,7 +41,6 @@ func TestIntersect_DeniesWhenTrustBelowThreshold(t *testing.T) {
 	}
 }
 
-// 未登记在 Catalog 里的权限 ID 一律 fail closed，不能被静默忽略
 func TestIntersect_DeniesUnregisteredPermissionID(t *testing.T) {
 	cat := testCatalog(t)
 	granted, denied := Intersect([]string{"perm.unknown"}, cat, identity.TrustPlatform, nil)
@@ -61,7 +60,6 @@ func TestIntersect_EmptyRequestYieldsEmptyResult(t *testing.T) {
 	}
 }
 
-// 零值 Catalog（未装配）视为空登记表：所有请求一律被拒，而不是 panic
 func TestIntersect_ZeroValueCatalogDeniesEverything(t *testing.T) {
 	var cat Catalog
 	granted, denied := Intersect([]string{"perm.a", "perm.b"}, cat, identity.TrustPlatform, nil)

@@ -1,12 +1,10 @@
-// 见 doc.go 的包说明
-//
-// 本文件是 manifest.json 的数据模型与结构性校验（应用层架构决策 §3.3/§3.4）。
-// 这里只做“形状是否合法”的纯校验，不碰文件系统、不做签名/digest 复核
+// 本文件是 manifest.json 的数据模型与结构性校验。
+// 这里只做形状是否合法的纯校验，不碰文件系统、不做签名/digest 复核
 // （签名见 signature.go/sigblock.go，digest 见 digest.go）
 //
-// 安全边界（应用层架构决策 §9.1）：package_id / component.id 会被用作 UID 分配键、
+// 安全边界：package_id / component.id 会被用作 UID 分配键、
 // 目录名、权限归属键与签名连续性键，且其中 package_id 会拼进记账文件名
-// （scan.go 的 stateFilePath）。因此这里对二者做严格字符集校验，把“路径写逃逸”
+// （scan.go 的 stateFilePath）。因此这里对二者做严格字符集校验，把路径写逃逸
 // 这类洞堵在解析入口，而不是指望下游一定校验过
 package pkgregistry
 
@@ -22,15 +20,15 @@ import (
 // manifestSchemaV1 是本版本认识的唯一 manifest schema 版本号
 const manifestSchemaV1 = 1
 
-// CurrentAPILevel 是本内核实现的 Platform API Level（NRCP §21.1）
+// CurrentAPILevel 是本内核实现的 Platform API Level
 //
-// manifest 的 min_nervus_api 高于它即无法在本机运行——两段解析的第一段会先
+// manifest 的 min_nervus_api 高于它即无法在本机运行 - 两段解析的第一段会先
 // 用它给出 ErrPlatformTooOld，而不是让新 schema 的 manifest 撞上
-// DisallowUnknownFields 后报一个含义模糊的“未知字段”
+// DisallowUnknownFields 后报一个含义模糊的未知字段
 const CurrentAPILevel uint32 = 1
 
-// NSOS Package 的 canonical ABI token（NRCP §21.2）。这些是 NSOS 包格式标识，
-// 不是 Android NDK 名称（arm64-v8a 等），也不是裸 CPU 名（aarch64 等）——后两类
+// NSOS Package 的 canonical ABI token。这些是 NSOS 包格式标识，
+// 不是 Android NDK 名称（arm64-v8a 等），也不是裸 CPU 名（aarch64 等） - 后两类
 // 一律拒绝，不做归一化
 const (
 	ABILinuxArm64  = "linux-arm64"
@@ -67,7 +65,7 @@ var (
 	ErrInvalidVersion = errors.New("pkgregistry: manifest has invalid version")
 
 	// ErrMissingVersionCode manifest 缺少 version_code（或为 0）。升级裁决只看
-	// version_code，缺它就无法做防降级判断（应用层架构决策 §4.1）
+	// version_code，缺它就无法做防降级判断
 	ErrMissingVersionCode = errors.New("pkgregistry: manifest has zero/absent version_code")
 
 	// ErrUnsupportedSchema manifest 声明了本版本不认识的 schema 版本号
@@ -88,17 +86,17 @@ var (
 	// ErrDuplicateComponentID 同一 manifest 内两个 Component 共用一个 ID
 	ErrDuplicateComponentID = errors.New("pkgregistry: duplicate component id in manifest")
 
-	// ErrInvalidComponentType Component.Type 只能是 app 或 service（架构 §7）
+	// ErrInvalidComponentType Component.Type 只能是 app 或 service
 	ErrInvalidComponentType = errors.New("pkgregistry: component type must be app or service")
 
-	// ErrInvalidRuntime Component.Runtime 只能是 native 或 jvm（应用层架构决策 §3.5）
+	// ErrInvalidRuntime Component.Runtime 只能是 native 或 jvm
 	ErrInvalidRuntime = errors.New("pkgregistry: component runtime must be native or jvm")
 
 	// ErrInvalidLaunchMode Component.LaunchMode 取值非法
 	ErrInvalidLaunchMode = errors.New("pkgregistry: component has invalid launch_mode")
 
 	// ErrLaunchModeTypeMismatch launch_mode 与 type 冲突：app 不能 always-on，
-	// service 不能 manual（应用层架构决策 §3.4）
+	// service 不能 manual
 	ErrLaunchModeTypeMismatch = errors.New("pkgregistry: launch_mode incompatible with component type")
 
 	// ErrInvalidCriticality Component.Criticality 取值非法
@@ -107,19 +105,19 @@ var (
 	// ErrInvalidVisibility Export.Visibility 取值非法
 	ErrInvalidVisibility = errors.New("pkgregistry: export has invalid visibility")
 
-	// ErrEntryNotInDigests Component.Entry 未被 digests 清单覆盖——入口文件必须
+	// ErrEntryNotInDigests Component.Entry 未被 digests 清单覆盖 - 入口文件必须
 	// 被签名/完整性复核覆盖，否则等于允许运行一个未经校验的可执行文件
 	ErrEntryNotInDigests = errors.New("pkgregistry: component entry not covered by digests")
 
 	// ErrIconNotInDigests manifest.icon 未被 digests 清单覆盖
 	ErrIconNotInDigests = errors.New("pkgregistry: icon not covered by digests")
 
-	// ErrUnsafeRelPath 一个应为“包内相对路径”的字段解析后逃出了包目录，
-	// 或本身就是绝对路径（架构 §8）
+	// ErrUnsafeRelPath 一个应为包内相对路径的字段解析后逃出了包目录，
+	// 或本身就是绝对路径
 	ErrUnsafeRelPath = errors.New("pkgregistry: path escapes package directory")
 )
 
-// ComponentType 是 Component 的运行形态（架构 §7）
+// ComponentType 是 Component 的运行形态
 type ComponentType string
 
 const (
@@ -127,9 +125,9 @@ const (
 	ComponentService ComponentType = "service"
 )
 
-// Runtime 是 Component 的进程入口启动方式（应用层架构决策 §3.5）
+// Runtime 是 Component 的进程入口启动方式
 //
-// 注意：runtime 描述“进程入口由谁启动”，不是“能不能有原生代码”——两种 runtime
+// 注意：runtime 描述进程入口由谁启动，不是能不能有原生代码 - 两种 runtime
 // 都可以携带 lib/<abi>/*.so 并经 JNI/Panama 或直接链接加载
 type Runtime string
 
@@ -140,7 +138,7 @@ const (
 
 func (r Runtime) valid() bool { return r == RuntimeNative || r == RuntimeJVM }
 
-// LaunchMode 是 Component 的启动模式（应用层架构决策 §3.4）
+// LaunchMode 是 Component 的启动模式
 type LaunchMode string
 
 const (
@@ -156,10 +154,10 @@ func (l LaunchMode) valid() bool {
 	return l == LaunchAlwaysOn || l == LaunchOnDemand || l == LaunchManual
 }
 
-// Criticality 是 Component 的重要性分级（应用层架构决策 §5.4）
+// Criticality 是 Component 的重要性分级
 //
 // 用有序字符串而不是在 internal/service 里另存一份 uint8 枚举：manifest 是
-// criticality 的真源，两处各存一份会漂。service 的升级链用 Rank() 比较
+// criticality 的真源，两处各存一份会漂。service 的升级链用 Rank 比较
 type Criticality string
 
 const (
@@ -184,7 +182,7 @@ func (c Criticality) Rank() int {
 	}
 }
 
-// Visibility 是 Export 的可见范围（应用层架构决策 §3.4/§6.5）
+// Visibility 是 Export 的可见范围
 type Visibility string
 
 const (
@@ -196,26 +194,26 @@ const (
 
 func (v Visibility) valid() bool { return v == VisibilityPackage || v == VisibilityPublic }
 
-// Export 是一个 Component 对外提供的 Interface（应用层架构决策 §3.4）
+// Export 是一个 Component 对外提供的 Interface
 type Export struct {
 	Interface  string     `json:"interface"`
 	Visibility Visibility `json:"visibility"`
 }
 
-// Feature 是 manifest 声明消费的机器人 Feature（NRCP §6）
+// Feature 是 manifest 声明消费的机器人 Feature
 type Feature struct {
 	ID       string `json:"id"`
 	Required bool   `json:"required"`
 }
 
-// RuntimeDeps 是运行时依赖声明（应用层架构决策 §3.3）
+// RuntimeDeps 是运行时依赖声明
 type RuntimeDeps struct {
 	MinJavaRelease int `json:"min_java_release,omitempty"`
 }
 
-// ComponentLimits 是传给 systemd 的资源上限（应用层架构决策 §3.4）
+// ComponentLimits 是传给 systemd 的资源上限
 //
-// 内核按 trust 钳制这些值的上限，Ordinary 包不能给自己开无限额度——钳制在
+// 内核按 trust 钳制这些值的上限，Ordinary 包不能给自己开无限额度 - 钳制在
 // internal/service 落地，这里只做形状承载
 type ComponentLimits struct {
 	MemoryMaxMB     uint64 `json:"memory_max_mb,omitempty"`
@@ -223,7 +221,7 @@ type ComponentLimits struct {
 	TasksMax        uint32 `json:"tasks_max,omitempty"`
 }
 
-// Component 是 manifest 里声明的一个可注册运行单元（应用层架构决策 §3.4）
+// Component 是 manifest 里声明的一个可注册运行单元
 type Component struct {
 	ID           string          `json:"id"`
 	Type         ComponentType   `json:"type"`
@@ -239,7 +237,7 @@ type Component struct {
 	Limits       ComponentLimits `json:"limits,omitempty"`
 }
 
-// Manifest 是 manifest.json 的解析结果（应用层架构决策 §3.3）
+// Manifest 是 manifest.json 的解析结果
 //
 // Signer 故意不是一个 JSON 字段：它来自对分离签名的独立验证（见 signature.go），
 // 不能让 manifest 自己在 JSON 里填一个 signer 字符串就自证身份
@@ -275,9 +273,9 @@ func (m Manifest) Component(id string) (Component, bool) {
 
 // ParseManifest 反序列化并做结构性校验，失败即整体拒绝
 //
-// 两段解析（应用层架构决策 §9.2）：
-//  1. 宽松解码，先看 schema 与 min_nervus_api——好在“未知字段”之前给出
-//     “schema 不认识 / 平台太旧”这类更准确、可诊断的错误；否则新版本 manifest
+// 两段解析：
+//  1. 宽松解码，先看 schema 与 min_nervus_api - 好在未知字段之前给出
+//     schema 不认识 / 平台太旧这类更准确、可诊断的错误；否则新版本 manifest
 //     在旧设备上只会撞上 DisallowUnknownFields 报一个含义模糊的未知字段
 //  2. 严格解码全量（DisallowUnknownFields）：manifest 里出现本版本不认识的字段，
 //     多半意味着更新版本 schema 写的 manifest，静默忽略等于假装理解，应当拒绝
@@ -338,9 +336,9 @@ func (m Manifest) validate() error {
 	}
 
 	// ---- 组件校验分两趟 ----
-	// 第一趟只做“身份结构”：id 合法性、去重、type、入口路径安全与 digest 覆盖。
-	// 第二趟才做“字段取值”：runtime/launch_mode/criticality/exports。分开是为了让
-	// “重复 ID / 非法 type / 路径逃逸”这类结构错误在任何字段取值错误之前先被报出，
+	// 第一趟只做身份结构：id 合法性、去重、type、入口路径安全与 digest 覆盖。
+	// 第二趟才做字段取值：runtime/launch_mode/criticality/exports。分开是为了让
+	// 重复 ID / 非法 type / 路径逃逸这类结构错误在任何字段取值错误之前先被报出，
 	// 诊断更贴近真正的问题
 	seenID := make(map[string]struct{}, len(m.Components))
 	for _, c := range m.Components {
@@ -372,7 +370,7 @@ func (m Manifest) validate() error {
 		if !c.LaunchMode.valid() {
 			return fmt.Errorf("%w: component %q launch_mode %q", ErrInvalidLaunchMode, c.ID, c.LaunchMode)
 		}
-		// app 不能 always-on；service 不能 manual（应用层架构决策 §3.4）
+		// app 不能 always-on；service 不能 manual
 		if c.Type == ComponentApp && c.LaunchMode == LaunchAlwaysOn {
 			return fmt.Errorf("%w: app %q cannot be always-on", ErrLaunchModeTypeMismatch, c.ID)
 		}
@@ -417,11 +415,11 @@ func (m Manifest) validate() error {
 }
 
 // validPackageID 报告 s 是否是一个安全的 Package ID：反向 DNS 风格
-// seg(.seg)*，每段 [a-z][a-z0-9_]*，1..8 段，总长 ≤128
+// seg(.seg)*，每段 [a-z][a-z0-9_]*，1..8 段，总长 <= 128
 //
 // 这不只是命名规范：package_id 会被 scan.go 的 stateFilePath 拼进记账文件名，
-// 因此拒绝 '.' '..' '/' '\' NUL、大写、空段与超长（应用层架构决策 §9.1）。
-// 只允许小写是刻意的——大小写不敏感文件系统上 "Foo" 与 "foo" 会指向同一文件，
+// 因此拒绝 '.' '..' '/' '\' NUL、大写、空段与超长。
+// 只允许小写是刻意的 - 大小写不敏感文件系统上 "Foo" 与 "foo" 会指向同一文件，
 // 埋下两个 Package 争一个记账文件的隐患
 func validPackageID(s string) bool {
 	if s == "" || len(s) > 128 {
@@ -439,7 +437,7 @@ func validPackageID(s string) bool {
 	return true
 }
 
-// validComponentID 报告 s 是否是一个安全的 Component ID：单段 [a-z][a-z0-9_]*，≤64
+// validComponentID 报告 s 是否是一个安全的 Component ID：单段 [a-z][a-z0-9_]*， <= 64
 func validComponentID(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false
@@ -449,10 +447,10 @@ func validComponentID(s string) bool {
 
 // validVersion 报告 s 是否是一个安全的版本字符串
 //
-// version 文档上"只用于显示"，但它会被拼成代码目录名 <PackageRoot>/<id>/<version>
-// （install.go）。因此这里按目录名安全性收紧：只允许 [A-Za-z0-9._+-]，长度 ≤64，
+// version 会被拼成代码目录名 <PackageRoot>/<id>/<version>，因此必须按目录名
+// 安全性收紧：只允许 [A-Za-z0-9._+-]，长度 <= 64，
 // 且拒绝 "."/".." 与含斜杠、反斜杠、NUL 的形状。否则 version="../com.victim/2.0"
-// 经 filepath.Join 清理后会落进别的 Package 命名空间（应用层架构决策 §9.1 同类洞）
+// 经 filepath.Join 清理后会落进别的 Package 命名空间（ 同类洞）
 func validVersion(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false

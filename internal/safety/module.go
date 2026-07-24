@@ -1,5 +1,3 @@
-// 见 doc.go 的包说明。
-//
 // 本文件把 safety 接入 kernel.Module 生命周期，持有两条 RT Lane（Stop / Supervisor）
 // 与普通优先级的审计排空 goroutine，并对外提供 Observer / Controller 面。
 package safety
@@ -25,9 +23,9 @@ const (
 	superTick = 10 * time.Millisecond
 	// drainInterval auditDrain 轮询 ring 的间隔。审计非实时，20ms 延迟可接受。
 	drainInterval = 20 * time.Millisecond
-	// stopDrainTimeout Stop() 等待 auditDrain 收尾落盘的上限。
+	// stopDrainTimeout Stop 等待 auditDrain 收尾落盘的上限。
 	stopDrainTimeout = 500 * time.Millisecond
-	// laneExitTimeout Stop() 等两条 RT Lane 退出的上限（见 Module.Stop 的顺序说明）。
+	// laneExitTimeout Stop 等两条 RT Lane 退出的上限（见 Module.Stop 的顺序说明）。
 	laneExitTimeout = 500 * time.Millisecond
 )
 
@@ -66,9 +64,9 @@ type Module struct {
 	stopOnce sync.Once
 	fatal    chan error // cap 1，FatalReporter
 
-	// laneWG 计两条 RT Lane 的在跑数；Stop 用它把「Lane 已退出」排在「审计收尾」
+	// laneWG 计两条 RT Lane 的在跑数；Stop 用它把Lane 已退出排在审计收尾
 	// 之前。没有这道序，Lane 可能在最后一次排空之后还往 ring 里写，那些事件就永远
-	// 落不了盘——恰恰是停机期间最该被看见的一类
+	// 落不了盘 - 恰恰是停机期间最该被看见的一类
 	laneWG sync.WaitGroup
 
 	// drainStop 由 Stop 在 Lane 全部退出后关闭，驱动 auditDrain 做最后一次排空。
@@ -78,7 +76,7 @@ type Module struct {
 }
 
 // New 构造 safety.Module。全部依赖以窄接口/值注入（装配范式见 pkgregistry/module.go）。
-// gate 由 main.go 用 motiongate.New() 构造一次，并注入 safety 与（将来）control 同一实例。
+// gate 由 main.go 用 motiongate.New 构造一次，并注入 safety 与（将来）control 同一实例。
 // revoker 可为 nil。
 func New(
 	spawner LaneSpawner,
@@ -122,15 +120,14 @@ func (m *Module) Name() string { return "safety" }
 
 // Start 校验 Contract 后起两条 RT Lane 与审计排空 goroutine。
 //
-// SpawnDedicated 是同步握手：生产环境设不上 RT 优先级即返回 error → Start 返回 error →
-// 内核 fail-fast（README「生产环境实时优先级设置失败 = fatal」）。对外开门（IPC）之前
-// Safety 必须就绪，因此本模块在 IPC 之前注册。
+// SpawnDedicated 是同步握手。生产环境设不上 RT 优先级时 Start 必须返回错误，
+// 因为没有时序保证的 Safety Lane 不能对外宣称已经就绪。本模块因此在 IPC 之前注册。
 func (m *Module) Start(_ context.Context) error {
 	if err := m.contract.Validate(); err != nil {
 		return fmt.Errorf("safety: invalid contract: %w", err)
 	}
 	// laneWG.Add 必须 happen-before 对应的 Done（在 laneFn 里），因此在 spawn 前 Add；
-	// spawn 失败即回退计数。SpawnDedicated 返回 nil ⟺ fn 一定会被调用（scheduler 语义），
+	// spawn 失败即回退计数。SpawnDedicated 返回 nil 时 fn 一定会被调用，
 	// 于是 Add 与 Done 恰好配对
 	m.laneWG.Add(1)
 	if err := m.spawner.SpawnDedicated("safety-stop",
@@ -155,13 +152,13 @@ func (m *Module) Start(_ context.Context) error {
 
 // Stop 分两拍收尾：先让两条 RT Lane 退出，再让 auditDrain 做最后一次排空。
 //
-// 顺序是有意义的。Scheduler 对 Lane 的 join 发生在【所有模块 Stop 之后】
+// 顺序是有意义的。Scheduler 对 Lane 的 join 发生在所有模块 Stop 之后
 // （sched.Shutdown），只靠它的话，本模块的审计排空早已结束，而 Stop Lane 可能还在
-// 投递并继续往 ring 里写——那些事件没有任何人再读，直接丢失。因此这里自己等一次
+// 投递并继续往 ring 里写 - 那些事件没有任何人再读，直接丢失。因此这里自己等一次
 // 自己的 Lane：等到（或超时放弃）之后才关 drainStop。
 //
 // 两段等待都有上限：一条卡死的 Lane 不能拖垮整条关闭序列（kernel 对单模块 Stop
-// 另有 5s 上限兜底）。超时即放弃并告警，退回到「可能少记几条」的旧行为。
+// 另有 5s 上限兜底）。超时即放弃并告警，退回到可能少记几条的旧行为。
 func (m *Module) Stop(_ context.Context) error {
 	m.stopOnce.Do(func() {
 		close(m.stopCh)
@@ -196,11 +193,11 @@ func (m *Module) waitLanes(d time.Duration) {
 // 即上报致命错误，触发内核反序关停、非零退出、systemd 重启（MCU 心跳兜底）。
 func (m *Module) Fatal() <-chan error { return m.fatal }
 
-// laneFn 包裹 Lane 主体，把「未经 Stop 就退出」识别为结构性故障并上报 Fatal。
+// laneFn 包裹 Lane 主体，把未经 Stop 就退出识别为结构性故障并上报 Fatal。
 func (m *Module) laneFn(name string, body func(context.Context)) func(context.Context) {
 	return func(ctx context.Context) {
 		// laneWG 的 Add 在 Start 里、SpawnDedicated 成功之后做（那时才保证 fn 会跑），
-		// 这里只负责 Done。放在 goroutine 内 Add 会有 Start→Stop 立即竞态：Stop 的
+		// 这里只负责 Done。放在 goroutine 内 Add 会有 Start -> Stop 立即竞态：Stop 的
 		// Wait 可能在 fn 尚未开跑、计数还是 0 时就返回
 		defer m.laneWG.Done()
 
@@ -250,7 +247,7 @@ func (m *Module) runAuditDrain() {
 		select {
 		case <-m.drainStop:
 			// drainStop 在两条 Lane 都退出（或超时放弃）之后才关，因此此刻 ring 里
-			// 是 Lane 写入的【全部】事件，最后一次排空不会漏掉停机末尾的投递
+			// 是 Lane 写入的全部事件，最后一次排空不会漏掉停机末尾的投递
 			m.drainAll()
 			m.reportDropped()
 			return
@@ -277,7 +274,7 @@ func (m *Module) recordEvent(rec eventRecord) {
 	}
 	switch rec.kind {
 	case evDeliveryFault, evProviderAcceptTimeout, evDeviceAckTimeout, evStandstillTimeout:
-		ev.Denied = true // 标记「未达期望的安全事件」，便于离线筛
+		ev.Denied = true // 标记未达期望的安全事件，便于离线筛
 	}
 	m.aud.Record(context.Background(), ev)
 }
@@ -307,7 +304,7 @@ func (m *Module) SafetySnapshot() Snapshot {
 	return Snapshot{State: st, Epoch: ep, StopPhase: ph}
 }
 
-// RequestRecovery 请求进入 OEM 恢复阶段（SAFETY_LATCHED → OEM_RECOVERY）。恢复动作
+// RequestRecovery 请求进入 OEM 恢复阶段（SAFETY_LATCHED -> OEM_RECOVERY）。恢复动作
 // 只能经专用 Safety Gate 请求白名单动作，不能清除 latch；真实白名单派发留到 Provider 落地。
 // 返回是否成功迁移。
 func (m *Module) RequestRecovery() bool {
@@ -316,31 +313,31 @@ func (m *Module) RequestRecovery() bool {
 	return ok
 }
 
-// RequireRearm 要求必须经明确 re-arm 才能回 NORMAL（→ REARM_REQUIRED）。
+// RequireRearm 要求必须经明确 re-arm 才能回 NORMAL（ -> REARM_REQUIRED）。
 func (m *Module) RequireRearm() bool {
 	ok := m.gate.RequireRearm()
 	wake(m.superWake)
 	return ok
 }
 
-// Rearm 执行明确 re-arm（REARM_REQUIRED → NORMAL 并递增 epoch）。返回是否成功。
+// Rearm 执行明确 re-arm（REARM_REQUIRED -> NORMAL 并递增 epoch）。返回是否成功。
 //
-// 内核在这里只复核【不可绕过的硬前置】：停止进度必须已经落定——要么正常链已到
+// 内核在这里只复核不可绕过的硬前置：停止进度必须已经落定 - 要么正常链已到
 // OUTPUT_DISABLED/STANDSTILL_CONFIRMED（输出确认关闭），要么已入 DELIVERY_FAULT/
 // STANDSTILL_TIMEOUT 这类终态旁支（已经必须人工处置）。停止还在途中
 // （REQUESTED/SENT/PROVIDER_ACCEPTED/MCU_ACKED）就解开 latch，等于在还不知道输出有没有
 // 关掉的情况下重新放行运动。
 //
-// 「此刻该不该 re-arm」本身是【策略】，不在内核：由系统服务聚合设备状态、风险与用户
-// 策略后决定，再来调本方法。机制在内核、策略在服务——与 §8.2 休息模式同一分工
+// 此刻该不该 re-arm本身是策略，不在内核：由系统服务聚合设备状态、风险与用户
+// 策略后决定，再来调本方法。机制在内核、策略在服务 - 与 休息模式同一分工
 // （Agent 只能请求，Policy 检查后由 nervud Authority 执行固定类型化动作）。
 func (m *Module) Rearm() bool {
 	_, ep := m.gate.Snapshot()
 	ph, phEpoch := unpackPhase(m.phase.Load())
 
-	// 相位必须【属于当前这一轮锁存】（phEpoch == 当前 Gate epoch）且已落定。属于上一轮
-	// 的残留相位一律当作「未落定」拒绝——否则会出现：上一轮 OUTPUT_DISABLED → Rearm →
-	// 新 Trip → RequireRearm → Rearm 时，最后这次 Rearm 拿旧相位当凭据，把【新】latch
+	// 相位必须属于当前这一轮锁存（phEpoch == 当前 Gate epoch）且已落定。属于上一轮
+	// 的残留相位一律当作未落定拒绝 - 否则会出现：上一轮 OUTPUT_DISABLED -> Rearm ->
+	// 新 Trip -> RequireRearm -> Rearm 时，最后这次 Rearm 拿旧相位当凭据，把新latch
 	// 解回 NORMAL，而本轮 beginHalt/RevokeAll 可能都还没跑。绑定 epoch 正是为了堵死它。
 	if phEpoch != ep || !rearmSettled(ph) {
 		m.recordRearmRejected(ph, phEpoch, ep)
@@ -349,7 +346,7 @@ func (m *Module) Rearm() bool {
 
 	if !m.gate.Rearm() {
 		// 硬前置通过，但状态迁移仍失败：当前非 REARM_REQUIRED 态，或并发 Trip 改写了
-		// 状态。决策基线「被拒的 re-arm 必须留审计」对这条路径同样成立
+		// 状态。决策基线被拒的 re-arm 必须留审计对这条路径同样成立
 		m.recordRearmRejected(ph, phEpoch, ep)
 		return false
 	}
@@ -358,7 +355,7 @@ func (m *Module) Rearm() bool {
 }
 
 // recordRearmRejected 记一条被拒的 re-arm。带上相位与两个 epoch，便于离线区分
-// 「相位未落定」「相位属于旧一轮」「状态迁移失败」三种拒因。
+// 相位未落定相位属于旧一轮状态迁移失败三种拒因。
 func (m *Module) recordRearmRejected(ph StopPhase, phEpoch, gateEpoch uint64) {
 	m.aud.Record(context.Background(), audit.Event{
 		Action:  "safety.rearm_rejected",
@@ -370,7 +367,7 @@ func (m *Module) recordRearmRejected(ph StopPhase, phEpoch, gateEpoch uint64) {
 
 // rearmSettled 报告停止进度是否已经落定到允许 re-arm 的相位（见 Rearm 的说明）
 //
-// 注意 rank() 对终态旁支与 UNSPECIFIED 都返回 0，因此终态必须单独判断，
+// 注意 rank 对终态旁支与 UNSPECIFIED 都返回 0，因此终态必须单独判断，
 // 不能只比大小
 func rearmSettled(p StopPhase) bool {
 	return p.rank() >= PhaseOutputDisabled.rank() || p.isTerminalFault()

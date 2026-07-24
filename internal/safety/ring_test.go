@@ -39,7 +39,6 @@ func TestRing_DropOnFull(t *testing.T) {
 	if got := r.droppedCount(); got != 1 {
 		t.Fatalf("dropped = %d, want 1", got)
 	}
-	// 前 4 条仍可完整取回。
 	for i := 0; i < 4; i++ {
 		rec, ok := r.pop()
 		if !ok || rec.epoch != uint64(i) {
@@ -49,8 +48,6 @@ func TestRing_DropOnFull(t *testing.T) {
 }
 
 func TestRing_ConcurrentProducers(t *testing.T) {
-	// MPSC：多个生产者并发 push，单消费者并发 pop；总取回 + 丢弃 == 总投递，且无撕裂记录。
-	// 配合 -race 最有价值。
 	const producers = 6
 	const each = 5000
 	r := newAuditRing(1024)
@@ -61,7 +58,6 @@ func TestRing_ConcurrentProducers(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
-				// epoch 编码 (生产者 id, 序号)，便于校验无撕裂。
 				r.push(eventRecord{kind: evStopProgress, epoch: uint64(id)<<32 | uint64(i)})
 			}
 		}(p)
@@ -85,7 +81,6 @@ func TestRing_ConcurrentProducers(t *testing.T) {
 			}
 			select {
 			case <-stop:
-				// 生产者已停，再确认排空。
 				for {
 					if _, ok := r.pop(); !ok {
 						return

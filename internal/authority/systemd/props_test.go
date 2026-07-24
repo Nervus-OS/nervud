@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// propMap 把 BuildProperties 的结果收成 name->value 便于断言
 func propMap(t *testing.T, spec UnitSpec) map[string]any {
 	t.Helper()
 	props, err := BuildProperties(spec)
@@ -31,7 +30,6 @@ func validSpec() UnitSpec {
 func TestBuildProperties_CoreSandboxAlwaysOn(t *testing.T) {
 	m := propMap(t, validSpec())
 
-	// 沙箱硬项无条件存在
 	for _, name := range []string{
 		"NoNewPrivileges", "ProtectSystem", "PrivateTmp", "PrivateDevices",
 		"DevicePolicy", "ProtectKernelTunables", "ProtectKernelModules",
@@ -68,7 +66,6 @@ func TestBuildProperties_SystemCallFilterIsWhitelist(t *testing.T) {
 }
 
 func TestBuildProperties_LimitsSetOnlyWhenNonZero(t *testing.T) {
-	// 零值：不设 limit 属性
 	m := propMap(t, validSpec())
 	for _, name := range []string{"MemoryMax", "TasksMax", "CPUQuotaPerSecUSec"} {
 		if _, ok := m[name]; ok {
@@ -76,7 +73,6 @@ func TestBuildProperties_LimitsSetOnlyWhenNonZero(t *testing.T) {
 		}
 	}
 
-	// 非零值：设，且 CPU 百分比正确换算成 usec
 	spec := validSpec()
 	spec.Limits = Limits{MemoryMaxBytes: 512 << 20, CPUQuotaPercent: 50, TasksMax: 64}
 	m = propMap(t, spec)
@@ -100,7 +96,6 @@ func TestBuildProperties_ExecStartArgvIncludesArgv0(t *testing.T) {
 	if !ok || len(items) != 1 {
 		t.Fatalf("ExecStart = %T %v", m["ExecStart"], m["ExecStart"])
 	}
-	// argv[0] 必须是 ExecPath 本身，其后接 Args
 	if len(items[0].Argv) != 3 || items[0].Argv[0] != spec.ExecPath || items[0].Argv[1] != "-jar" {
 		t.Fatalf("Argv = %v", items[0].Argv)
 	}
@@ -134,12 +129,10 @@ func TestValidateSpec_Rejections(t *testing.T) {
 }
 
 func TestBuildProperties_BindToUnit(t *testing.T) {
-	// 默认不设 BindsTo
 	m := propMap(t, validSpec())
 	if _, ok := m["BindsTo"]; ok {
 		t.Fatal("BindsTo should be absent when BindToUnit empty")
 	}
-	// 设了 BindToUnit：BindsTo + After 都指向它（owner-death）
 	spec := validSpec()
 	spec.BindToUnit = "nervud.service"
 	m = propMap(t, spec)
@@ -165,7 +158,7 @@ func TestValidUnitName(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"", "systemd.service", "nervus-.service", "nervus-A.service", // 大写
+		"", "systemd.service", "nervus-.service", "nervus-A.service",
 		"nervus-a b.service", "nervus-a/b.service", "nervus-a.service\n",
 	}
 	for _, n := range bad {

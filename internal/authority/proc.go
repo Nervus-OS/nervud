@@ -1,13 +1,13 @@
 // 本文件是进程生命周期与包树删除三个特权操作的请求契约与 Gate 方法
-// （应用层架构决策 §5.1）：
+// ：
 //
-//	StartSandboxedProcess  经 systemd StartTransientUnit 起一个沙箱进程
-//	StopProcess            停止该 unit
-//	RemovePackageTree      递归删除一个已安装 Package 的代码或数据目录（卸载用）
+//	StartSandboxedProcess 经 systemd StartTransientUnit 起一个沙箱进程
+//	StopProcess      停止该 unit
+//	RemovePackageTree   递归删除一个已安装 Package 的代码或数据目录（卸载用）
 //
-// 起进程不由 authority 直接 fork/exec，而是委托 systemd（架构 §8）：sandbox、cgroup
-// 限额、UID 降权全部交给 systemd 的 unit 属性，authority 只负责「决定允不允许 +
-// 本地不变量校验 + 审计」。真正的 D-Bus 在 internal/authority/systemd 子包。
+// 起进程不由 authority 直接 fork/exec，而是委托 systemd：sandbox、cgroup
+// 限额、UID 降权全部交给 systemd 的 unit 属性，authority 只负责决定允不允许 +
+// 本地不变量校验 + 审计。真正的 D-Bus 在 internal/authority/systemd 子包。
 package authority
 
 import (
@@ -17,13 +17,13 @@ import (
 	"github.com/nervus-os/nervud/internal/authority/systemd"
 )
 
-// PlatformJREExec 是平台内置 JRE 的固定 java 可执行路径（应用层架构决策 §3.6/§5.1）。
-// runtime=jvm 的组件，ExecStart 必须【恰好】是它——被校验位置在包内的是 -jar 指向的
+// PlatformJREExec 是平台内置 JRE 的固定 java 可执行路径。
+// runtime=jvm 的组件，ExecStart 必须恰好是它 - 被校验位置在包内的是 -jar 指向的
 // entry 与 native_lib_dir（由 ContainedPaths 承载）
 const PlatformJREExec = "/usr/lib/nervus/jre/bin/java"
 
 // Runtime 是进程入口的启动方式。authority 定义自己的小枚举而不 import pkgregistry
-// ——pkgregistry 已经 import authority（装包时调 InstallVerifiedPackage），反向依赖
+// - pkgregistry 已经 import authority（装包时调 InstallVerifiedPackage），反向依赖
 // 会成环。service.Manager 负责把 pkgregistry.Runtime 翻成本类型
 type Runtime uint8
 
@@ -34,7 +34,7 @@ const (
 
 func (r Runtime) valid() bool { return r == RuntimeNative || r == RuntimeJVM }
 
-// ResourceLimits 是组件的资源上限（应用层架构决策 §3.4）。零值表示不设该项。
+// ResourceLimits 是组件的资源上限。零值表示不设该项。
 // 内核按 trust 钳制上限由 service.Manager 负责，authority 只透传
 type ResourceLimits struct {
 	MemoryMaxBytes  uint64
@@ -52,7 +52,7 @@ type StartSandboxedProcessRequest struct {
 	ExecPath string  // native=包内 ELF；jvm=PlatformJREExec
 	Args     []string
 	// ContainedPaths 是必须位于 PackageRoot 之内的包内路径（jvm 的 jar、native_lib_dir
-	// 等）。Validate 逐一 CheckContained，堵住「java -jar /etc/shadow」这类逃逸
+	// 等）。Validate 逐一 CheckContained，堵住java -jar /etc/shadow这类逃逸
 	ContainedPaths    []string
 	UID               uint32
 	GID               uint32
@@ -71,8 +71,8 @@ func (StartSandboxedProcessRequest) Kind() Kind { return KindStartSandboxedProce
 
 func (r StartSandboxedProcessRequest) Detail() string { return r.UnitName }
 
-// Validate 按 runtime 分支（应用层架构决策 §5.1 的关键点）：native 的 ExecPath 必须
-// 在包内，jvm 的 ExecPath 必须恰好是平台 JRE——否则 jvm 组件永远过不了「exec 在包内」
+// Validate 按 runtime 分支（ 的关键点）：native 的 ExecPath 必须
+// 在包内，jvm 的 ExecPath 必须恰好是平台 JRE - 否则 jvm 组件永远过不了exec 在包内
 // 的检查，因为 java 本就在 /usr/lib/nervus/jre 而非包目录
 func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 	if !r.Runtime.valid() {
@@ -104,7 +104,7 @@ func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 	return inv.CheckUID(r.GID)
 }
 
-// ProcessHandle 是一个已启动 unit 的不透明句柄。unit 名不导出——调用方只能把它
+// ProcessHandle 是一个已启动 unit 的不透明句柄。unit 名不导出 - 调用方只能把它
 // 原样交回 StopProcess/WaitProcess，不能自行构造一个指向任意 unit 的句柄
 type ProcessHandle struct{ unit string }
 
@@ -193,7 +193,7 @@ type ExitInfo struct {
 }
 
 // WaitProcess 阻塞直到进程终结，返回退出信息。它是观察操作（不改变系统状态），
-// 因此不走 do() 审计流水线——但仍要求 spawner 已配置
+// 因此不走 do 审计流水线 - 但仍要求 spawner 已配置
 func (g *Gate) WaitProcess(ctx context.Context, h ProcessHandle) (ExitInfo, error) {
 	if g.spawner == nil {
 		return ExitInfo{}, fmt.Errorf("%w: no systemd spawner configured", ErrUnsupportedPlatform)
@@ -212,10 +212,10 @@ func (g *Gate) WaitProcess(ctx context.Context, h ProcessHandle) (ExitInfo, erro
 
 // RemovePackageTreeRequest 递归删除一个已安装 Package 的代码或数据目录（卸载用）
 //
-// Root 显式说明删的是 PackageRoot 还是 DataRoot——不接受任意 root，避免一个字段
+// Root 显式说明删的是 PackageRoot 还是 DataRoot - 不接受任意 root，避免一个字段
 // 就能递归删到 DataRoot/PackageRoot 之外
 type RemovePackageTreeRequest struct {
-	Root string // 必须【等于】inv.PackageRoot 或 inv.DataRoot
+	Root string // 必须等于inv.PackageRoot 或 inv.DataRoot
 	Path string // 必须位于 Root 之下
 }
 
@@ -228,7 +228,7 @@ func (r RemovePackageTreeRequest) Validate(inv *Invariants) error {
 	if r.Root != inv.PackageRoot && r.Root != inv.DataRoot {
 		return fmt.Errorf("%w: remove root %q is neither PackageRoot nor DataRoot", ErrInvariantViolated, r.Root)
 	}
-	// Path 必须严格在 Root 之内（Root 自身不算——不允许删空整个根）
+	// Path 必须严格在 Root 之内（Root 自身不算 - 不允许删空整个根）
 	return inv.CheckContained(r.Path, r.Root)
 }
 

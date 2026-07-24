@@ -12,7 +12,7 @@ func TestRegistryReplace_RejectsEmptyPackageID(t *testing.T) {
 	r := NewRegistry(DefaultCatalog())
 	err := r.Replace([]Grant{{PackageID: "", Permissions: []string{"perm.a"}}})
 	if err == nil {
-		t.Fatal("空 package id 必须被拒绝")
+		t.Fatal("an empty package ID must be rejected")
 	}
 }
 
@@ -27,7 +27,6 @@ func TestRegistryReplace_RejectsDuplicatePackageID(t *testing.T) {
 	}
 }
 
-// 校验失败必须整份拒绝并保留旧快照
 func TestRegistryReplace_FailureKeepsPreviousSnapshot(t *testing.T) {
 	r := NewRegistry(DefaultCatalog())
 	if err := r.Replace([]Grant{{PackageID: "com.good", Permissions: []string{"perm.diagnostics.read"}}}); err != nil {
@@ -36,19 +35,19 @@ func TestRegistryReplace_FailureKeepsPreviousSnapshot(t *testing.T) {
 
 	err := r.Replace([]Grant{
 		{PackageID: "com.new", Permissions: []string{"perm.diagnostics.read"}},
-		{PackageID: "", Permissions: nil}, // 触发拒绝
+		{PackageID: "", Permissions: nil},
 	})
 	if err == nil {
 		t.Fatal("want error")
 	}
 	if r.Len() != 1 {
-		t.Fatalf("Len() = %d, want 1（旧快照应当原封不动）", r.Len())
+		t.Fatalf("Len() = %d, want 1 with the previous snapshot unchanged", r.Len())
 	}
 	if !r.Allowed("com.good", "perm.diagnostics.read") {
-		t.Fatal("旧授权丢了")
+		t.Fatal("the previous grant was lost")
 	}
 	if r.Allowed("com.new", "perm.diagnostics.read") {
-		t.Fatal("被拒绝快照里的授权泄漏进来了")
+		t.Fatal("a grant from the rejected snapshot leaked into the registry")
 	}
 }
 
@@ -58,56 +57,52 @@ func TestRegistryAllowed(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 	if !r.Allowed("com.a", "perm.diagnostics.read") {
-		t.Fatal("已授予的权限应放行")
+		t.Fatal("a granted permission should be allowed")
 	}
 	if r.Allowed("com.a", "perm.service.register") {
-		t.Fatal("未授予的权限不该放行")
+		t.Fatal("an ungranted permission should not be allowed")
 	}
 	if r.Allowed("com.missing", "perm.diagnostics.read") {
-		t.Fatal("未知 Package 不该放行")
+		t.Fatal("an unknown Package should not be allowed")
 	}
 }
 
-// 撤权的即时性：Replace 之后下一次 Allowed 必须立刻看到新状态，
-// 不能被任何缓存挡住（架构 §10.7 的动态撤权要求）
 func TestRegistryAllowed_ReflectsRevocationImmediately(t *testing.T) {
 	r := NewRegistry(DefaultCatalog())
 	if err := r.Replace([]Grant{{PackageID: "com.a", Permissions: []string{"perm.diagnostics.read"}}}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	if !r.Allowed("com.a", "perm.diagnostics.read") {
-		t.Fatal("授权后应放行")
+		t.Fatal("permission should be allowed after grant")
 	}
 
-	if err := r.Replace(nil); err != nil { // 撤权：卸载后全量清空
+	if err := r.Replace(nil); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	if r.Allowed("com.a", "perm.diagnostics.read") {
-		t.Fatal("撤权后下一次 Allowed 必须立刻拒绝")
+		t.Fatal("the next Allowed call must reject immediately after revocation")
 	}
 }
 
-// 未初始化的 Registry 必须 fail-safe 拒绝，不 panic；这里的 fail-safe 方向
-// 与 identity/pkgregistry 相同（未初始化 = 谁都不认识 = 全部拒绝）
 func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 	var empty Registry
 	if empty.Allowed("com.a", "perm.diagnostics.read") {
-		t.Fatal("未初始化 Registry 的 Allowed 必须返回 false")
+		t.Fatal("Allowed on an uninitialized Registry must return false")
 	}
 	if empty.Len() != 0 {
-		t.Fatal("未初始化 Registry 的 Len 应为 0")
+		t.Fatal("an uninitialized Registry should have length 0")
 	}
 	granted, denied := empty.Intersect([]string{"perm.diagnostics.read"}, identity.TrustPlatform, nil)
 	if len(granted) != 0 || len(denied) != 1 {
-		t.Fatalf("未初始化 Registry 的 Intersect 应全部拒绝，got granted=%v denied=%v", granted, denied)
+		t.Fatalf("Intersect on an uninitialized Registry should deny everything, got granted=%v denied=%v", granted, denied)
 	}
 
 	var nilReg *Registry
 	if nilReg.Allowed("com.a", "perm.diagnostics.read") {
-		t.Fatal("typed-nil Registry 的 Allowed 必须返回 false")
+		t.Fatal("Allowed on a typed-nil Registry must return false")
 	}
 	if nilReg.Len() != 0 {
-		t.Fatal("typed-nil Registry 的 Len 应为 0")
+		t.Fatal("a typed-nil Registry should have length 0")
 	}
 }
 

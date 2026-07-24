@@ -17,7 +17,6 @@ func TestNew_NormalNonZeroEpoch(t *testing.T) {
 }
 
 func TestZeroValue_FailClosed(t *testing.T) {
-	// 零值 Gate 未经 New()：必须解出 (Invalid, 0)，双重 fail-closed。
 	var g Gate
 	s, e := g.Snapshot()
 	if s != StateInvalid {
@@ -29,7 +28,6 @@ func TestZeroValue_FailClosed(t *testing.T) {
 }
 
 func TestPackRoundTrip(t *testing.T) {
-	// 边界 epoch 也要能无损打包/解包，且 State 位不污染 epoch 位。
 	for _, e := range []uint64{0, 1, 2, epochMask - 1, epochMask} {
 		for _, st := range []State{StateNormal, StateSafetyLatched, StateOEMRecovery, StateRearmRequired} {
 			gs, ge := unpack(pack(st, e))
@@ -50,7 +48,6 @@ func TestTrip_LatchesAndBumpsOnce(t *testing.T) {
 		t.Fatalf("after Trip = (%v,%d), want (SAFETY_LATCHED,2)", s, e)
 	}
 
-	// 幂等：已锁存再 Trip 不改状态、不 churn epoch，返回 false。
 	if g.Trip() {
 		t.Fatal("second Trip should be a no-op (false)")
 	}
@@ -75,7 +72,6 @@ func TestBumpEpoch_PreservesState(t *testing.T) {
 func TestBumpEpochIfNormal(t *testing.T) {
 	g := New() // (Normal, 1)
 
-	// Normal：递增并返回新 epoch + true。
 	if ne, ok := g.BumpEpochIfNormal(); !ok || ne != 2 {
 		t.Fatalf("BumpEpochIfNormal(Normal) = (%d,%v), want (2,true)", ne, ok)
 	}
@@ -83,8 +79,6 @@ func TestBumpEpochIfNormal(t *testing.T) {
 		t.Fatalf("after = (%v,%d), want (NORMAL,2)", s, e)
 	}
 
-	// 锁存后：不递增、返回当前 epoch + false。这正是 control 需要的「锁存即拒发、
-	// 绝不把已锁存 Gate 又推进一代」的原子保证。
 	g.Trip() // (Latched, 3)
 	if ne, ok := g.BumpEpochIfNormal(); ok || ne != 3 {
 		t.Fatalf("BumpEpochIfNormal(Latched) = (%d,%v), want (3,false)", ne, ok)
@@ -93,7 +87,6 @@ func TestBumpEpochIfNormal(t *testing.T) {
 		t.Fatalf("latched epoch must not advance: (%v,%d), want (SAFETY_LATCHED,3)", s, e)
 	}
 
-	// 其余非 Normal 态同样不递增。
 	g.RequireRearm() // (RearmRequired, 3)
 	if _, ok := g.BumpEpochIfNormal(); ok {
 		t.Fatal("BumpEpochIfNormal must fail in REARM_REQUIRED")
@@ -113,7 +106,6 @@ func TestBumpEpochIfNormal_ZeroAlloc(t *testing.T) {
 func TestRecoveryRearmCycle(t *testing.T) {
 	g := New() // (Normal, 1)
 
-	// 未锁存时不能进恢复/复位。
 	if g.BeginRecovery() || g.RequireRearm() || g.Rearm() {
 		t.Fatal("recovery/rearm transitions must fail from NORMAL")
 	}
@@ -134,7 +126,7 @@ func TestRecoveryRearmCycle(t *testing.T) {
 		t.Fatalf("after RequireRearm = (%v,%d), want (REARM_REQUIRED,2)", s, e)
 	}
 
-	if !g.Rearm() { // (Normal, 3) —— re-arm 递增 epoch
+	if !g.Rearm() {
 		t.Fatal("Rearm should succeed from REARM_REQUIRED")
 	}
 	if s, e := g.Snapshot(); s != StateNormal || e != 3 {
@@ -143,7 +135,6 @@ func TestRecoveryRearmCycle(t *testing.T) {
 }
 
 func TestRequireRearm_FromLatchedDirectly(t *testing.T) {
-	// 允许跳过 OEM_RECOVERY 直接从 SAFETY_LATCHED 要求 re-arm。
 	g := New()
 	g.Trip() // (Latched, 2)
 	if !g.RequireRearm() {
@@ -155,7 +146,6 @@ func TestRequireRearm_FromLatchedDirectly(t *testing.T) {
 }
 
 func TestTrip_DuringRecovery_RelatchesAndBumps(t *testing.T) {
-	// 恢复阶段来了新的 Safety 触发：必须重新 latch 并递增 epoch，废止恢复残留命令。
 	g := New()
 	g.Trip()          // (Latched, 2)
 	g.BeginRecovery() // (OEMRecovery, 2)
@@ -169,7 +159,6 @@ func TestTrip_DuringRecovery_RelatchesAndBumps(t *testing.T) {
 }
 
 func TestIncEpoch_SkipsZeroOnWrap(t *testing.T) {
-	// 回绕（现实中不可达）也必须跳过 0，维持 epoch 恒非零。
 	if got := incEpoch(epochMask); got != 1 {
 		t.Fatalf("incEpoch(max) = %d, want 1 (skip 0 on wrap)", got)
 	}
@@ -179,8 +168,6 @@ func TestIncEpoch_SkipsZeroOnWrap(t *testing.T) {
 }
 
 func TestConcurrent_NoTornReadEpochMonotonic(t *testing.T) {
-	// 并发 Trip/BumpEpoch 下：读者永不看到 Invalid 态或 epoch 倒退（撕裂读）。
-	// 配合 `go test -race` 一起跑最有价值。
 	g := New()
 
 	const writers = 8
@@ -189,7 +176,6 @@ func TestConcurrent_NoTornReadEpochMonotonic(t *testing.T) {
 	stop := make(chan struct{})
 	readerErr := make(chan string, 1)
 
-	// 读者：全程监视一致性，直到 stop 关闭。
 	var readerWG sync.WaitGroup
 	readerWG.Add(1)
 	go func() {
@@ -220,7 +206,6 @@ func TestConcurrent_NoTornReadEpochMonotonic(t *testing.T) {
 		}
 	}()
 
-	// 写者：一半 BumpEpoch、一半 Trip。
 	var writersWG sync.WaitGroup
 	for w := 0; w < writers; w++ {
 		writersWG.Add(1)
@@ -236,8 +221,8 @@ func TestConcurrent_NoTornReadEpochMonotonic(t *testing.T) {
 		}(w)
 	}
 
-	writersWG.Wait() // 写者全部跑完
-	close(stop)      // 再停读者
+	writersWG.Wait()
+	close(stop)
 	readerWG.Wait()
 
 	select {
@@ -246,7 +231,6 @@ func TestConcurrent_NoTornReadEpochMonotonic(t *testing.T) {
 	default:
 	}
 
-	// 至少发生过若干次递增（BumpEpoch 一定推进）。
 	if e := g.Epoch(); e < 2 {
 		t.Fatalf("final epoch = %d, expected many increments", e)
 	}

@@ -1,5 +1,3 @@
-// 见 doc.go 的包说明
-//
 // 本文件把 permission 接入 kernel.Module 生命周期
 package permission
 
@@ -8,7 +6,7 @@ import "context"
 // Module 把 permission 接入 kernel.Module 生命周期
 //
 // Registry 的全量状态由 pkgregistry 在装包/卸载/启动扫描后主动推送
-// （Registry.Replace），不是 Module 在 Start 里反过来拉取——这与
+// （Registry.Replace），不是 Module 在 Start 里反过来拉取 - 这与
 // identity.Registry 接收 pkgregistry 投影的方式一致（见
 // pkgregistry/module.go 的 projectIdentity）。因此 Module 本身没有需要
 // 建立的初始状态：Registry 在装配阶段由 main.go 构造好并共享给
@@ -24,7 +22,7 @@ type Module struct {
 // New 构造 permission 的 Module
 //
 // registry 由调用方在装配阶段显式 NewRegistry(cat) 构造后传入，而不是本
-// 函数内部 new——pkgregistry 需要与 Module 共享同一份 *Registry 才能把
+// 函数内部 new - pkgregistry 需要与 Module 共享同一份 *Registry 才能把
 // Install/Scan 的投影推送到它，两者不能各自持有一份互不知情的副本
 func New(registry *Registry) *Module {
 	return &Module{registry: registry}

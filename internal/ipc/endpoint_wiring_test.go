@@ -1,6 +1,3 @@
-// 本文件验证 ipc 与 internal/endpoint 的接线（架构总览 §7 待办列表里的那一条）：
-// ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给 EndpointResolver，
-// handleRequest 在 Route 之后才决定失败码，ConnClosed 在连接退出时被调用一次
 package ipc
 
 import (
@@ -18,7 +15,6 @@ import (
 	"github.com/nervus-os/nervud/internal/permission"
 )
 
-// fakeEndpoints 是最小的 EndpointResolver 测试替身，记录调用并按需返回固定结果
 type fakeEndpoints struct {
 	mu sync.Mutex
 
@@ -59,20 +55,18 @@ func (f *fakeEndpoints) closedCount() int {
 	return len(f.connClosed)
 }
 
-// newTestServerWithEndpoints 构造一个接上 fakeEndpoints 的 Server
 func newTestServerWithEndpoints(t *testing.T, inv *authority.Invariants, fe *fakeEndpoints) (*Server, string) {
 	t.Helper()
 
 	sock := filepath.Join(t.TempDir(), "nervud.sock")
 	s, err := New(Config{
-		SockPath:   sock,
-		Log:        discardLog(),
-		Auditor:    &fakeRecorder{},
-		Invariants: inv,
-		Identity:   selfRegistry(t),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
-		Endpoints:  fe,
-		// Component 核对尚未落地；测试显式走开发降级，否则握手会 fail closed
+		SockPath:                 sock,
+		Log:                      discardLog(),
+		Auditor:                  &fakeRecorder{},
+		Invariants:               inv,
+		Identity:                 selfRegistry(t),
+		Permission:               permission.NewRegistry(permission.DefaultCatalog()),
+		Endpoints:                fe,
 		AllowUnverifiedComponent: true,
 	})
 	if err != nil {
@@ -114,7 +108,7 @@ func TestReady_ResolveEndpointDispatchesToResolver(t *testing.T) {
 		t.Fatal("want ResolveEndpointResult")
 	}
 	if got := result.GetSuccess().GetEndpointId(); got != 42 {
-		t.Fatalf("endpoint_id = %d, want 42 (未真正转发给 EndpointResolver)", got)
+		t.Fatalf("endpoint_id = %d, want 42 because the request must reach EndpointResolver", got)
 	}
 }
 
@@ -147,8 +141,6 @@ func TestReady_RegisterEndpointDispatchesToResolver(t *testing.T) {
 	}
 }
 
-// Request 在 Endpoints 接线之后：Route 命中 NOT_FOUND 必须原样反映到 Response
-// 的失败码，而不是恒 UNAVAILABLE——证明 handleRequest 真的调用了 Route
 func TestReady_RequestReflectsRouteNotFound(t *testing.T) {
 	inv := selfUIDInvariants(t)
 	fe := &fakeEndpoints{routeErr: endpoint.RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}}
@@ -169,15 +161,13 @@ func TestReady_RequestReflectsRouteNotFound(t *testing.T) {
 		t.Fatal("want Response")
 	}
 	if code := resp.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
-		t.Fatalf("failure code = %v, want NOT_FOUND (Route 未被真正调用？)", code)
+		t.Fatalf("failure code = %v, want NOT_FOUND because Route must be called", code)
 	}
 }
 
-// Request 在 Route 成功之后：Dispatch 转发本体不在 internal/endpoint 范围内，
-// v1 仍以 UNAVAILABLE 收尾——但这是【真正 Route 之后】的 UNAVAILABLE
 func TestReady_RequestAfterSuccessfulRouteStillUnavailable(t *testing.T) {
 	inv := selfUIDInvariants(t)
-	fe := &fakeEndpoints{routeErr: endpoint.RouteError{}} // 零值 = 成功
+	fe := &fakeEndpoints{routeErr: endpoint.RouteError{}}
 	_, sock := newTestServerWithEndpoints(t, inv, fe)
 
 	c := dial(t, sock)
@@ -196,8 +186,6 @@ func TestReady_RequestAfterSuccessfulRouteStillUnavailable(t *testing.T) {
 	}
 }
 
-// 连接退出（正常关闭）必须触发恰好一次 ConnClosed，让 endpoint 清理该连接
-// 名下的全部 registration/binding（设计方案 §5.4）
 func TestConnClosed_CalledOnceOnDisconnect(t *testing.T) {
 	inv := selfUIDInvariants(t)
 	fe := &fakeEndpoints{}
@@ -207,6 +195,6 @@ func TestConnClosed_CalledOnceOnDisconnect(t *testing.T) {
 	handshake(t, c)
 	_ = c.Close()
 
-	waitFor(t, "连接被回收", func() bool { return s.connCount() == 0 })
-	waitFor(t, "ConnClosed 被调用", func() bool { return fe.closedCount() == 1 })
+	waitFor(t, "connection cleanup", func() bool { return s.connCount() == 0 })
+	waitFor(t, "ConnClosed invocation", func() bool { return fe.closedCount() == 1 })
 }

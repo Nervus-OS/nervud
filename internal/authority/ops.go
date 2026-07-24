@@ -4,7 +4,7 @@
 // .golangci.yml 的 depguard 规则据此放行 syscall / x/sys/unix / os/exec
 //
 // 路径解析纪律：invariant.go 的字符串检查挡不住 symlink 逃逸，真正的保证在这里
-// 由内核完成——一律先 open root 拿 fd，再用 openat2(RESOLVE_BENEATH |
+// 由内核完成 - 一律先 open root 拿 fd，再用 openat2(RESOLVE_BENEATH |
 // RESOLVE_NO_SYMLINKS) 做 fd 相对解析；解析成功后只对 fd / (dirfd, leaf) 操作
 // 不再触碰完整字符串路径
 package authority
@@ -70,8 +70,8 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 	defer func() { _ = unix.Close(parentFD) }()
 
 	// mkdirat 对末段不跟随 symlink：若 leaf 已是链接则 EEXIST，天然安全。
-	// mkdirat 成功 = 本调用【创建】了这个目录（若已存在会 EEXIST），因此后续
-	// 任一步失败时，回滚删除它是安全的——我们删的一定是自己刚建的
+	// mkdirat 成功 = 本调用创建了这个目录（若已存在会 EEXIST），因此后续
+	// 任一步失败时，回滚删除它是安全的 - 我们删的一定是自己刚建的
 	if err := unix.Mkdirat(parentFD, leaf, req.Perm); err != nil {
 		return DirHandle{}, fmt.Errorf("mkdirat %s: %w", leaf, err)
 	}
@@ -81,7 +81,7 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 		// 回滚：把刚建的空目录删掉。不回滚会留下 root 所有/权限不完整的半成品，
 		// 而重试又会在 mkdirat 处撞 EEXIST，从此永远修不好
 		//
-		// AT_REMOVEDIR 只删【空目录】：若 leaf 在这中间被替换成文件或非空目录
+		// AT_REMOVEDIR 只删空目录：若 leaf 在这中间被替换成文件或非空目录
 		// （并发攻击），rmdir 会安全失败、绝不误删。相对 parentFD 操作，
 		// 与创建同一路径解析口径，不跟随 symlink
 		if rmErr := unix.Unlinkat(parentFD, leaf, unix.AT_REMOVEDIR); rmErr != nil {
@@ -135,7 +135,7 @@ func (g *Gate) osSetOwner(_ context.Context, req SetOwnerRequest) (struct{}, err
 // osInstallVerifiedPackage 把 pkgregistry 已复核过的 staging 目录原子提交为
 // <PackageRoot>/<id>/<version>
 //
-// <id> 这一级只是版本分组的容器，不是权限意义上的独立对象——它没有自己的
+// <id> 这一级只是版本分组的容器，不是权限意义上的独立对象 - 它没有自己的
 // 属主/权限语义，首次安装某个 Package 时按需 mkdirat（EEXIST 时忽略）即可，
 // 不必像 CreateDataDir 那样要求父目录必须显式预先存在
 func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPackageRequest) (struct{}, error) {
@@ -170,7 +170,7 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 	}
 	defer func() { _ = unix.Close(idFD) }()
 
-	// RENAME_NOREPLACE：目标版本目录已存在时整体失败、不静默覆盖——同一个
+	// RENAME_NOREPLACE：目标版本目录已存在时整体失败、不静默覆盖 - 同一个
 	// <id>/<version> 出现第二次通常意味着重复提交或版本号复用，都不该被
 	// 无声吞掉。源端用绝对路径：renameat2(2) 里 pathname 为绝对路径时对应
 	// 的 dirfd 被忽略，staging 目录自身的隔离由 pkgmanagerd 的独立 UID/
@@ -181,7 +181,7 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 
 	if err := g.finishInstalledPackage(idFD, version); err != nil {
 		// 回滚：把刚移入的目录 rename 回 staging 原路径。用 rename 而不是
-		// 递归删除——这已经是一整棵从 pkgmanagerd 移过来的目录树，递归删除
+		// 递归删除 - 这已经是一整棵从 pkgmanagerd 移过来的目录树，递归删除
 		// 一个属主可能已经改了一半的目录风险更高；成功的 renameat2 保证了
 		// staging 原路径此刻必然空闲、可以直接 rename 回去
 		if rerr := unix.Renameat2(idFD, version, unix.AT_FDCWD, req.StagingDir, unix.RENAME_NOREPLACE); rerr != nil {
@@ -195,8 +195,8 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 // finishInstalledPackage 收紧刚提交的版本目录的顶层属主与权限
 //
 // 属主收紧为 nervud 自身（生产环境即运行 nervud 的账户，通常是 root），
-// 不是该 Package 的 App UID——只读代码目录必须让"谁也不能是自己代码的属主"
-// 这条底线成立（架构 §9："App 和 Service 都不能修改自己的可执行代码"），
+// 不是该 Package 的 App UID - 只读代码目录必须让"谁也不能是自己代码的属主"
+// 这条底线成立（"App 和 Service 都不能修改自己的可执行代码"），
 // 属主若是 App 自己的 UID，被攻破的 App 就能 chmod 回可写、篡改自己的代码
 //
 // 只收紧顶层：递归收紧树内每个文件的属主/权限是更完整的加固，但 pkgmanagerd
@@ -223,7 +223,7 @@ func (g *Gate) finishInstalledPackage(parentFD int, leaf string) error {
 }
 
 func (g *Gate) osReboot(ctx context.Context, req RebootRequest) (struct{}, error) {
-	// 特例：reboot(2) 成功即不返回，do() 里 run 之后的那条审计永远走不到
+	// 特例：reboot(2) 成功即不返回，do 里 run 之后的那条审计永远走不到
 	// 机器为什么重启了是审计必须能回答的问题，所以本操作在执行前先落一条
 	// intent 记录。这是全包唯一允许在 run 内部直接调 auditor 的地方，原因如上
 	g.auditor.Record(ctx, audit.Event{

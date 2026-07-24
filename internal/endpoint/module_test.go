@@ -15,15 +15,11 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// unmarshalDetail 解出 Failure.ErrorDetail 携带的 ResolveEndpointErrorDetail
 func unmarshalDetail(b []byte, out proto.Message) error {
 	return proto.Unmarshal(b, out)
 }
 
 var errComponentDisabledStub = errors.New("component disabled (stub)")
-
-// ---- 测试替身（窄接口的最小实现，不拉入 pkgregistry.Registry/permission.Registry/
-// service.Manager 的具体实现——那些会经 internal/authority 拉入平台特定代码）--------
 
 type fakePkgs struct {
 	mu      sync.Mutex
@@ -94,9 +90,6 @@ func (f *fakeStarter) EnsureStarted(ctx context.Context, pkg, comp string) error
 	return f.fn(ctx, pkg, comp)
 }
 
-// fakeResourceResolver 镜像 resource.DefaultRegistry() 的 v1 行为（只有
-// base.main 一条记录），不直接 import internal/resource——保持 endpoint 包
-// 测试对窄接口的实现方式可控，同 fakePkgs/fakePerm/fakeStarter 的既有风格
 type fakeResourceResolver struct{}
 
 func newFakeResourceResolver() *fakeResourceResolver { return &fakeResourceResolver{} }
@@ -123,10 +116,8 @@ func (f *fakeAudit) Record(_ context.Context, ev audit.Event) {
 	f.evs = append(f.evs, ev)
 }
 
-// ---- 测试固定值 --------------------------------------------------------------
-
 const (
-	testIface = "nervus.interface.motion.base" // 命中 DefaultInterfaceCatalog
+	testIface = "nervus.interface.motion.base"
 	testPerm  = "perm.motion.control"
 )
 
@@ -173,8 +164,6 @@ func TestRegisterEndpoint_Success(t *testing.T) {
 		t.Fatalf("endpoint_id = %d, want 1", succ.GetEndpointId())
 	}
 
-	// 同一条连接第二次注册（不同 interface 名义上不存在，这里用相同 interface
-	// 模拟第二次报到）：service 侧 id 递增，与 caller 侧命名空间无关
 	res2 := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{
 		RequestId: 2, InterfaceId: testIface, InterfaceMajor: 1,
 	})
@@ -185,7 +174,7 @@ func TestRegisterEndpoint_Success(t *testing.T) {
 
 func TestRegisterEndpoint_MissingPermissionDenied(t *testing.T) {
 	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false))
-	perm := newFakePerm() // 未授予 perm.service.register
+	perm := newFakePerm()
 	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
 
 	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
@@ -239,7 +228,7 @@ func TestRegisterEndpoint_BadResourceHandleInvalidArgument(t *testing.T) {
 func TestRegisterEndpoint_PrivateVisibilityUsesPrivatePermission(t *testing.T) {
 	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPackage, false))
 	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegisterPrivate) // 只授予 private 权限
+	perm.grant("com.svc", permServiceRegisterPrivate)
 	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
 
 	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
@@ -251,7 +240,6 @@ func TestRegisterEndpoint_PrivateVisibilityUsesPrivatePermission(t *testing.T) {
 
 // ---- ResolveEndpoint ----------------------------------------------------------
 
-// registerHelper 注册一个可见的 service 端点，返回其 serviceRegistration.id
 func registerHelper(t *testing.T, m *Module, conn ConnHandle, pkg, comp string, major uint32) uint64 {
 	t.Helper()
 	res := m.RegisterEndpoint(conn, identity.Caller{PackageID: pkg, ComponentID: comp}, &ipcv1.RegisterEndpoint{
@@ -291,7 +279,6 @@ func TestResolveEndpoint_Success(t *testing.T) {
 		t.Fatalf("resource_handle = %q, want %q", succ.GetResourceHandle(), "base.main")
 	}
 
-	// Route 应该能查到刚创建的 binding，指向注册时的 conn 与 service 侧 id
 	route, rerr := m.Route("conn-caller", succ.GetEndpointId())
 	if rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		t.Fatalf("route err code = %v, want 0", rerr.Code)
@@ -307,7 +294,7 @@ func TestResolveEndpoint_PermissionDenied(t *testing.T) {
 		callerEntry("com.caller"),
 	)
 	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister) // caller 未授权 perm.motion.control
+	perm.grant("com.svc", permServiceRegister)
 	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
 
 	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
@@ -330,10 +317,10 @@ func TestResolveEndpoint_VersionMismatch(t *testing.T) {
 	perm.grant("com.caller", testPerm)
 	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
 
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 2) // 服务是 major 2
+	registerHelper(t, m, "conn-svc", "com.svc", "comp", 2)
 
 	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1, // 只接受 major 1
+		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
 	})
 	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
 		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
@@ -361,10 +348,6 @@ func TestResolveEndpoint_InterfaceNotFound(t *testing.T) {
 	}
 }
 
-// TestResolveEndpoint_EmptySelectorMatchesExplicitDefault 覆盖 Resource模块
-// 设计方案.md §7 的收尾用例：空 Selector 走隐式默认值、显式
-// {type=nervus.resource.motion.base, role=main} 走精确匹配，两条路径必须
-// 殊途同归，得到相同的 resource_handle
 func TestResolveEndpoint_EmptySelectorMatchesExplicitDefault(t *testing.T) {
 	pkgs := newFakePkgs(
 		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
@@ -441,9 +424,6 @@ func TestResolveEndpoint_AmbiguousWhenTwoCandidates(t *testing.T) {
 	}
 }
 
-// TestResolveEndpoint_OnDemandStartWakesWaiter 覆盖设计方案 §8 的
-// "先 Resolve 后 Register"路径：0 候选 -> EnsureStarted -> 等待 -> 被
-// RegisterEndpoint 的广播唤醒 -> 重新查表命中
 func TestResolveEndpoint_OnDemandStartWakesWaiter(t *testing.T) {
 	pkgs := newFakePkgs(
 		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
@@ -455,10 +435,6 @@ func TestResolveEndpoint_OnDemandStartWakesWaiter(t *testing.T) {
 
 	var m *Module
 	starter := &fakeStarter{fn: func(ctx context.Context, pkg, comp string) error {
-		// 模拟组件被拉起后异步完成 RegisterEndpoint（真实场景经一条新连接）。
-		// 不在这个后台 goroutine 里调用 t.Fatalf——按 testing 的约定，Fatal 系列
-		// 只能在测试自身的 goroutine 里调用；这里注册失败会让下面的等待超时、
-		// res.GetSuccess() 为 nil，测试断言本身就足以捕捉失败
 		go func() {
 			time.Sleep(10 * time.Millisecond)
 			m.RegisterEndpoint("conn-svc", identity.Caller{PackageID: pkg, ComponentID: comp}, &ipcv1.RegisterEndpoint{
@@ -481,8 +457,6 @@ func TestResolveEndpoint_OnDemandStartWakesWaiter(t *testing.T) {
 	}
 }
 
-// TestResolveEndpoint_OnDemandStartFailurePropagates 覆盖"组件被禁用"一类
-// EnsureStarted 失败：原样映射为 FAILED_PRECONDITION（设计方案 §5.2 第 6 步）
 func TestResolveEndpoint_OnDemandStartFailurePropagates(t *testing.T) {
 	pkgs := newFakePkgs(
 		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
@@ -502,8 +476,6 @@ func TestResolveEndpoint_OnDemandStartFailurePropagates(t *testing.T) {
 		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
 	}
 }
-
-// ---- Route / 生命周期失效 ------------------------------------------------------
 
 func TestRoute_PermissionRevokedFailsNextCall(t *testing.T) {
 	pkgs := newFakePkgs(
@@ -525,8 +497,6 @@ func TestRoute_PermissionRevokedFailsNextCall(t *testing.T) {
 		t.Fatalf("initial route should succeed, got code %v", rerr.Code)
 	}
 
-	// 撤权后：binding 仍"活着"（Resolve 时只检查一次），但下一次 Route 必须
-	// 因复核未通过而失败——不能因为「权限只在 Resolve 时检查过一次」而继续放行
 	perm.revoke("com.caller", testPerm)
 	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
 		t.Fatalf("route after revoke code = %v, want PERMISSION_DENIED", rerr.Code)
@@ -549,15 +519,12 @@ func TestRoute_ServiceConnClosedInvalidatesBinding(t *testing.T) {
 	})
 	id := res.GetSuccess().GetEndpointId()
 
-	// Service 连接断开：其名下全部 registration 失效，byInterface 索引一并清理
 	m.ConnClosed("conn-svc")
 
 	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
 		t.Fatalf("route after service conn closed code = %v, want NOT_FOUND", rerr.Code)
 	}
 
-	// 索引确实被清理干净，之后同接口的 Resolve 应该走 INTERFACE_NOT_FOUND
-	// （而不是残留一条可被误 Route 命中的悬挂条目）
 	res2 := m.ResolveEndpoint("conn-caller-2", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
 		RequestId: 2, InterfaceId: testIface,
 	})
@@ -623,9 +590,6 @@ func TestUnregisterEndpoint_UnknownIDNotFound(t *testing.T) {
 	}
 }
 
-// TestNamespaceIsolation_TwoConnsIndependentNumbering 覆盖设计方案 §8 的
-// "命名空间隔离"：同一进程两条不同连接各自 Resolve 同一个 interface，两个
-// endpoint_id 在各自连接里独立编号，互相 Route 用错连接必须查不到
 func TestNamespaceIsolation_TwoConnsIndependentNumbering(t *testing.T) {
 	pkgs := newFakePkgs(
 		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
@@ -649,15 +613,12 @@ func TestNamespaceIsolation_TwoConnsIndependentNumbering(t *testing.T) {
 	id1 := res1.GetSuccess().GetEndpointId()
 	id2 := res2.GetSuccess().GetEndpointId()
 	if id1 != 1 || id2 != 1 {
-		t.Fatalf("每条连接应各自从 1 起独立编号，got id1=%d id2=%d", id1, id2)
+		t.Fatalf("each connection should number endpoints independently from 1, got id1=%d id2=%d", id1, id2)
 	}
 
-	// 用 conn-2 的身份去 Route conn-1 的 id：必须查不到（不同连接的相同数字
-	// 不是同一个 binding，架构 §10.5）
 	if _, rerr := m.Route("conn-2", id1); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
 		t.Fatalf("cross-conn route code = %v, want NOT_FOUND", rerr.Code)
 	}
-	// 各自连接用自己的 id 必须查得到
 	if _, rerr := m.Route("conn-1", id1); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		t.Fatalf("conn-1 own route code = %v, want 0", rerr.Code)
 	}
@@ -666,24 +627,22 @@ func TestNamespaceIsolation_TwoConnsIndependentNumbering(t *testing.T) {
 	}
 }
 
-// ---- 零值 / 未初始化 fail-safe ------------------------------------------------
-
 func TestNilModule_FailSafe(t *testing.T) {
 	var m *Module
 
 	if res := m.RegisterEndpoint("c", identity.Caller{}, &ipcv1.RegisterEndpoint{RequestId: 1}); res.GetSuccess() != nil {
-		t.Fatal("nil Module 的 RegisterEndpoint 不该成功")
+		t.Fatal("RegisterEndpoint on a nil Module should not succeed")
 	}
 	if res := m.ResolveEndpoint("c", identity.Caller{}, &ipcv1.ResolveEndpoint{RequestId: 1}); res.GetSuccess() != nil {
-		t.Fatal("nil Module 的 ResolveEndpoint 不该成功")
+		t.Fatal("ResolveEndpoint on a nil Module should not succeed")
 	}
 	if res := m.UnregisterEndpoint("c", &ipcv1.UnregisterEndpoint{RequestId: 1}); res.GetSuccess() != nil {
-		t.Fatal("nil Module 的 UnregisterEndpoint 不该成功")
+		t.Fatal("UnregisterEndpoint on a nil Module should not succeed")
 	}
 	if _, rerr := m.Route("c", 1); rerr.Code == ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatal("nil Module 的 Route 不该成功")
+		t.Fatal("Route on a nil Module should not succeed")
 	}
-	m.ConnClosed("c") // 不应 panic
+	m.ConnClosed("c")
 	_ = m.Stop(context.Background())
 }
 

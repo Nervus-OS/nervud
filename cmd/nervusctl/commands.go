@@ -12,12 +12,12 @@ import (
 )
 
 // outf/outln 是对 fmt.Fprintf/Fprintln 的最小封装：向用户终端写字节若失败
-// （stdout/stderr 已断），CLI 无从补救，故【有意】丢弃写错误。集中在这里丢弃，
+// （stdout/stderr 已断），CLI 无从补救，故有意丢弃写错误。集中在这里丢弃，
 // 而不是在每个调用点散落 `_, _ =`，也让 errcheck 满意。
 func outf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 func outln(w io.Writer, a ...any)               { _, _ = fmt.Fprintln(w, a...) }
 
-// cmdInstall：begin-staging → 解包 .nspkg 进 nervud 掌控的目录 → install。
+// cmdInstall：begin-staging -> 解包 .nspkg 进 nervud 掌控的目录 -> install。
 func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return badUsage("install requires exactly one <file.nspkg>")
@@ -54,7 +54,7 @@ func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 
 	p := resp.Package
 	outf(out, "installed %s %s (trust=%s, source=%s)\n", p.ID, p.Version, p.Trust, p.Source)
-	// 打印授予的权限清单，供人确认（B4 spec：安装结果 + 权限清单）。
+	// 打印授予的权限清单，让操作者能核对安装结果实际获得的权限
 	if len(p.Granted) > 0 {
 		outln(out, "  granted permissions:")
 		for _, perm := range p.Granted {

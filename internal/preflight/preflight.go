@@ -1,23 +1,23 @@
 //go:build linux
 
-// Package preflight 是 nervud 装配最早期的一次文件系统自检（应用层架构决策 §2.7）。
+// Package preflight 是 nervud 装配最早期的一次文件系统自检。
 //
-// 它区分两类路径，处理【相反】：
+// 它区分两类路径，处理相反：
 //
 //   - 只读镜像区（/usr/libexec/nervus/nervud、/usr/lib/nervus/*、/usr/share/nervus/trust）：
-//     只检查，【绝不修改】。不符即返回 fatal error，装配中止、内核不启动。
-//     这些路径的正确性是镜像完整性的一部分——若 /usr/share/nervus/trust 已经
+//     只检查，绝不修改。不符即返回 fatal error，装配中止、内核不启动。
+//     这些路径的正确性是镜像完整性的一部分 - 若 /usr/share/nervus/trust 已经
 //     world-writable，说明镜像已被破坏，自动 chmod 回去只是掩盖入侵痕迹。正确
-//     反应是拒绝启动 + 报警，与「半死的 TCB 比重启更危险」同逻辑。
+//     反应是拒绝启动 + 报警，与半死的 TCB 比重启更危险同逻辑。
 //
-//   - nervud 自有可写区（/var/lib/nervus/*、/run/nervus/）：检查 + 【主动设定】。
-//     缺失即创建，权限不符即 chmod 回期望值。但若某路径已存在且属主【不是】
-//     nervud 自身，说明有非特权进程抢先创建（squat）——此时不 chown 洗白它，
-//     而是 fatal（§2.7 对 /run/nervus 的明确要求）。
+//   - nervud 自有可写区（/var/lib/nervus/*、/run/nervus/）：检查 + 主动设定。
+//     缺失即创建，权限不符即 chmod 回期望值。但若某路径已存在且属主不是
+//     nervud 自身，说明有非特权进程抢先创建（squat） - 此时不 chown 洗白它，
+//     而是 fatal（ 对 /run/nervus 的明确要求）。
 //
-// 为什么是独立包而非 authority 操作：authority.Gate 收敛的是【跨信任边界】的运行期
+// 为什么是独立包而非 authority 操作：authority.Gate 收敛的是跨信任边界的运行期
 // 特权操作（把 staging 提交为代码、创建属于某 App UID 的私有目录）。preflight 是
-// 内核给【自己】的地基做一次性开机自检，发生在任何模块 Start 之前、任何 App 连上
+// 内核给自己的地基做一次性开机自检，发生在任何模块 Start 之前、任何 App 连上
 // 之前，不跨信任边界。属主/权限的读取走 sysprobe（纯观察），创建/修正走标准库 os
 // （depguard 允许），都不需要 authority 的窄操作模型。
 package preflight
@@ -59,7 +59,7 @@ type Rule struct {
 // Config 是一次 preflight 的输入
 //
 // OwnerUID/OwnerGID 参数化是为了可测：生产恒为 nervud 自身（通常 root，即
-// os.Geteuid()==0），测试用 t.TempDir() 时注入当前 uid/gid 走完整条路径
+// os.Geteuid==0），测试用 t.TempDir 时注入当前 uid/gid 走完整条路径
 type Config struct {
 	Rules    []Rule
 	OwnerUID uint32
@@ -67,10 +67,10 @@ type Config struct {
 	Log      *slog.Logger
 }
 
-// DefaultConfig 是生产镜像的固定规则集（应用层架构决策 §2.7 + §7 路径表）
+// DefaultConfig 是生产镜像的固定规则集（ + 路径表）
 //
-// PackageRoot/DataRoot 从 authority.DefaultInvariants() 取，避免与 authority
-// 各持一份路径常量而漂移；其余固定路径按 §2.7 硬编码
+// PackageRoot/DataRoot 从 authority.DefaultInvariants 取，避免与 authority
+// 各持一份路径常量而漂移；其余固定路径按 硬编码
 func DefaultConfig(log *slog.Logger) Config {
 	inv := authority.DefaultInvariants()
 	return Config{
@@ -92,7 +92,7 @@ func DefaultConfig(log *slog.Logger) Config {
 			{Path: "/var/lib/nervus/packages", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			// 动态安装 staging 根：nervusctl/安装器解包 .nspkg 的落点，随后由 nervud
 			// 经 renameat2 提交进 PackageRoot（同处 /var/lib/nervus = 同一文件系统）。
-			// 0700 属主 nervud：只有内核能读写，装包中间态不对外可见（见 internal/admin）
+			// 0700 且属主为 nervud，避免装包中间态被其它进程读取或篡改
 			{Path: "/var/lib/nervus/staging", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
 			{Path: inv.PackageRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: inv.DataRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
@@ -124,7 +124,7 @@ func (cfg Config) apply(r Rule) error {
 
 	switch {
 	case err != nil && !notExist:
-		// 真正的 I/O 错误（权限不足、损坏）——两类区都无法继续
+		// 真正的 I/O 错误（权限不足、损坏） - 两类区都无法继续
 		return fmt.Errorf("%w: stat %s: %v", ErrPreflight, r.Path, err)
 
 	case notExist:
@@ -153,8 +153,8 @@ func (cfg Config) verify(r Rule, st sysprobe.PathStat) error {
 		return fmt.Errorf("%w: %s is not a regular file", ErrPreflight, r.Path)
 	}
 	if st.UID != cfg.OwnerUID {
-		// 只读区：镜像属主错乱。可写区：非 nervud 进程抢建（squat）——不 chown
-		// 洗白其内容，直接 fatal（§2.7 对 /run/nervus 的明确要求，推广到全部可写区）
+		// 只读区：镜像属主错乱。可写区：非 nervud 进程抢建（squat） - 不 chown
+		// 洗白其内容，直接 fatal（ 对 /run/nervus 的明确要求，推广到全部可写区）
 		return fmt.Errorf("%w: %s owned by uid %d, want %d", ErrPreflight, r.Path, st.UID, cfg.OwnerUID)
 	}
 

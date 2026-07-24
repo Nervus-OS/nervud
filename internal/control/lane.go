@@ -1,9 +1,7 @@
-// 见 doc.go 的包说明
-//
 // 本文件是 Control Lane（SCHED_RR / scheduler.PrioControl = 40）的循环：只做租约的
 // 到期检测与撤销记账，不下发任何命令
 //
-// 为什么到期检测要占一条实时 Lane：deadman 是「人一松手就必须失去控制权」的看门狗，
+// 为什么到期检测要占一条实时 Lane：deadman 是人一松手就必须失去控制权的看门狗，
 // 被普通负载拖到几十毫秒之后才发现，机器人就多走了那么久。命令下发落地后会复用这条
 // 同一 Lane（scheduler.PrioControl 的注释即为此预留）
 //
@@ -61,7 +59,7 @@ func (m *Module) onTick(now time.Time) {
 		return
 	}
 
-	// 确实到期了才取锁，取锁后【重核一次】——锁前的判断可能已过时：一次 Refresh 可能刚
+	// 确实到期了才取锁，取锁后重核一次 - 锁前的判断可能已过时：一次 Refresh 可能刚
 	// 把新鲜度顶上来，或租约已被续租（换了新指针）/被 RevokeAll 收走。不重核就会把一条
 	// 又变有效的租约误撤。
 	m.mu.Lock()
@@ -71,8 +69,8 @@ func (m *Module) onTick(now time.Time) {
 	if cur != l {
 		return // 已被续租换成新值，或已被别的路径收走
 	}
-	// 用同一 tick 时间重核，但会重新读取 m.fresh——竞态正是「锁前判过期、锁后 fresh 已被
-	// Refresh 顶上来」，重读 freshness 即可挡住，不必换用 time.Now()（换了还会破坏用
+	// 用同一 tick 时间重核，但会重新读取 m.fresh - 竞态正是锁前判过期、锁后 fresh 已被
+	// Refresh 顶上来，重读 freshness 即可挡住，不必换用 time.Now（换了还会破坏用
 	// 合成时间驱动到期的测试）。
 	cause = m.leaseState(l, now)
 	if cause == nil ||
@@ -83,7 +81,7 @@ func (m *Module) onTick(now time.Time) {
 }
 
 // actionFor 把失效原因映射成审计 Action，让 deadman 失效与单纯的租约到期在离线
-// 分析里可分——两者的产品含义完全不同：一个是链路/人失联，一个是正常的时限到了
+// 分析里可分 - 两者的产品含义完全不同：一个是链路/人失联，一个是正常的时限到了
 func actionFor(cause error) string {
 	if errors.Is(cause, ErrDeadmanExpired) {
 		return actionDeadmanExpired

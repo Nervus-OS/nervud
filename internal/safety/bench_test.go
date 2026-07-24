@@ -2,7 +2,6 @@ package safety
 
 import "testing"
 
-// BenchmarkTrip 测 Safety 触发路径的耗时与分配（-benchmem 应显示 0 allocs/op）。
 func BenchmarkTrip(b *testing.B) {
 	m := newTestModule()
 	b.ReportAllocs()
@@ -12,7 +11,6 @@ func BenchmarkTrip(b *testing.B) {
 	}
 }
 
-// BenchmarkDeliverHalt 测 Stop Lane 投递路径的耗时与分配。
 func BenchmarkDeliverHalt(b *testing.B) {
 	m := newTestModule()
 	b.ReportAllocs()

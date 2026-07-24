@@ -10,15 +10,13 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// archiveEntry 是构造测试 .nspkg 的一条目。
 type archiveEntry struct {
 	name     string
 	body     string
-	typeflag byte // 默认 tar.TypeReg
+	typeflag byte
 	mode     int64
 }
 
-// buildNspkg 把 entries 写成一个 zstd+tar 的 .nspkg 文件，返回其路径。
 func buildNspkg(t *testing.T, entries []archiveEntry) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "pkg.nspkg")
@@ -83,7 +81,6 @@ func TestUnpackNspkgHappyPath(t *testing.T) {
 	if err != nil || string(bin) != "#!/bin/true" {
 		t.Fatalf("bin/app = %q, err %v", bin, err)
 	}
-	// 执行位应被保留（manifest 声明的 entry 需要可执行）。
 	fi, _ := os.Stat(filepath.Join(dest, "bin", "app"))
 	if fi.Mode().Perm()&0o100 == 0 {
 		t.Fatalf("exec bit lost: %v", fi.Mode())
@@ -106,7 +103,6 @@ func TestUnpackRejectsTarSlip(t *testing.T) {
 			if err == nil {
 				t.Fatalf("want error for %s", name)
 			}
-			// 逃逸的文件绝不能落到 dest 之外。
 			if _, statErr := os.Stat(filepath.Join(filepath.Dir(dest), "evil")); statErr == nil {
 				t.Fatalf("%s: file escaped destination", name)
 			}
@@ -145,7 +141,6 @@ func TestSafeJoin(t *testing.T) {
 			t.Fatalf("safeJoin accepted bad name %q", bad)
 		}
 	}
-	// 前缀混淆：base+"-evil" 不应被当作 base 之内。
 	if _, err := safeJoin(base, strings.Repeat("a", 3)); err != nil {
 		t.Fatalf("normal name rejected: %v", err)
 	}

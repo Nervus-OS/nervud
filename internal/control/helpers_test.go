@@ -11,8 +11,6 @@ import (
 	"github.com/nervus-os/nervud/internal/scheduler"
 )
 
-// fakeSpawner 是 LaneSpawner 的测试替身（与 internal/safety 的同名替身同一形状）：
-// 记录被起的 lane 名，可按名注入失败，run=true 时用 ctx 真正跑 fn
 type fakeSpawner struct {
 	mu     sync.Mutex
 	names  []string
@@ -48,7 +46,6 @@ func (s *fakeSpawner) laneNames() []string {
 	return out
 }
 
-// collectRecorder 收集审计事件，供断言
 type collectRecorder struct {
 	mu     sync.Mutex
 	events []audit.Event
@@ -68,7 +65,6 @@ func (r *collectRecorder) all() []audit.Event {
 	return out
 }
 
-// actions 返回已记录的 Action 序列，供顺序断言
 func (r *collectRecorder) actions() []string {
 	evs := r.all()
 	out := make([]string, 0, len(evs))
@@ -87,7 +83,6 @@ func (r *collectRecorder) has(action string) bool {
 	return false
 }
 
-// newTestModule 构造一个不起真实 Lane 的 Module，并返回与之共享的 Gate 与审计收集器
 func newTestModule(t *testing.T) (*Module, *motiongate.Gate, *collectRecorder) {
 	t.Helper()
 	g := motiongate.New()
@@ -99,7 +94,6 @@ func testCaller(pkg string, uid uint32) identity.Caller {
 	return identity.Caller{PackageID: pkg, UID: uid, Trust: identity.TrustOrdinary}
 }
 
-// humanReq / aiReq 是两类申请的最小合法形态（TTL/deadman 取 Policy 默认）
 func humanReq(conn ConnID) Request {
 	return Request{
 		Conn: conn, Class: ClassHuman, Resource: ResourceBaseMain,

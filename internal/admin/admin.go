@@ -1,5 +1,4 @@
-// 见 doc.go 的包说明。本文件是管理通道的 kernel.Module 外壳：UDS 监听、
-// SO_PEERCRED 身份准入、每连接一次「读 Request → 处理 → 写 Response → 关」。
+// SO_PEERCRED 身份准入、每连接一次读 Request -> 处理 -> 写 Response -> 关。
 // 具体命令处理在 handlers.go。
 package admin
 
@@ -62,8 +61,8 @@ type Config struct {
 	// StagingRoot 是 nervud 掌控的 staging 根，默认 DefaultStagingDir。
 	StagingRoot string
 	// AdminUID 是被许可发管理命令的对端 UID。装配时显式传入（main.go 传
-	// os.Geteuid() = 运行 nervud 的账户，生产为 0/root）；不设默认，因为 0 本身
-	// 是合法值，无法用零值区分「未设置」。
+	// os.Geteuid = 运行 nervud 的账户，生产为 0/root）；不设默认，因为 0 本身
+	// 是合法值，无法用零值区分未设置。
 	AdminUID uint32
 
 	Packages    PackageService
@@ -74,7 +73,7 @@ type Config struct {
 }
 
 // Server 拥有管理通道 UDS。生命周期契约同 ipc.Server：Start 快速返回，后台 accept
-// 循环只听 Stop() 关闭的 quit，不听 Start(ctx) 的 ctx。
+// 循环只听 Stop 关闭的 quit，不听 Start(ctx) 的 ctx。
 type Server struct {
 	sockPath    string
 	stagingRoot string
@@ -94,8 +93,8 @@ type Server struct {
 	fatal    chan error
 }
 
-// New 校验必填依赖并构造 Server。缺任何一个安全相关依赖都在装配期失败——管理
-// 通道没有「一半可用」的安全降级。
+// New 校验必填依赖并构造 Server。缺任何一个安全相关依赖都在装配期失败 - 管理
+// 通道没有一半可用的安全降级。
 func New(cfg Config) (*Server, error) {
 	if cfg.SockPath == "" {
 		cfg.SockPath = adminwire.DefaultSockPath
@@ -149,7 +148,7 @@ func (s *Server) Start(context.Context) error {
 	// staging 根正常由 preflight 建好（0700、属主 nervud）。这里再 MkdirAll 一次
 	// 兜底：开发机用 -dev-skip-preflight 起 nervud 时 preflight 不跑，装包仍要能用。
 	// MkdirAll 对已存在目录是 no-op（不改属主/权限），因此不与 preflight 的 squat
-	// 校验冲突——生产路径上 preflight 先跑并已校验过属主。
+	// 校验冲突 - 生产路径上 preflight 先跑并已校验过属主。
 	if err := os.MkdirAll(s.stagingRoot, 0o700); err != nil {
 		return fmt.Errorf("admin: ensure staging root %s: %w", s.stagingRoot, err)
 	}
@@ -205,7 +204,7 @@ func (s *Server) Stop(ctx context.Context) error {
 
 // clearStaleSocket 删除上次运行遗留的 socket 文件。管理通道没有 ipc 那套单例锁
 // （它不是并发热点），因此这里保留一道防线：路径存在但不是 socket 时拒绝而非
-// 盲删——防 SockPath 被配置错误地指到普通文件。
+// 盲删 - 防 SockPath 被配置错误地指到普通文件。
 func (s *Server) clearStaleSocket() error {
 	fi, err := os.Lstat(s.sockPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -234,7 +233,7 @@ func (s *Server) acceptLoop() {
 			default:
 			}
 			// 监听 fd 出错：管理通道不做退避重试自愈（它不是关键路径），直接上报
-			// fatal，让 systemd 重启整个 nervud——比在坏 fd 上空转更干净。
+			// fatal，让 systemd 重启整个 nervud - 比在坏 fd 上空转更干净。
 			err = fmt.Errorf("admin: accept: %w", err)
 			s.log.Error("admin: accept loop aborting", "err", err)
 			select {
@@ -251,14 +250,14 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-// connTimeout 是单条管理连接从建立到完成一次「读 Request → 处理 → 写 Response」
+// connTimeout 是单条管理连接从建立到完成一次读 Request -> 处理 -> 写 Response
 // 的整体上限。管理操作都很快（装包的 renameat2/落盘是秒级），60s 远超任何正常
-// 耗时；它的作用是防「连上不说话」或「不读响应」的对端把 handleConn goroutine 挂
+// 耗时；它的作用是防连上不说话或不读响应的对端把 handleConn goroutine 挂
 // 死，从而在 Stop 时拖住整条停机等待。
 const connTimeout = 60 * time.Second
 
-// handleConn 处理单条连接：SO_PEERCRED 准入 → 读一个 Request → 处理 → 写 Response
-// → 关。一条连接只服务一条命令，无长连接状态机。
+// handleConn 处理单条连接：SO_PEERCRED 准入 -> 读一个 Request -> 处理 -> 写 Response
+// -> 关。一条连接只服务一条命令，无长连接状态机。
 func (s *Server) handleConn(c *net.UnixConn) {
 	defer func() { _ = c.Close() }()
 

@@ -6,25 +6,25 @@
 // 单个 64 位字，一次原子读即得到一致的 (state, epoch)：
 //
 //	bit 63 .......... 56 | bit 55 ................. 0
-//	    8 位 State        |        56 位 epoch
+//	  8 位 State    |    56 位 epoch
 //
-// 为什么打包成一个字：Safety 触发要求「原子锁存状态 + 递增 epoch」一步到位
-// （架构 §6 / NRCP §14.1）。分成两个独立 atomic 既无法一次读到一致快照，也无法
-// 一步完成「latch 且 bump」。打包后 Trip 是一次 CAS、Snapshot 是一次 Load。
+// 为什么打包成一个字：Safety 触发要求原子锁存状态和递增 epoch 一步到位。
+// 分成两个独立 atomic 既无法一次读到一致快照，也无法
+// 一步完成latch 且 bump。打包后 Trip 是一次 CAS、Snapshot 是一次 Load。
 //
 // # 依赖方向
 //
 // 本包是叶子，禁止 import 任何 nervud 兄弟模块。safety 与 control 共用同一个
-// *Gate 实例（由 main.go 装配时 New 一次并注入两者）——它属于可信计算基（TCB）。
-// 因此不能有归属之争：谁都不「拥有」epoch，它是二者共享的撤销世代号。
+// *Gate 实例（由 main.go 装配时 New 一次并注入两者） - 它属于可信计算基（TCB）。
+// 因此不能有归属之争：谁都不拥有epoch，它是二者共享的撤销世代号。
 //
 // # 生命周期与 fail-closed
 //
-// 必须经 New() 创建。New 置 State=Normal、epoch=1：
-//   - epoch 恒非零（NRCP §10.5「初始化非零 epoch」）。epoch==0 永远是无效世代，
+// 必须经 New 创建。New 置 State=Normal、epoch=1：
+//   - epoch 恒非零（初始化非零 epoch）。epoch==0 永远是无效世代，
 //     执行器/adapter 复核到 epoch==0 一律拒绝下发。
 //   - 零值 Gate（word==0）解出 (StateInvalid, 0)：状态既非 Normal、epoch 又无效，
-//     双重 fail-closed——未初始化或被清零的 Gate 不会被误判为「可以运动」。
+//     双重 fail-closed - 未初始化或被清零的 Gate 不会被误判为可以运动。
 //
 // # 并发
 //

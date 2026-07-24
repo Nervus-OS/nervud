@@ -17,7 +17,6 @@ func TestAccept_Transitions(t *testing.T) {
 	if op, _ := m.Get(testCaller(), id); op.State != StateRunning {
 		t.Fatalf("state=%v, want running", op.State)
 	}
-	// 二次 Accept 是非法转移（RUNNING→RUNNING 不在允许集合）→ 记审计并拒绝。
 	if err := m.Accept(id, 1); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("double Accept err=%v, want ErrIllegalTransition", err)
 	}
@@ -26,8 +25,6 @@ func TestAccept_Transitions(t *testing.T) {
 	}
 }
 
-// TestAccept_StaleEpoch Provider 报告的 epoch 与创建时绑定的不符 → 失败收敛，
-// 不进入 RUNNING（铁律 1：系统取消/撤销后不得继续控制资源）。
 func TestAccept_StaleEpoch(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
@@ -45,7 +42,6 @@ func TestProgress_OnlyWhenRunning(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
 
-	// PENDING 阶段无进度。
 	if err := m.Progress(id, []byte("x")); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("Progress while pending err=%v, want ErrNotRunning", err)
 	}
@@ -54,7 +50,6 @@ func TestProgress_OnlyWhenRunning(t *testing.T) {
 		t.Fatalf("Progress while running: %v", err)
 	}
 	_ = m.Succeed(id, nil)
-	// 终态后无进度。
 	if err := m.Progress(id, []byte("x")); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("Progress after terminal err=%v, want ErrNotRunning", err)
 	}
@@ -65,7 +60,6 @@ func TestFail_CoercesInvalidCode(t *testing.T) {
 	id := createMotion(t, m, nil, testCaller(), 1)
 	_ = m.Accept(id, 1)
 
-	// OK 不是合法的 FAILED code：必须 fail-closed 收敛为 INTERNAL，绝不静默当成功。
 	if err := m.Fail(id, okCode, []byte("boom")); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
@@ -81,8 +75,6 @@ func TestFail_CoercesInvalidCode(t *testing.T) {
 	}
 }
 
-// TestReportTerminal_Idempotency 同终态重复回报是 no-op(nil)；异终态回报被拒
-// （ErrAlreadyTerminal，终态只写一次）。
 func TestReportTerminal_Idempotency(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
@@ -90,11 +82,9 @@ func TestReportTerminal_Idempotency(t *testing.T) {
 	if err := m.Succeed(id, nil); err != nil {
 		t.Fatalf("Succeed: %v", err)
 	}
-	// 同终态重复 → no-op nil。
 	if err := m.Succeed(id, nil); err != nil {
 		t.Fatalf("idempotent Succeed err=%v, want nil", err)
 	}
-	// 异终态 → 拒绝，终态不被覆盖。
 	if err := m.Fail(id, internalCode, nil); !errors.Is(err, ErrAlreadyTerminal) {
 		t.Fatalf("Fail after Succeed err=%v, want ErrAlreadyTerminal", err)
 	}
@@ -113,8 +103,6 @@ func TestReporter_NotFound(t *testing.T) {
 	}
 }
 
-// TestCancelledRequiresCancelRequested Provider 只能在 CANCEL_REQUESTED 之后确认
-// 取消；RUNNING 直接 Cancelled 是非法转移。
 func TestCancelledRequiresCancelRequested(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	id := createMotion(t, m, nil, testCaller(), 1)
@@ -124,9 +112,6 @@ func TestCancelledRequiresCancelRequested(t *testing.T) {
 	}
 }
 
-// TestTerminalOnce_Concurrent 终态只写一次（铁律 2 / spec §10）：从 CANCEL_REQUESTED
-// 并发发起 Succeed/Fail/Cancelled（三者从 CANCEL_REQUESTED 都合法），只有一个生效，
-// 另两个被 CAS 拒为 ErrAlreadyTerminal。跑多轮加压，配合 -race。
 func TestTerminalOnce_Concurrent(t *testing.T) {
 	for round := 0; round < 200; round++ {
 		m, _, _ := newTestManager(t, true)

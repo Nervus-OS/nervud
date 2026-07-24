@@ -1,8 +1,8 @@
-// Package service 本文件是组件实例的 supervisor 循环与崩溃分级处置（应用层架构决策 §5.4）。
+// Package service 本文件是组件实例的 supervisor 循环与崩溃分级处置。
 //
-// 每个运行中的实例由【一个】supervisor goroutine 独占监视：起进程 → 等退出 →
-// 判定（预期停止 / 崩溃）→ 按 criticality 退避重启或熔断。阻塞调用
-// （StartSandboxedProcess / WaitProcess）一律【不持 mu】；只有读写实例状态的
+// 每个运行中的实例由一个supervisor goroutine 独占监视：起进程 -> 等退出 ->
+// 判定（预期停止 / 崩溃） -> 按 criticality 退避重启或熔断。阻塞调用
+// （StartSandboxedProcess / WaitProcess）一律不持 mu；只有读写实例状态的
 // 瞬间才短暂持 mu，避免一个卡住的 systemd 调用锁住整个 Manager。
 package service
 
@@ -20,16 +20,16 @@ import (
 const (
 	restartBackoffMin = 1 * time.Second
 	restartBackoffMax = 60 * time.Second
-	// crashWindow / crashThreshold：滑动窗口内崩溃达到阈值即熔断（§5.4）
+	// crashWindow / crashThreshold：滑动窗口内崩溃达到阈值即熔断
 	crashWindow    = 10 * time.Second
 	crashThreshold = 5
-	// startStopTimeout 给单次 StartSandboxedProcess/StopProcess 的上限——即便
+	// startStopTimeout 给单次 StartSandboxedProcess/StopProcess 的上限 - 即便
 	// systemd/D-Bus 卡住，也不让一个 supervisor 无限期阻塞。等一个长期运行组件
 	// 退出（WaitProcess）则用 m.ctx，不设此上限
 	startStopTimeout = 30 * time.Second
 
-	// nervudUnit 是 nervud 自身的 systemd unit 名（部署形态，见 ND内核介绍）。组件
-	// 瞬态 unit BindsTo 它，实现 owner-death：nervud 被 SIGKILL 后组件也被 systemd 停
+	// nervudUnit 是 nervud 自身的 systemd unit 名。组件瞬态 unit BindsTo 它，
+	// 保证 nervud 被 SIGKILL 后组件也由 systemd 停止
 	nervudUnit = "nervud.service"
 	// registryDir 是 nervud 的可信状态目录，含 _grants/_devmode/ledger/uid 分配器。
 	// 组件沙箱把它设 InaccessiblePaths，任何组件都读不到
@@ -44,7 +44,7 @@ func unitName(pkg, comp string) string {
 }
 
 // effectiveCriticality 计算生效的 criticality：Ordinary 包声明高于 optional 一律
-// 降级（§5.4：否则第三方 App 声明自己 vital、崩一下就把机器停死＝拒绝服务攻击）
+// 降级，否则第三方 App 可自称 vital，并通过反复崩溃触发整机停机拒绝服务
 func effectiveCriticality(e pkgregistry.Entry, c pkgregistry.Component) pkgregistry.Criticality {
 	crit := c.Criticality
 	if crit == "" {
@@ -58,12 +58,12 @@ func effectiveCriticality(e pkgregistry.Entry, c pkgregistry.Component) pkgregis
 
 // startLocked 建实例并起 supervisor。调用方必须持 m.mu
 //
-// 若该 key 已有一个终态实例（StateStopped/StateFailed——on-demand 组件被停止后，
-// 或崩溃熔断后，都会停在 byKey 里而不是被摘除），这里【不】panic，而是当作全新
+// 若该 key 已有一个终态实例（StateStopped/StateFailed - on-demand 组件被停止后，
+// 或崩溃熔断后，都会停在 byKey 里而不是被摘除），这里不panic，而是当作全新
 // 启动处理：旧 supervisor goroutine 在把状态置为终态之前已经真正停掉了对应的
 // systemd unit（stopProc/drain 发生在 setState 之前；熔断则是重试耗尽、进程已不
 // 在跑），所以外部一旦观察到终态，旧实例就不会再被那个 goroutine 写入，直接用新
-// *Instance 覆盖 byKey/byUnit、起新 supervisor 是安全的——这正是 EnsureStarted 对
+// *Instance 覆盖 byKey/byUnit、起新 supervisor 是安全的 - 这正是 EnsureStarted 对
 // 一个此前跑过又停止/熔断的 on-demand 组件重新拉起时必须支持的路径（见
 // internal/endpoint 的 Resolve on-demand 拉起分支）
 func (m *Manager) startLocked(e pkgregistry.Entry, c pkgregistry.Component) {
@@ -144,9 +144,9 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 
 		select {
 		case <-inst.stopCh:
-			// 预期停止。【关键】由 supervisor 自己 StopProcess，不依赖外部调用方——
+			// 预期停止。关键由 supervisor 自己 StopProcess，不依赖外部调用方 -
 			// StopComponent/Stop 可能在本组件还处于 Starting、Handle 尚未落定时就快照
-			// 到空 Handle 而没真正停掉它（§P0 修复）。此刻 supervisor 手里的 h 一定有效
+			// 到空 Handle 而没真正停掉它（ 修复）。此刻 supervisor 手里的 h 一定有效
 			m.stopProc(h)
 			m.drain(exitCh)
 			m.setState(inst, StateStopped)
@@ -182,7 +182,7 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 	}
 }
 
-// stopProc 停掉一个句柄对应的 systemd unit。用【独立】的有界 ctx 而非 m.ctx——
+// stopProc 停掉一个句柄对应的 systemd unit。用独立的有界 ctx 而非 m.ctx -
 // 关停路径上 m.ctx 已被 cancel，用它 StopProcess 会立刻 ctx 失败、unit 停不掉。
 // StopUnit 幂等，与外部 StopComponent/Stop 的调用重叠也无害
 func (m *Manager) stopProc(h authority.ProcessHandle) {
@@ -237,7 +237,7 @@ func (m *Manager) recordCrashAndContinue(inst *Instance) bool {
 }
 
 // onCircuitBreak 处理熔断：进 Failed，停止重启，写审计；若 Vital 则升级 Safety Trip
-// （§5.4：机器停下来，但内核活着、审计活着、用户还能操作）
+// （机器停下来，但内核活着、审计活着、用户还能操作）
 func (m *Manager) onCircuitBreak(inst *Instance) {
 	m.setState(inst, StateFailed)
 	m.audit(inst, "service.circuit-break", true, nil)
@@ -246,9 +246,9 @@ func (m *Manager) onCircuitBreak(inst *Instance) {
 			"unit", inst.Unit, "criticality", string(inst.Crit))
 	}
 	if inst.Crit == pkgregistry.CriticalityVital {
-		// 绝不 kill nervud、绝不 reboot：只触发 Safety 锁存让机器停下来（§5.4）
+		// 绝不 kill nervud、绝不 reboot：只触发 Safety 锁存让机器停下来
 		if m.log != nil {
-			m.log.Error("service: VITAL component failed — escalating to Safety Trip", "unit", inst.Unit)
+			m.log.Error("service: VITAL component failed - escalating to Safety Trip", "unit", inst.Unit)
 		}
 		if m.safety != nil {
 			m.safety.Trip()
@@ -279,10 +279,10 @@ func (m *Manager) backoffWait(backoff *time.Duration, inst *Instance) bool {
 	}
 }
 
-// buildStartReq 从 Entry+Component 组装 StartSandboxedProcessRequest（§3.5 / §5.2）
+// buildStartReq 从 Entry 和 Component 组装 StartSandboxedProcessRequest
 //
 // native：ExecStart = 包内 ELF；LD_LIBRARY_PATH 指向包内 native_lib_dir。
-// jvm：   ExecStart = 平台 JRE；-jar 指向包内 entry；-Djava.library.path 指向包内库。
+// jvm：  ExecStart = 平台 JRE；-jar 指向包内 entry；-Djava.library.path 指向包内库。
 // 两种 runtime 的包内路径都进 ContainedPaths，由 authority.Validate 逐一核对在
 // PackageRoot 之内
 func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, unit string) (authority.StartSandboxedProcessRequest, error) {
@@ -296,7 +296,7 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		UID:        e.UID,
 		GID:        e.UID,
 		WorkingDir: dataDir,
-		BindToUnit: nervudUnit, // owner-death：nervud 死了组件也停（§P0 修复）
+		BindToUnit: nervudUnit, // owner-death：nervud 死了组件也停（ 修复）
 		Limits: authority.ResourceLimits{
 			MemoryMaxBytes:  c.Limits.MemoryMaxMB * 1024 * 1024,
 			CPUQuotaPercent: c.Limits.CPUQuotaPercent,
@@ -304,11 +304,11 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		},
 		ReadWritePaths: []string{dataDir},
 		ReadOnlyPaths:  []string{verDir},
-		// 【不能】把整个 PackageRoot 设 InaccessiblePaths——那会连组件自己的代码目录
+		// 不能把整个 PackageRoot 设 InaccessiblePaths - 那会连组件自己的代码目录
 		// （verDir 在 PackageRoot 之下）一起隐藏，且 InaccessiblePaths 隐藏子目录后无法
 		// 再靠嵌套 ReadOnlyPaths 恢复，native ELF / JAR / .so 全都读不到、起不来。
-		// 隔离靠：① ProtectSystem=strict 让整个 fs 只读（含别的包代码目录）② 别的包数据
-		// 目录 0700 归各自 UID，DAC 天然挡住 ③ 单独把 registry 敏感目录设 Inaccessible
+		// 隔离依赖三层：1. ProtectSystem=strict 让整个 fs 只读，包括其它包代码目录；
+		// 2. 各包数据目录使用独立 UID 和 0700；3. registry 敏感目录设为 Inaccessible
 		InaccessiblePaths: []string{registryDir},
 		ContainedPaths:    []string{entryPath},
 	}

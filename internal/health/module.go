@@ -1,7 +1,5 @@
-// 见 doc.go 的包说明
-//
 // 本文件定义聚合后的 Status/Report 数据模型，把 health 接入 kernel.Module
-// 生命周期，并实现 Report() 的唯一聚合逻辑
+// 生命周期，并实现 Report 的唯一聚合逻辑
 package health
 
 import (
@@ -13,7 +11,7 @@ import (
 	"github.com/nervus-os/nervud/internal/service"
 )
 
-// Status 是聚合后的整体健康档位——"现在这台机器一句话状态"的唯一权威
+// Status 是聚合后的整体健康档位 - "现在这台机器一句话状态"的唯一权威
 type Status uint8
 
 const (
@@ -21,7 +19,7 @@ const (
 	StatusHealthy Status = iota
 	// StatusDegraded Safety 处于 NORMAL，但至少一个非致命组件已熔断
 	// （Vital 组件熔断会在 service.onCircuitBreak 里同步触发 Safety Trip，
-	// 因此走到这一档时残留的必然是非 Vital 组件——不需要 health 自己重新
+	// 因此走到这一档时残留的必然是非 Vital 组件 - 不需要 health 自己重新
 	// 判断 Criticality，Safety 的状态已经隐含了这个结论，见 deriveStatus）
 	StatusDegraded
 	// StatusFault Safety 不处于 NORMAL（已锁存/恢复中/等待 re-arm），
@@ -40,9 +38,9 @@ func (s Status) String() string {
 	}
 }
 
-// Report 是一次 Report() 调用的完整快照：整体判定 + 三个权威源的原始快照
+// Report 是一次 Report 调用的完整快照：整体判定 + 三个权威源的原始快照
 //
-// Safety/Control/Components 直接复用各自包已经导出的类型，不做二次投影——
+// Safety/Control/Components 直接复用各自包已经导出的类型，不做二次投影 -
 // health 不比原始来源更懂这些字段的含义，转述一遍只会制造漂移的风险
 type Report struct {
 	Status     Status
@@ -63,7 +61,7 @@ type ServiceObserver interface {
 
 // Module 把 health 接入 kernel.Module 生命周期，并持有三个只读观察窄接口
 //
-// v1 的 Start/Stop 都是空操作：它不持有任何自己的状态，Report() 每次调用
+// v1 的 Start/Stop 都是空操作：它不持有任何自己的状态，Report 每次调用
 // 现读三个权威源，没有需要启动的后台循环，也没有需要停机时收尾的东西
 type Module struct {
 	safety  safety.Observer // 复用 safety 自己定义的 Observer，不重新发明
@@ -79,7 +77,7 @@ func New(safetyObs safety.Observer, controlObs ControlObserver, serviceObs Servi
 
 func (m *Module) Name() string { return "health" }
 
-// Start 无需要执行的初始化逻辑：Report() 现读现算，不需要预热任何状态
+// Start 无需要执行的初始化逻辑：Report 现读现算，不需要预热任何状态
 func (m *Module) Start(_ context.Context) error { return nil }
 
 // Stop 纯只读聚合，没有需要释放的资源
@@ -117,12 +115,12 @@ func (m *Module) Report() Report {
 // deriveStatus 是 Status 判定的唯一实现：Safety 优先于组件熔断
 //
 // 未初始化/零值 safety.Snapshot 的 State 是 motiongate.StateInvalid，天然
-// != StateNormal，落入 Fault 分支——与 motiongate 自己"零值 Gate 双重
+// != StateNormal，落入 Fault 分支 - 与 motiongate 自己"零值 Gate 双重
 // fail-closed"的既有约定一致，不需要 health 再加一层 nil 特判。
 //
 // 不读 Instance.Crit（pkgregistry.Criticality），也不需要 import
 // pkgregistry：Vital 组件熔断已经在 service.onCircuitBreak 里同步调用
-// m.safety.Trip()，所以本函数看到 Safety 仍是 NORMAL 时，能安全推出"当前
+// m.safety.Trip，所以本函数看到 Safety 仍是 NORMAL 时，能安全推出"当前
 // 所有 StateFailed 组件都不是 Vital"，不需要自己重新判断 Criticality 等级
 func deriveStatus(s safety.Snapshot, comps []service.Instance) Status {
 	if s.State != motiongate.StateNormal {

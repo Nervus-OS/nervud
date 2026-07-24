@@ -10,7 +10,6 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
-// fakeStopper 记录被停的组件与 reload 的包
 type fakeStopper struct {
 	stopped   []string
 	reloaded  []string
@@ -28,7 +27,6 @@ func (f *fakeStopper) ReloadPackage(_ context.Context, pkg string) error {
 	return f.reloadErr
 }
 
-// installOne 用一把随机 dev key 装一个动态包，返回其 Entry
 func installOne(t *testing.T, mod *Module, pkgID string) Entry {
 	t.Helper()
 	staging, mb, sig := newValidStaging(t, t.TempDir(), pkgID, "1.0.0")
@@ -55,15 +53,12 @@ func TestUninstall_RemovesEverything(t *testing.T) {
 		t.Fatalf("Uninstall: %v", err)
 	}
 
-	// 投影全清
 	if mod.registry.Len() != 0 {
 		t.Fatalf("registry not cleared: %d", mod.registry.Len())
 	}
-	// 组件被停
 	if len(stopper.stopped) != 1 || stopper.stopped[0] != "com.example.app/main" {
 		t.Fatalf("component not stopped: %+v", stopper.stopped)
 	}
-	// 代码目录与数据目录都被 RemovePackageTree
 	var rmCode, rmData bool
 	for _, r := range auth.removed {
 		if r.Root == mod.packageRoot && r.Path == filepath.Join(mod.packageRoot, "com.example.app") {
@@ -76,12 +71,10 @@ func TestUninstall_RemovesEverything(t *testing.T) {
 	if !rmCode || !rmData {
 		t.Fatalf("code/data not removed: %+v", auth.removed)
 	}
-	// 记账文件删除
 	sp, _ := stateFilePath(mod.stateDir, "com.example.app")
 	if _, err := os.Stat(sp); !os.IsNotExist(err) {
 		t.Fatalf("ledger not removed: %v", err)
 	}
-	// identity 投影最后一次是空
 	last := idReg.replaced[len(idReg.replaced)-1]
 	if len(last) != 0 {
 		t.Fatalf("identity projection not empty after uninstall: %+v", last)
@@ -97,7 +90,6 @@ func TestUninstall_UIDNotReused(t *testing.T) {
 	if err := mod.Uninstall(context.Background(), "com.example.app"); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	// 重装同 package_id：UID 必须是新的（单调高水位，卸载后不复用）
 	e2 := installOne(t, mod, "com.example.app")
 	if e2.UID == e1.UID {
 		t.Fatalf("UID reused after uninstall: both %d", e1.UID)
@@ -120,7 +112,6 @@ func TestSetComponentEnabled_OrdinaryDisableAndReenable(t *testing.T) {
 	mod.SetLifecycleHooks(stopper, nil)
 	installOne(t, mod, "com.example.app")
 
-	// 停用
 	if err := mod.SetComponentEnabled(context.Background(), "com.example.app", "main", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
@@ -131,13 +122,11 @@ func TestSetComponentEnabled_OrdinaryDisableAndReenable(t *testing.T) {
 	if len(stopper.stopped) != 1 {
 		t.Fatalf("disable should stop the instance: %+v", stopper.stopped)
 	}
-	// 持久化：记账文件应含 disabled
 	st, _ := mod.readState("com.example.app")
 	if len(st.DisabledComponents) != 1 || st.DisabledComponents[0] != "main" {
 		t.Fatalf("disabled not persisted: %+v", st.DisabledComponents)
 	}
 
-	// 重启用
 	if err := mod.SetComponentEnabled(context.Background(), "com.example.app", "main", true); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}
@@ -148,7 +137,6 @@ func TestSetComponentEnabled_OrdinaryDisableAndReenable(t *testing.T) {
 }
 
 func TestCanDisable_ProtectedAndSystem(t *testing.T) {
-	// Ordinary：恒可停用
 	ord := Entry{Trust: identity.TrustOrdinary, Manifest: Manifest{
 		PackageID:  "com.third.party",
 		Components: []Component{{ID: "main", Disableable: false}},
@@ -157,7 +145,6 @@ func TestCanDisable_ProtectedAndSystem(t *testing.T) {
 		t.Fatal("Ordinary component must always be disableable")
 	}
 
-	// 系统包在保护名单：不可停用
 	prot := Entry{Trust: identity.TrustPlatform, Manifest: Manifest{
 		PackageID:  "nervus.settings",
 		Components: []Component{{ID: "main", Disableable: true}},
@@ -166,7 +153,6 @@ func TestCanDisable_ProtectedAndSystem(t *testing.T) {
 		t.Fatalf("protected component must not be disableable, got can=%v why=%q", can, why)
 	}
 
-	// 系统包非保护名单但 disableable:false → 不可停
 	sys := Entry{Trust: identity.TrustPlatform, Manifest: Manifest{
 		PackageID:  "com.oem.tool",
 		Components: []Component{{ID: "main", Disableable: false}},
@@ -175,7 +161,6 @@ func TestCanDisable_ProtectedAndSystem(t *testing.T) {
 		t.Fatalf("non-disableable system component, got can=%v why=%q", can, why)
 	}
 
-	// 系统包非保护名单且 disableable:true → 可停
 	sys2 := Entry{Trust: identity.TrustPlatform, Manifest: Manifest{
 		PackageID:  "com.oem.tool",
 		Components: []Component{{ID: "main", Disableable: true}},
@@ -187,8 +172,6 @@ func TestCanDisable_ProtectedAndSystem(t *testing.T) {
 
 func TestInstall_CompensatesOnPostInstallFailure(t *testing.T) {
 	mod, auth, _, _ := newTestInstaller(t)
-	// 让 CreatePrivateDataDirectory 失败：此时代码已 InstallVerifiedPackage 落盘，
-	// 补偿必须把它删掉
 	auth.dataDirErr = errors.New("boom: data dir")
 
 	staging, mb, sig := newValidStaging(t, t.TempDir(), "com.example.app", "1.0.0")
@@ -198,7 +181,6 @@ func TestInstall_CompensatesOnPostInstallFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("want install error")
 	}
-	// 补偿：destDir 被 RemovePackageTree
 	destDir := filepath.Join(mod.packageRoot, "com.example.app", "1.0.0")
 	found := false
 	for _, r := range auth.removed {
@@ -209,7 +191,6 @@ func TestInstall_CompensatesOnPostInstallFailure(t *testing.T) {
 	if !found {
 		t.Fatalf("orphan code dir not compensated: removed=%+v", auth.removed)
 	}
-	// Registry 未提交
 	if mod.registry.Len() != 0 {
 		t.Fatalf("registry should be empty after failed install, got %d", mod.registry.Len())
 	}

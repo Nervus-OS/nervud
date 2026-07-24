@@ -11,8 +11,6 @@ import (
 	"github.com/nervus-os/nervud/internal/safety"
 )
 
-// *control.Module 必须满足 safety 侧消费者定义的 LeaseRevoker——这条断言是 main.go
-// 把 control 注入 safety.New 的编译期保证。装配方向单向：safety 不 import control
 var _ safety.LeaseRevoker = (*Module)(nil)
 
 func TestStart_SpawnsControlLane(t *testing.T) {
@@ -31,7 +29,7 @@ func TestStart_SpawnsControlLane(t *testing.T) {
 }
 
 func TestStart_InvalidPolicyFailsFast(t *testing.T) {
-	m := New(&fakeSpawner{}, motiongate.New(), &collectRecorder{}, nil, Policy{}) // 全零 = 非法
+	m := New(&fakeSpawner{}, motiongate.New(), &collectRecorder{}, nil, Policy{})
 	if err := m.Start(context.Background()); err == nil {
 		t.Fatal("Start with a zero policy should fail")
 	}
@@ -55,7 +53,6 @@ func TestLane_UnexpectedExitReportsFatal(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// 模拟「关闭序被打乱」：sched ctx 在模块 Stop 之前被取消 → lane 经 ctx 退出
 	cancel()
 
 	select {
@@ -70,7 +67,7 @@ func TestLane_UnexpectedExitReportsFatal(t *testing.T) {
 }
 
 func TestStop_CleanExitNoFatal(t *testing.T) {
-	sp := &fakeSpawner{run: true, ctx: context.Background()} // ctx 永不取消
+	sp := &fakeSpawner{run: true, ctx: context.Background()}
 	m := New(sp, motiongate.New(), &collectRecorder{}, nil, DefaultPolicy())
 	if err := m.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -78,7 +75,7 @@ func TestStop_CleanExitNoFatal(t *testing.T) {
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond) // 给 lane 经 stopCh 退出的时间
+	time.Sleep(50 * time.Millisecond)
 	select {
 	case err := <-m.Fatal():
 		t.Fatalf("unexpected Fatal on clean stop: %v", err)
@@ -86,10 +83,6 @@ func TestStop_CleanExitNoFatal(t *testing.T) {
 	}
 }
 
-// TestStop_RevokesResidualLease 停机不留控制权
-//
-// NRCP §10.5 要求新的 Host session 从 NONE 开始、不恢复旧 Lease。这里主动撤一次并
-// 递增 epoch，让已经进入 Provider 队列的旧命令在进程退出前就失效
 func TestStop_RevokesResidualLease(t *testing.T) {
 	m, g, rec := newTestModule(t)
 	l := mustAcquire(t, m, humanReq(1))
@@ -119,17 +112,17 @@ func TestPolicyValidate(t *testing.T) {
 		pol  Policy
 		ok   bool
 	}{
-		{name: "默认值自洽", pol: DefaultPolicy(), ok: true},
-		{name: "全零非法", pol: Policy{}},
+		{name: "defaults are internally consistent", pol: DefaultPolicy(), ok: true},
+		{name: "all-zero policy is invalid", pol: Policy{}},
 		{
-			name: "要求 deadman 却没配",
+			name: "deadman required but not configured",
 			pol: Policy{
 				Human: ClassPolicy{TTL: time.Second, RequireDeadman: true},
 				AI:    ClassPolicy{TTL: time.Second},
 			},
 		},
 		{
-			name: "deadman 长于 TTL 等于没配",
+			name: "deadman longer than TTL is ineffective",
 			pol: Policy{
 				Human: ClassPolicy{TTL: time.Second, Deadman: 2 * time.Second},
 				AI:    ClassPolicy{TTL: time.Second},
