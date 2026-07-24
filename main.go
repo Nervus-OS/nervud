@@ -20,6 +20,7 @@ import (
 	"github.com/nervus-os/nervud/internal/kernel"
 	"github.com/nervus-os/nervud/internal/logging"
 	"github.com/nervus-os/nervud/internal/motiongate"
+	"github.com/nervus-os/nervud/internal/operation"
 	"github.com/nervus-os/nervud/internal/permission"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/preflight"
@@ -343,6 +344,20 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// ——Resolve 时 on-demand 拉起组件要靠 svcMgr.EnsureStarted 已就绪
 	epMod := endpoint.New(pkgReg, permReg, svcMgr, resMod, aud, logger)
 	k.Register(epMod)
+
+	// Operation Manager：给机械臂轨迹/回零/移到位姿这类系统协调长任务一个由 nervud
+	// 拥有的状态机与句柄（NRCP §11）。注册在 endpoint 之后、ipc 之前：Resolve/Route
+	// 就绪后 operation 才谈得上被 dispatch 创建，IPC 开门前状态机须已就绪。窄接口注入
+	// resource（resMod.Valid 校验 resource_handle）与 audit。
+	//
+	// LeaseValidator（运动类 operation 的 lease + 新鲜 epoch 校验）暂传 nil = fail-closed：
+	// leaseID ↔ control lease 句柄（[16]byte + ConnID）的映射需要 operation 的 wire proto
+	// （目前不存在）+ dispatch(B1) 提供，尚未落地。接线前运动类 operation 一律被 Create
+	// 前置拒绝——这正是安全缺省。TODO(A-operation-proto)/TODO(B1-dispatch)：A 组冻结
+	// operation proto、B1 dispatch 落地后，注入一个由 ctl 支撑的真实 LeaseValidator
+	// （把 wire lease 句柄解析为 control.Check + epoch 复核）。
+	opMod := operation.New(resMod, nil, aud, logger)
+	k.Register(opMod)
 
 	// IPC 控制面 UDS：最后开门。依赖上面全部就绪（Identity/Permission/Safety/Service/
 	// Endpoint）。Components 接 svcMgr 解锁 verifyComponent；Endpoints 接 epMod 解锁
