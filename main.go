@@ -133,6 +133,13 @@ func newLogger(level string) (*slog.Logger, func() uint64) {
 // MCU （微控制器） 的安全机制 用于内核退出后的兜底
 const laneStopTimeout = 2 * time.Second
 
+// pkgManagerPackageID 是软件安装系统服务的 Package ID。
+//
+// 与 pkgregistry 保护名单里的 "nervus.pkgmanagerd/main" 同源（见
+// internal/pkgregistry/lifecycle.go 的 isProtectedComponent）。写成常量而不是
+// 配置项：它是哪个包能连管理通道的依据，可配置等于把这条准入交给配置文件。
+const pkgManagerPackageID = "nervus.pkgmanagerd"
+
 // run 完成内核装配并阻塞运行，直到 ctx 被取消或某个模块启动失败
 // 具体的装配步骤拆到下面的 assemble，让装配与运行/收尾分层清晰
 //
@@ -410,9 +417,27 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// euid（生产为 0/root） - 只有运行 nervud 的运维身份可发命令，配合 socket 0600。
 	// StagingRoot 留空 = admin.DefaultStagingDir（/var/lib/nervus/staging，由 preflight
 	// 建好，与 PackageRoot 同一文件系统，安装期 renameat2 才不跨盘）
+	// pkgmanagerd 需要连管理通道才能替 App 装包（App 不可能是 root，而系统服务
+	// 跑在 App UID 段）。它的 UID 是启动扫描时分配并持久化的，此刻 pkgregistry
+	// 已经注册在前（k.Register 顺序 1 vs 11）且 scanSystemImage 里已调过
+	// stableUID，所以这里查得到。
+	//
+	// 查不到（未装该包，例如最小镜像或开发机）就留 0：管理通道退回只认运维身份，
+	// 不报错也不放宽——这条链路缺失只意味着「装不了包」，不该拖垮内核启动。
+	var pkgManagerUID uint32
+	if e, ok := pkgReg.Lookup(pkgManagerPackageID); ok {
+		pkgManagerUID = e.UID
+		logger.Info("admin: package manager service will be admitted",
+			"package_id", pkgManagerPackageID, "uid", pkgManagerUID)
+	} else {
+		logger.Info("admin: package manager service not installed; admin channel is operator-only",
+			"package_id", pkgManagerPackageID)
+	}
+
 	adminSrv, err := admin.New(admin.Config{
 		SockPath:    adminSockPath,
 		AdminUID:    uint32(os.Geteuid()),
+		ServiceUID:  pkgManagerUID,
 		Packages:    pkgMod,
 		Registry:    pkgReg,
 		Permissions: permReg,

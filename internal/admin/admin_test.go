@@ -278,3 +278,79 @@ func TestRejectsNonAdminUID(t *testing.T) {
 		t.Fatal("no operation should have run for a rejected caller")
 	}
 }
+
+// ---- ServiceUID 放行（pkgmanagerd 装包链路的准入）------------------------
+
+// newServerWithServiceUID 构造一个放行了 serviceUID 的 Server，但【不 Start】。
+// 只验构造期的集合合并与配置，不碰真实 socket——chown 到一个不存在的 GID
+// 需要 root，普通开发机上跑不了。
+func newServerWithServiceUID(t *testing.T, adminUID, serviceUID uint32) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	srv, err := New(Config{
+		SockPath:    filepath.Join(dir, "s.sock"),
+		StagingRoot: filepath.Join(dir, "staging"),
+		AdminUID:    adminUID,
+		ServiceUID:  serviceUID,
+		Packages:    &fakePkgService{},
+		Registry:    &fakeLister{},
+		Permissions: &fakePermSetter{},
+		Auditor:     audit.New(discardLog()),
+		Log:         discardLog(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv
+}
+
+func TestServiceUID_AdmittedAlongsideAdmin(t *testing.T) {
+	srv := newServerWithServiceUID(t, 0, 20001)
+
+	for _, uid := range []uint32{0, 20001} {
+		if _, ok := srv.allowedUIDs[uid]; !ok {
+			t.Errorf("uid %d should be admitted", uid)
+		}
+	}
+	// 别的包（哪怕也在 App 段）不能连：放行的是一个特定服务，不是一个区段
+	if _, ok := srv.allowedUIDs[20002]; ok {
+		t.Error("a different package UID must not be admitted")
+	}
+}
+
+func TestServiceUID_ZeroDoesNotAdmitRootThroughBackDoor(t *testing.T) {
+	// ServiceUID 由 Registry 查询结果填充，查不到时零值恰好是 0。若把它无条件
+	// 加进允许集合，一个「包没装」的普通状况就会静默地把 root 从服务这条口子
+	// 又放进来一次——而 root 只应通过 AdminUID 这条明确路径进入。
+	//
+	// 这里 AdminUID 取一个非 0 值，断言 0 没有被 ServiceUID=0 带进来。
+	srv := newServerWithServiceUID(t, 1000, 0)
+
+	if _, ok := srv.allowedUIDs[0]; ok {
+		t.Fatal("uid 0 must not be admitted via ServiceUID=0")
+	}
+	if _, ok := srv.allowedUIDs[1000]; !ok {
+		t.Error("admin uid should still be admitted")
+	}
+	if len(srv.allowedUIDs) != 1 {
+		t.Errorf("allowed set = %v, want exactly the admin uid", srv.allowedUIDs)
+	}
+}
+
+func TestServiceUID_ZeroKeepsSocketPrivate(t *testing.T) {
+	// 没有服务放行时，socket 必须保持 0600。放宽到 0660 却没有对应的组归属，
+	// 等于把连接权发给 nervud 主组（生产是 root 组）的全部成员。
+	srv := newServerWithServiceUID(t, uint32(os.Getuid()), 0)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	fi, err := os.Stat(srv.sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != socketMode {
+		t.Fatalf("socket mode = %o, want %o", got, socketMode)
+	}
+}

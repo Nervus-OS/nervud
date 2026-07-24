@@ -28,10 +28,24 @@ import (
 // preflight 负责在启动时把它建好（0700、属主 nervud）。
 const DefaultStagingDir = "/var/lib/nervus/staging"
 
-// socketMode 是管理 socket 的文件权限：0600，只有 socket 属主（运行 nervud 的
-// 账户，生产为 root）能连。这是第一道 FS 层过滤；真正的准入是 accept 后的
+// socketMode 是没有放行系统服务时的 socket 权限：0600，只有属主（运行 nervud
+// 的账户，生产为 root）能连。这是第一道 FS 层过滤；真正的准入是 accept 后的
 // SO_PEERCRED 校验（见 handleConn）。
 const socketMode fs.FileMode = 0o600
+
+// socketModeWithService 是放行了系统服务（pkgmanagerd）时的 socket 权限：0660，
+// 配合把 socket 的【组】chown 成该服务的 GID。
+//
+// 为什么必须动 FS 层：0600 之下 pkgmanagerd（UID 20000+）连 connect() 都过不了，
+// SO_PEERCRED 校验根本没机会执行——只在 handleConn 里放行 UID 是无效的。
+//
+// 为什么不用 0666 让 SO_PEERCRED 独自把关：那样任何本地进程都能连上再被拒，
+// FS 这一层就退化成摆设，还白送一个消耗连接槽的口子。0660 + 组精确地只放
+// 「root 与那一个服务」两者。
+//
+// 本系统里 Package 的 GID 恒等于其 UID（见 service.buildStartReq 的
+// GID: e.UID），所以组直接取 ServiceUID 即可，不需要额外的组管理。
+const socketModeWithService fs.FileMode = 0o660
 
 // PackageService 是本包对 pkgregistry.Module 的窄接口依赖：装包/卸载/停用启用。
 // 消费者定义接口，*pkgregistry.Module 隐式满足。所有安全复核都在 Module 内部，
@@ -60,10 +74,33 @@ type Config struct {
 	SockPath string
 	// StagingRoot 是 nervud 掌控的 staging 根，默认 DefaultStagingDir。
 	StagingRoot string
-	// AdminUID 是被许可发管理命令的对端 UID。装配时显式传入（main.go 传
+	// AdminUID 是被许可发管理命令的运维身份 UID。装配时显式传入（main.go 传
 	// os.Geteuid = 运行 nervud 的账户，生产为 0/root）；不设默认，因为 0 本身
 	// 是合法值，无法用零值区分未设置。
 	AdminUID uint32
+
+	// ServiceUID 是唯一被额外放行的系统服务 UID（nervus.pkgmanagerd）。
+	// 0 表示不放行任何服务，本通道退回只认运维身份。
+	//
+	// 为什么需要它：装包必须由一个【系统服务】对 App 提供（App 不可能是 root），
+	// 而系统服务跑在 App UID 段（20000-59999），按单值 root 判定连不上本通道。
+	//
+	// 为什么不让 pkgmanagerd 直接以 root 跑：那会让它脱离包体系——拿不到稳定
+	// UID、不受 identity 的 UID↔Package 一一对应约束、也不在 pkgregistry 保护
+	// 名单的语义之内。而那份名单里明写着 "nervus.pkgmanagerd/main"，设计意图
+	// 就是它是一个包。
+	//
+	// 为什么是单个而不是一组：这条通道能做的事（装包、卸载、授撤权限）是全系统
+	// 最敏感的一批，放行面越窄越好。真出现第二个需要它的服务时，应当先问
+	// 「它凭什么」，而不是往列表里再加一行。
+	//
+	// 【安全边界没有放宽】：放行的是「谁能连上这条 socket」，不是「连上能做什么」。
+	// 全部命令仍旧只是把请求投递给同进程的 pkgregistry.Module，签名、digest、
+	// 升级裁决、权限交集一律在那里复核。pkgmanagerd 不做任何安全判定。
+	//
+	// 装配时由 main.go 从 Registry 查 nervus.pkgmanagerd 的 UID 填入；查不到
+	// （未安装）就留 0——不报错，也不放宽。
+	ServiceUID uint32
 
 	Packages    PackageService
 	Registry    PackageLister
@@ -78,6 +115,11 @@ type Server struct {
 	sockPath    string
 	stagingRoot string
 	adminUID    uint32
+	serviceUID  uint32
+	// allowedUIDs 是 adminUID + serviceUID 的合并集合，构造时冻结、运行期只读。
+	// 用 map 而不是两次比较：判定在每条连接上执行，集合语义更直白，
+	// 将来真要放宽也不必改判定逻辑。
+	allowedUIDs map[uint32]struct{}
 
 	pkgs  PackageService
 	reg   PackageLister
@@ -123,10 +165,21 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Log == nil {
 		return nil, errors.New("admin: Log is required")
 	}
+	// 合并允许集合。运维身份恒在其中；ServiceUID 为 0 时不加入——UID 0 只能
+	// 通过 AdminUID 这条明确的路径进来，绝不接受从「服务放行」这个口子悄悄
+	// 混进一个 root。这不是理论风险：ServiceUID 由 Registry 查询结果填充，
+	// 查询失败或包未安装时的零值恰好就是 0。
+	allowed := map[uint32]struct{}{cfg.AdminUID: {}}
+	if cfg.ServiceUID != 0 {
+		allowed[cfg.ServiceUID] = struct{}{}
+	}
+
 	return &Server{
 		sockPath:    cfg.SockPath,
 		stagingRoot: filepath.Clean(cfg.StagingRoot),
 		adminUID:    cfg.AdminUID,
+		serviceUID:  cfg.ServiceUID,
+		allowedUIDs: allowed,
 		pkgs:        cfg.Packages,
 		reg:         cfg.Registry,
 		perms:       cfg.Permissions,
@@ -165,8 +218,24 @@ func (s *Server) Start(context.Context) error {
 	}
 	ln.SetUnlinkOnClose(true)
 
-	// bind 时权限受 umask 削减，显式收紧到 0600。中间窗口只会更严不会更松。
-	if err := os.Chmod(s.sockPath, socketMode); err != nil {
+	// 顺序要紧：先 chown 组、再放宽 mode。
+	//
+	// 反过来做（先 0660 再 chown）会留下一个窗口：那一瞬间 socket 的组还是
+	// nervud 的主组（生产为 root 组），0660 等于把连接权发给了 root 组的全部
+	// 成员。窗口再短也是真实可利用的，而调换顺序的成本为零。
+	mode := socketMode
+	if s.serviceUID != 0 {
+		// 本系统 Package 的 GID 恒等于 UID，故组直接取 serviceUID。
+		// -1 表示不改属主，只改组。
+		if err := os.Chown(s.sockPath, -1, int(s.serviceUID)); err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("admin: chown group %s to %d: %w", s.sockPath, s.serviceUID, err)
+		}
+		mode = socketModeWithService
+	}
+
+	// bind 时权限受 umask 削减，这里显式设定。没有服务放行时是 0600。
+	if err := os.Chmod(s.sockPath, mode); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("admin: chmod %s: %w", s.sockPath, err)
 	}
@@ -175,7 +244,9 @@ func (s *Server) Start(context.Context) error {
 	s.wg.Add(1)
 	go s.acceptLoop()
 
-	s.log.Info("admin: listening", "sock", s.sockPath, "mode", socketMode.String(), "admin_uid", s.adminUID)
+	s.log.Info("admin: listening",
+		"sock", s.sockPath, "mode", mode.String(),
+		"admin_uid", s.adminUID, "service_uid", s.serviceUID)
 	return nil
 }
 
@@ -272,9 +343,15 @@ func (s *Server) handleConn(c *net.UnixConn) {
 		s.audit("admin.Rejected", "", true, err, "peer credentials unavailable")
 		return
 	}
-	if cred.UID != s.adminUID {
-		// 只有运维身份（运行 nervud 的账户 / root）可发管理命令。0600 已挡住大多数，
-		// SO_PEERCRED 是纵深防御：内核给的 UID，对端无法伪造。
+	if _, ok := s.allowedUIDs[cred.UID]; !ok {
+		// 只有运维身份（运行 nervud 的账户 / root）与显式放行的系统服务
+		// （pkgmanagerd）可发管理命令。SO_PEERCRED 是纵深防御：内核给的 UID，
+		// 对端无法伪造。
+		//
+		// socket 权限【仍是 0600】，没有改成 0660 + 组：那样等于把准入交给
+		// 文件系统的组成员关系，而组是运维可改的；这里要的是「只有这几个
+		// 特定 UID」，判定权必须留在内核凭证上。0600 之下 pkgmanagerd 连不上
+		// 是预期的——见下方 socket 属主设置。
 		s.audit("admin.Rejected", fmt.Sprintf("uid:%d", cred.UID), true, nil, "uid not permitted")
 		_ = adminwire.WriteTo(c, adminwire.Response{
 			OK: false, Code: adminwire.CodeUnauthorized,
