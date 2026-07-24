@@ -14,6 +14,7 @@ import (
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/authority/systemd"
 	"github.com/nervus-os/nervud/internal/control"
+	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/ipc"
 	"github.com/nervus-os/nervud/internal/kernel"
@@ -298,8 +299,6 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	)
 	k.Register(pkgMod)                  // Package Registry + 安装裁决
 	k.Register(permission.New(permReg)) // capability 执法：Grant 投影由 pkgregistry 推送
-	//   k.Register(service.New(auth, ...))  // App/Service 组件生命周期
-	//   k.Register(endpoint.New(...))       // Endpoint 注册/解析/路由
 	//   k.Register(resource.New(...))       // Resource Registry + Provider 绑定
 
 	// HUMAN/AI ControlLease + deadman + Control Lane(RR 40)。读/递增与 safety 同一个 gate。
@@ -333,8 +332,16 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 	// Step 9（LeaseRevoker）——现在传 nil，卸载时跳过撤租那一步（留接缝）
 	pkgMod.SetLifecycleHooks(svcMgr, nil)
 
-	// IPC 控制面 UDS：最后开门。依赖上面全部就绪（Identity/Permission/Safety/Service）。
-	// Components 接 svcMgr 解锁 verifyComponent —— 至此 App/Service 才真正握得上手
+	// Endpoint 注册/解析/路由：把 endpoint_id/method_id 推导 permission ID 的手段
+	// 接上（架构总览 §7 待办列表里优先级最高的一条）。注册在 service 之后、ipc 之前
+	// ——Resolve 时 on-demand 拉起组件要靠 svcMgr.EnsureStarted 已就绪
+	epMod := endpoint.New(pkgReg, permReg, svcMgr, aud, logger)
+	k.Register(epMod)
+
+	// IPC 控制面 UDS：最后开门。依赖上面全部就绪（Identity/Permission/Safety/Service/
+	// Endpoint）。Components 接 svcMgr 解锁 verifyComponent；Endpoints 接 epMod 解锁
+	// ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 与 Request 的 Route 查表
+	// —— 至此 App/Service 才真正握得上手
 	ipcSrv, err := ipc.New(ipc.Config{
 		SockPath:   sockPath,
 		Log:        logger,
@@ -343,6 +350,7 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath string, 
 		Identity:   idReg,
 		Permission: permReg,
 		Components: svcMgr,
+		Endpoints:  epMod,
 	})
 	if err != nil {
 		return nil, cleanup, err

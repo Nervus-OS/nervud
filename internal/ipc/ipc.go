@@ -23,6 +23,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/service"
 	"github.com/nervus-os/nervud/internal/sysprobe"
@@ -149,6 +150,13 @@ type Config struct {
 	// 走 fail-closed（除非 AllowUnverifiedComponent）
 	Components ComponentResolver
 
+	// Endpoints 把 ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给
+	// internal/endpoint，并在 Request 分派时提供路由查表。接口由本包（消费者）
+	// 定义，实现由 *endpoint.Module 提供。为 nil 时握手/请求管线维持既有降级
+	// 行为（ResolveEndpoint 等按 UnsupportedBody 处理，Request 恒 UNAVAILABLE）
+	// ——允许 endpoint 与 ipc 分批合入
+	Endpoints EndpointResolver
+
 	// AllowUnverifiedComponent 显式放行「Component 核对基础设施未接线（Components 为
 	// nil）」时的握手，仅供开发/测试。默认 false = fail closed：核对不可用即拒绝握手。
 	// 注意它只放行「基础设施缺失」，【绝不】放行「核对到不一致」——后者永远拒绝
@@ -163,6 +171,27 @@ type Config struct {
 // 交叉核对
 type ComponentResolver interface {
 	LookupByUnit(unit string) (service.Instance, bool)
+}
+
+// EndpointResolver 把 ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给
+// internal/endpoint，并在 Request 分派时提供路由查表（架构 §10.7）
+//
+// 接口在本包（消费者）定义，实现由 *endpoint.Module 提供，同 ComponentResolver/
+// PermissionChecker 的既有模式。endpoint 包本身不 import ipc——ConnHandle/
+// RouteInfo/RouteError 等支撑类型定义在 endpoint 一侧，ipc 通过它们引用，
+// 依赖方向保持单向（见 internal/endpoint 的设计说明）
+type EndpointResolver interface {
+	ResolveEndpoint(conn endpoint.ConnHandle, caller identity.Caller, req *ipcv1.ResolveEndpoint) *ipcv1.ResolveEndpointResult
+	RegisterEndpoint(conn endpoint.ConnHandle, caller identity.Caller, req *ipcv1.RegisterEndpoint) *ipcv1.RegisterEndpointResult
+	UnregisterEndpoint(conn endpoint.ConnHandle, req *ipcv1.UnregisterEndpoint) *ipcv1.UnregisterEndpointResult
+
+	// Route 供 handleRequest 用：拿到 endpoint_id 后查一次"转给谁、需要什么
+	// 权限、这次调用是否仍然合法"。ipc 自己不缓存任何路由状态，每次都查
+	Route(conn endpoint.ConnHandle, endpointID uint64) (endpoint.RouteInfo, endpoint.RouteError)
+
+	// ConnClosed 由 ipc 在连接的 serve() 循环退出时调用一次，让 endpoint 清理
+	// 该连接名下的全部 registration/binding，并使仍存活的关联 binding 失效
+	ConnClosed(conn endpoint.ConnHandle)
 }
 
 // PeerResolver 把 SO_PEERCRED 凭证解析成可信身份
@@ -201,6 +230,7 @@ type Server struct {
 	identity   PeerResolver
 	permission PermissionChecker
 	components ComponentResolver
+	endpoints  EndpointResolver
 	limits     Limits
 
 	// allowUnverifiedComponent 见 Config.AllowUnverifiedComponent
@@ -272,6 +302,7 @@ func New(cfg Config) (*Server, error) {
 		identity:                 cfg.Identity,
 		permission:               cfg.Permission,
 		components:               cfg.Components,
+		endpoints:                cfg.Endpoints,
 		limits:                   normalizeLimits(cfg.Limits),
 		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
 		quit:                     make(chan struct{}),
@@ -636,6 +667,14 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 
 	// 连接状态机：第一帧必须是 Hello，握手完成前不接受其它 body（conn.go）
 	co := newConn(s, c, caller, log)
+
+	// 无论本连接是 Service 侧还是 Caller 侧，serve() 退出都意味着它彻底断线：
+	// 通知 endpoint 清理该连接名下的全部 registration/binding（架构 §10.5，
+	// 设计方案 §5.4）。co 本身作为 endpoint.ConnHandle 传入——两个命名空间的
+	// endpoint_id 靠这份指针身份区分，而不是数字本身
+	if s.endpoints != nil {
+		defer s.endpoints.ConnClosed(co)
+	}
 
 	for {
 		select {

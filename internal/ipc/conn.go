@@ -222,6 +222,15 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 	case *ipcv1.Envelope_Request:
 		return co.handleRequest(body.Request)
 
+	case *ipcv1.Envelope_ResolveEndpoint:
+		return co.handleResolveEndpoint(env, body.ResolveEndpoint)
+
+	case *ipcv1.Envelope_RegisterEndpoint:
+		return co.handleRegisterEndpoint(env, body.RegisterEndpoint)
+
+	case *ipcv1.Envelope_UnregisterEndpoint:
+		return co.handleUnregisterEndpoint(env, body.UnregisterEndpoint)
+
 	case *ipcv1.Envelope_Hello:
 		// 握手已完成，再来一个 Hello 是非法握手状态（架构 10.11）
 		co.log.Warn("ipc: duplicate Hello after handshake, closing")
@@ -249,19 +258,19 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		co.s.auditViolation(co.caller, errUnexpectedBody)
 		return false
 
-	case *ipcv1.Envelope_ResolveEndpoint,
-		*ipcv1.Envelope_RegisterEndpoint,
-		*ipcv1.Envelope_UnregisterEndpoint,
-		*ipcv1.Envelope_Cancel,
+	case *ipcv1.Envelope_Cancel,
 		*ipcv1.Envelope_Subscribe,
 		*ipcv1.Envelope_Unsubscribe,
 		*ipcv1.Envelope_DispatchResult:
-		// 对端→nervud 方向合法、但本 build 未实现的 body。ResolveEndpoint/Register/
-		// Unregister/Cancel/Subscribe/Unsubscribe 来自 App/Service；DispatchResult 由
-		// Service 连接回给 nervud（§10.7，route 追踪落地前无从匹配）。它们各自需要专属
-		// 回复或路由，凭空造回复违反架构 10.4/10.7，故关闭并审计为 UnsupportedBody
-		// ——与协议违规分开，既不污染安全信号，也不把未来的 ServiceHost 接入误判成
-		// 攻击。各自的 handler 随对应模块（endpoint/subscription/dispatch）落地后迁出
+		// 对端→nervud 方向合法、但本 build 未实现的 body。Cancel/Subscribe/
+		// Unsubscribe 来自 App/Service；DispatchResult 由 Service 连接回给 nervud
+		// （§10.7，route 追踪落地前无从匹配）。它们各自需要专属回复或路由，凭空
+		// 造回复违反架构 10.4/10.7，故关闭并审计为 UnsupportedBody——与协议违规
+		// 分开，既不污染安全信号，也不把未来的 ServiceHost 接入误判成攻击。
+		// ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 已随 internal/endpoint
+		// 落地迁出本组（见上方 handleResolveEndpoint 等；co.s.endpoints 为 nil 时
+		// 它们各自仍会降级回 unsupported()）。各自的 handler 随对应模块
+		// （subscription/dispatch）落地后迁出
 		return co.unsupported(env)
 
 	default:
@@ -282,14 +291,58 @@ func (co *conn) handlePing(ping *ipcv1.Ping) bool {
 	return true
 }
 
-// handleRequest 处理一个 Request
+// handleResolveEndpoint 转发给 internal/endpoint（co.s.endpoints 为 nil 时降级
+// 为 unsupported()，见 ipc.Config.Endpoints 的文档）
+func (co *conn) handleResolveEndpoint(env *ipcv1.Envelope, req *ipcv1.ResolveEndpoint) bool {
+	if co.s.endpoints == nil {
+		return co.unsupported(env)
+	}
+	result := co.s.endpoints.ResolveEndpoint(co, co.caller, req)
+	return co.writeResultEnvelope(&ipcv1.Envelope{
+		Body: &ipcv1.Envelope_ResolveEndpointResult{ResolveEndpointResult: result},
+	})
+}
+
+// handleRegisterEndpoint 转发给 internal/endpoint（同上的 nil 降级）
+func (co *conn) handleRegisterEndpoint(env *ipcv1.Envelope, req *ipcv1.RegisterEndpoint) bool {
+	if co.s.endpoints == nil {
+		return co.unsupported(env)
+	}
+	result := co.s.endpoints.RegisterEndpoint(co, co.caller, req)
+	return co.writeResultEnvelope(&ipcv1.Envelope{
+		Body: &ipcv1.Envelope_RegisterEndpointResult{RegisterEndpointResult: result},
+	})
+}
+
+// handleUnregisterEndpoint 转发给 internal/endpoint（同上的 nil 降级）
+func (co *conn) handleUnregisterEndpoint(env *ipcv1.Envelope, req *ipcv1.UnregisterEndpoint) bool {
+	if co.s.endpoints == nil {
+		return co.unsupported(env)
+	}
+	result := co.s.endpoints.UnregisterEndpoint(co, req)
+	return co.writeResultEnvelope(&ipcv1.Envelope{
+		Body: &ipcv1.Envelope_UnregisterEndpointResult{UnregisterEndpointResult: result},
+	})
+}
+
+// writeResultEnvelope 写出一个响应/结果类 Envelope，写失败即关闭连接
+func (co *conn) writeResultEnvelope(env *ipcv1.Envelope) bool {
+	if err := co.writeEnvelope(env); err != nil {
+		co.log.Debug("ipc: write result envelope failed, closing", "err", err)
+		return false
+	}
+	return true
+}
+
+// handleRequest 处理一个 Request（架构 10.7 的请求管线：Route → Dispatch）
 //
-// 请求管线（Resolve/Permission/Lane/Dispatch）尚未落地。校验 request_id 后回一个以
-// 它归位的 UNAVAILABLE Response，而不是静默丢或裸关连接
-//
-// co.s.permission（PermissionChecker）已经可用，但本函数尚不调用它：还没有
-// 从 endpoint_id/method_id 推导 permission ID 的手段（internal/endpoint 是空
-// 实现）。真正的 Allowed(...) 调用点要等 endpoint 落地后才能加，不在这里空转
+// co.s.endpoints 为 nil 时维持既有降级行为：校验 request_id 后恒回 UNAVAILABLE，
+// 不静默丢也不裸关连接。非 nil 时，先经 Route() 查表——这一步就是架构总览 §7
+// 待办列表里等待的那次真正 permission.Allowed 调用（在 endpoint.Route 内部）。
+// Dispatch 到 Service 连接的转发本体（route_id 分配/Lane 调度/deadline 收紧）
+// 不在 internal/endpoint 范围内（见其设计文档 §1），v1 在 Route 成功之后仍以
+// UNAVAILABLE 结束请求，但已经是【真正 Route 之后】的 UNAVAILABLE，而不是无
+// 条件恒定值
 func (co *conn) handleRequest(req *ipcv1.Request) bool {
 	// request_id 0 永久保留（架构 10.6：合法请求从 1 起）。在生成任何 Response 之前
 	// 按协议违规关闭——回一个 request_id=0 的 Response 等于承认了一个不该存在的
@@ -300,21 +353,28 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return false
 	}
 
-	// 用 UNAVAILABLE 而不是断开：Request 携带 request_id，能以它归位一个合法的失败
-	// 终结响应（架构 10.12：断线时 SDK 把 pending 完成为 UNAVAILABLE，这里等价于在
-	// 连接仍存活时直接告诉它「当前不可用」）。public_message 留空——架构 10.4 禁止
-	// 透传自由文本，本端也没有可归因的模板文本要加
+	failCode := ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE
+	if co.s.endpoints != nil {
+		_, rerr := co.s.endpoints.Route(co, req.GetEndpointId())
+		if rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+			failCode = rerr.Code
+		}
+		// route.TargetConn 已知，但把请求真正转发给该 Service 连接（Dispatch/
+		// DispatchResult 关联、Lane 调度）是 ipc 自己的请求管线尚未落地的部分，
+		// 不在这里空转——见上方函数注释
+	}
+
+	// 用 Response(Failure) 而不是断开：Request 携带 request_id，能以它归位一个
+	// 合法的失败终结响应（架构 10.12：断线时 SDK 把 pending 完成为 UNAVAILABLE，
+	// 这里等价于在连接仍存活时直接告诉它当前结果）。public_message 留空——
+	// 架构 10.4 禁止透传自由文本，本端也没有可归因的模板文本要加
 	resp := &ipcv1.Envelope{Body: &ipcv1.Envelope_Response{Response: &ipcv1.Response{
 		RequestId: req.GetRequestId(),
 		Outcome: &ipcv1.Response_Failure{Failure: &ipcv1.Failure{
-			Code: ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE,
+			Code: failCode,
 		}},
 	}}}
-	if err := co.writeEnvelope(resp); err != nil {
-		co.log.Debug("ipc: write Response failed, closing", "err", err)
-		return false
-	}
-	return true
+	return co.writeResultEnvelope(resp)
 }
 
 // unsupported 关闭连接并审计为 UnsupportedBody
