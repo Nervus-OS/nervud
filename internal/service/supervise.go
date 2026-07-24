@@ -57,15 +57,19 @@ func effectiveCriticality(e pkgregistry.Entry, c pkgregistry.Component) pkgregis
 }
 
 // startLocked 建实例并起 supervisor。调用方必须持 m.mu
+//
+// 若该 key 已有一个终态实例（StateStopped/StateFailed——on-demand 组件被停止后，
+// 或崩溃熔断后，都会停在 byKey 里而不是被摘除），这里【不】panic，而是当作全新
+// 启动处理：旧 supervisor goroutine 在把状态置为终态之前已经真正停掉了对应的
+// systemd unit（stopProc/drain 发生在 setState 之前；熔断则是重试耗尽、进程已不
+// 在跑），所以外部一旦观察到终态，旧实例就不会再被那个 goroutine 写入，直接用新
+// *Instance 覆盖 byKey/byUnit、起新 supervisor 是安全的——这正是 EnsureStarted 对
+// 一个此前跑过又停止/熔断的 on-demand 组件重新拉起时必须支持的路径（见
+// internal/endpoint 的 Resolve on-demand 拉起分支）
 func (m *Manager) startLocked(e pkgregistry.Entry, c pkgregistry.Component) {
 	key := componentKey{e.Manifest.PackageID, c.ID}
-	if inst, ok := m.byKey[key]; ok {
-		switch inst.State {
-		case StateRunning, StateStarting:
-			return // 已在跑
-		default:
-			panic("unhandled default case")
-		}
+	if inst, ok := m.byKey[key]; ok && (inst.State == StateRunning || inst.State == StateStarting) {
+		return // 已在跑，幂等
 	}
 	inst := &Instance{
 		PackageID:   e.Manifest.PackageID,

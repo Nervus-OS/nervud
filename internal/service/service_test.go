@@ -153,6 +153,13 @@ func alwaysOnService(id string, crit pkgregistry.Criticality) pkgregistry.Compon
 	}
 }
 
+func onDemandService(id string, crit pkgregistry.Criticality) pkgregistry.Component {
+	return pkgregistry.Component{
+		ID: id, Type: pkgregistry.ComponentService, Runtime: pkgregistry.RuntimeNative,
+		Entry: "bin", LaunchMode: pkgregistry.LaunchOnDemand, Criticality: crit,
+	}
+}
+
 func newTestManager(t *testing.T, sp authority.UnitManager, pkgs PackageLookup, safety SafetyEscalator) *Manager {
 	t.Helper()
 	rec := &fakeRecorderDiscard{}
@@ -356,4 +363,77 @@ func TestReloadPackage_RestartsFromCurrentRegistry(t *testing.T) {
 		inst, ok := m.LookupByUnit(unit)
 		return ok && inst.State == StateRunning
 	})
+}
+
+// 回归测试：startLocked 曾经在 byKey 里已有一个终态（Stopped/Failed）实例时
+// panic("unhandled default case")。internal/endpoint 的 ResolveEndpoint 落地后，
+// 这条路径变成任意已装包 App 都能触发的真实攻击面——对一个此前跑过又停止的
+// on-demand 组件发起 Resolve 就会走到 EnsureStarted → startLocked，把整个 nervud
+// 进程 panic 掉。这里验证：停止后再次 EnsureStarted 必须真正重启，而不是 panic
+func TestEnsureStarted_RestartsAfterStop(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			onDemandService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	unit := unitName("com.example.app", "worker")
+
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
+		t.Fatalf("first EnsureStarted: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 1 })
+
+	if err := m.StopComponent(context.Background(), "com.example.app", "worker"); err != nil {
+		t.Fatalf("StopComponent: %v", err)
+	}
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateStopped
+	})
+
+	// 修复前这一步会 panic("unhandled default case")
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
+		t.Fatalf("second EnsureStarted after stop: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 2 })
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateRunning
+	})
+}
+
+// 回归测试：同上，但覆盖熔断（StateFailed）而不是正常停止后的重启路径
+func TestEnsureStarted_RestartsAfterCircuitBreak(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			onDemandService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	unit := unitName("com.example.app", "worker")
+
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
+		t.Fatalf("first EnsureStarted: %v", err)
+	}
+	// 连续崩溃直到熔断（阈值 crashThreshold）
+	for i := 0; i < crashThreshold; i++ {
+		waitFor(t, time.Second, func() bool { return sp.starts(unit) >= i+1 })
+		sp.crash(unit)
+	}
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateFailed
+	})
+	startsBeforeRetry := sp.starts(unit)
+
+	// 修复前这一步会 panic("unhandled default case")
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
+		t.Fatalf("EnsureStarted after circuit break: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) > startsBeforeRetry })
 }
