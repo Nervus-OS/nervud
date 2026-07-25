@@ -16,9 +16,19 @@ import (
 // 所有字段在 New 时冻结，运行期只读；没有任何导出的 setter
 type Invariants struct {
 	DataRoot    string // Package 私有数据根，如 /var/lib/nervus/package-data
-	PackageRoot string // 已安装 Package 根，如 /var/lib/nervus/packages
-	MinAppUID   uint32 // App UID/GID 下界，低于此值属系统保留
-	MaxAppUID   uint32
+	PackageRoot string // 动态安装的 Package 根，如 /var/lib/nervus/packages
+	// SystemPackageRoot 是系统镜像内置 Package 的只读根，
+	// 如 /usr/lib/nervus/system-packages。
+	//
+	// 【必须与 PackageRoot 分开】：两类包的代码住在完全不同的位置，而且布局
+	// 也不同——动态安装是 <root>/<pkg>/<version>/，系统镜像是 <root>/<pkg>/
+	// （无版本子目录，跟随整镜像 OTA，不存在多版本共存）。
+	//
+	// 起进程时的路径包含校验必须认这两个根中的任意一个，否则系统包的可执行
+	// 文件会被判成「逃出 PackageRoot」而拒绝启动。
+	SystemPackageRoot string
+	MinAppUID         uint32 // App UID/GID 下界，低于此值属系统保留
+	MaxAppUID         uint32
 }
 
 // DefaultInvariants 是生产镜像的固定取值。不做成配置文件读取
@@ -27,10 +37,11 @@ type Invariants struct {
 // 这是 Package 私有数据而非某个通用 data 目录
 func DefaultInvariants() *Invariants {
 	return &Invariants{
-		DataRoot:    "/var/lib/nervus/package-data",
-		PackageRoot: "/var/lib/nervus/packages",
-		MinAppUID:   20000, // 避开发行版的系统和普通用户段
-		MaxAppUID:   59999,
+		DataRoot:          "/var/lib/nervus/package-data",
+		PackageRoot:       "/var/lib/nervus/packages",
+		SystemPackageRoot: "/usr/lib/nervus/system-packages",
+		MinAppUID:         20000, // 避开发行版的系统和普通用户段
+		MaxAppUID:         59999,
 	}
 }
 
@@ -48,6 +59,22 @@ func (inv *Invariants) CheckUID(uid uint32) error {
 			ErrInvariantViolated, uid, inv.MinAppUID, inv.MaxAppUID)
 	}
 	return nil
+}
+
+// CheckContainedInCodeRoot 校验 p 位于【任一】代码根之内（动态安装根或系统镜像根）。
+//
+// 起进程的路径校验用它而不是 CheckContained(p, PackageRoot)：系统镜像包的
+// 可执行文件住在 SystemPackageRoot 下，只认 PackageRoot 会把它们全判成逃逸。
+//
+// 两个根都不匹配时返回针对 PackageRoot 的那个错误——它是更常见的情形，
+// 错误信息里给出的对比根也更可能是调用方想要的那个。
+func (inv *Invariants) CheckContainedInCodeRoot(p string) error {
+	if inv.SystemPackageRoot != "" {
+		if err := inv.CheckContained(p, inv.SystemPackageRoot); err == nil {
+			return nil
+		}
+	}
+	return inv.CheckContained(p, inv.PackageRoot)
 }
 
 // CheckContained 校验路径 p 严格位于路径 root 之内（root 本身不算之内）

@@ -286,7 +286,7 @@ func (m *Manager) backoffWait(backoff *time.Duration, inst *Instance) bool {
 // 两种 runtime 的包内路径都进 ContainedPaths，由 authority.Validate 逐一核对在
 // PackageRoot 之内
 func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, unit string) (authority.StartSandboxedProcessRequest, error) {
-	verDir := filepath.Join(m.inv.PackageRoot, e.Manifest.PackageID, e.ActiveVersion)
+	verDir := codeDir(m.inv, e)
 	dataDir := filepath.Join(m.inv.DataRoot, e.Manifest.PackageID)
 	entryPath := filepath.Join(verDir, c.Entry)
 
@@ -355,4 +355,24 @@ func (m *Manager) audit(inst *Instance, action string, denied bool, err error) {
 		Err:     err,
 		Detail:  inst.Unit,
 	})
+}
+
+// codeDir 给出一个 Package 的代码目录。
+//
+// 【两类包的布局不同，不能共用一个拼法】：
+//
+//	动态安装  <PackageRoot>/<pkg>/<version>/     多版本可共存，升级时新旧并列
+//	系统镜像  <SystemPackageRoot>/<pkg>/         无版本子目录，跟随整镜像 OTA
+//
+// 系统镜像包没有版本子目录，是因为它们不存在「多版本共存」——整个镜像一起换。
+// 内核的启动扫描也是按这个布局 glob 的（scan.go：<root>/*/manifest.json）。
+//
+// 无条件用 PackageRoot 拼会让系统包的 ExecStart 指向一个不存在的路径，
+// systemd 在 step EXEC 失败（203/EXEC）——而错误信息只说「找不到可执行文件」，
+// 看不出是布局假设错了。
+func codeDir(inv *authority.Invariants, e pkgregistry.Entry) string {
+	if e.Source == pkgregistry.SourceSystemImage {
+		return filepath.Join(inv.SystemPackageRoot, e.Manifest.PackageID)
+	}
+	return filepath.Join(inv.PackageRoot, e.Manifest.PackageID, e.ActiveVersion)
 }

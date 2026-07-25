@@ -87,7 +87,8 @@ func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 	}
 	switch r.Runtime {
 	case RuntimeNative:
-		if err := inv.CheckContained(r.ExecPath, inv.PackageRoot); err != nil {
+		// 认两个代码根：动态安装的在 PackageRoot，系统镜像的在 SystemPackageRoot
+		if err := inv.CheckContainedInCodeRoot(r.ExecPath); err != nil {
 			return err
 		}
 	case RuntimeJVM:
@@ -95,9 +96,9 @@ func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 			return fmt.Errorf("%w: jvm exec must be %q, got %q", ErrInvariantViolated, PlatformJREExec, r.ExecPath)
 		}
 	}
-	// 包内路径（jar / native_lib_dir）必须都在 PackageRoot 之内
+	// 包内路径（jar / native_lib_dir）必须落在某个代码根之内
 	for _, p := range r.ContainedPaths {
-		if err := inv.CheckContained(p, inv.PackageRoot); err != nil {
+		if err := inv.CheckContainedInCodeRoot(p); err != nil {
 			return err
 		}
 	}
