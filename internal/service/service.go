@@ -151,6 +151,25 @@ type Manager struct {
 	backoffMax time.Duration
 
 	stopped bool
+
+	// stagingPkgID/stagingRoot 是「装包服务额外可写 staging 根」这条例外。
+	// 经 GrantStagingAccess 注入，不注入则为空、无任何组件拿到额外可写路径。
+	// 装配期一次性写入，Start 之后只读，故不受 mu 保护。
+	stagingPkgID string
+	stagingRoot  string
+}
+
+// GrantStagingAccess 让 packageID 的组件对 stagingRoot 可写。
+//
+// 这是【唯一】一条「某个包比别人多一个可写目录」的例外，因此做成显式注入而不是
+// 从别处推断：装包服务要在 nervud 分配的 staging 目录里解包，而 ProtectSystem=strict
+// 让整个文件系统只读。谁有这个例外必须在装配处一眼可见（main.go），不该藏在
+// 某个按 package_id 猜测的条件里。
+//
+// 必须在 Start 之前调用。
+func (m *Manager) GrantStagingAccess(packageID, stagingRoot string) {
+	m.stagingPkgID = packageID
+	m.stagingRoot = stagingRoot
 }
 
 // New 构造 Manager

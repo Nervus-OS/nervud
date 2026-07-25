@@ -56,6 +56,25 @@ func (s *Server) handleBeginStaging() adminwire.Response {
 		s.audit("admin.BeginStaging", "", true, err, "mkdir temp staging")
 		return failed("create staging dir: %v", err)
 	}
+
+	// 交给系统服务：目录建出来是 0700 属主 nervud（root），而解包由
+	// pkgmanagerd 以自己的 UID 做——不转交属主的话它连自己的 staging 都写不进，
+	// 装包在「解包」这一步以 permission denied 失败。
+	//
+	// 【先建后 chown 而不是反过来】：中间那一瞬间目录属 root、0700，谁也进不去。
+	// 反过来做没有「反过来」可言——建的时候就没有指定属主的手段。
+	//
+	// serviceUID 为 0 表示没有配置系统服务（或启动扫描时没查到）。那时只有
+	// root 会用这条通道（nervusctl），不需要转交。
+	if s.serviceUID != 0 {
+		// 本系统 Package 的 GID 恒等于 UID，与 socket chown 同一约定。
+		if err := os.Chown(dir, int(s.serviceUID), int(s.serviceUID)); err != nil {
+			_ = os.RemoveAll(dir) // 交不出去的 staging 是垃圾，别留下
+			s.audit("admin.BeginStaging", dir, true, err, "chown staging to service")
+			return failed("chown staging dir: %v", err)
+		}
+	}
+
 	s.audit("admin.BeginStaging", dir, false, nil, "")
 	return adminwire.Response{OK: true, Code: adminwire.CodeOK, StagingDir: dir}
 }

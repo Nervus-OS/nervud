@@ -112,6 +112,28 @@ func TestBeginStagingCreatesChildDir(t *testing.T) {
 	}
 }
 
+// staging 根必须是 0711：系统服务要能【穿过】它进到自己那个 stage-* 目录，
+// 但不该能【列出】里面有什么。
+//
+// startServer 故意用 0700 建它，模拟 preflight（或旧版本）留下的权限位——
+// Start 里只 MkdirAll 不 Chmod 的话，对已存在目录是 no-op，一台升级上来的
+// 机器会一直装不了包，而错误是 permission denied，看不出是根的权限位。
+func TestStart_StagingRootIsTraversable(t *testing.T) {
+	_, _, _, _, stagingRoot := startServer(t, uint32(os.Getuid()))
+
+	fi, err := os.Stat(stagingRoot)
+	if err != nil {
+		t.Fatalf("stat staging root: %v", err)
+	}
+	perm := fi.Mode().Perm()
+	if perm&0o001 == 0 {
+		t.Errorf("staging root mode = %04o, want others-executable so the service can traverse in", perm)
+	}
+	if perm&0o004 != 0 {
+		t.Errorf("staging root mode = %04o, want others NOT readable; the service must not enumerate other stagings", perm)
+	}
+}
+
 func TestInstallHappyPath(t *testing.T) {
 	client, pkgs, _, _, _ := startServer(t, uint32(os.Getuid()))
 	pkgs.installOut = pkgregistry.Entry{

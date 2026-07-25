@@ -352,6 +352,10 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// 外部进程（不再有运动指令源）、最后停 safety
 	svcMgr := service.New(auth, pkgReg, safetyTripAdapter{safetyMod}, aud, logger,
 		authority.DefaultInvariants())
+	// 装包服务额外可写 staging 根：nervud 在那底下给它建 stage-* 目录让它解包，
+	// 而沙箱的 ProtectSystem=strict 让整个文件系统只读。这是唯一一条这类例外，
+	// 放在装配处显式写出来，别处不再有第二个地方能给出可写路径。
+	svcMgr.GrantStagingAccess(pkgManagerPackageID, admin.DefaultStagingDir)
 	k.Register(svcMgr)
 
 	// Health 聚合器：现读 safety/control/service 三个权威源合成整机一句话健康档位。

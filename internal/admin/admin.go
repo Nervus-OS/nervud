@@ -207,8 +207,17 @@ func (s *Server) Start(context.Context) error {
 	// 兜底：开发机用 -dev-skip-preflight 起 nervud 时 preflight 不跑，装包仍要能用。
 	// MkdirAll 对已存在目录是 no-op（不改属主/权限），因此不与 preflight 的 squat
 	// 校验冲突 - 生产路径上 preflight 先跑并已校验过属主。
-	if err := os.MkdirAll(s.stagingRoot, 0o700); err != nil {
+	if err := os.MkdirAll(s.stagingRoot, 0o711); err != nil {
 		return fmt.Errorf("admin: ensure staging root %s: %w", s.stagingRoot, err)
+	}
+	// 0711 而不是 0700：系统服务要能【穿过】这个根进到自己那个 stage-* 目录里，
+	// 但不该能【列出】里面有什么——别的包的 staging 与它无关。
+	//
+	// 显式 Chmod 而不是只靠上面的 MkdirAll：MkdirAll 对已存在目录是 no-op，
+	// 而 preflight（或旧版本的本函数）建的是 0700。不改的话装包在一台升级上来
+	// 的机器上仍然失败，而失败信息是 permission denied，看不出是根的权限位。
+	if err := os.Chmod(s.stagingRoot, 0o711); err != nil {
+		return fmt.Errorf("admin: chmod staging root %s: %w", s.stagingRoot, err)
 	}
 
 	// 父目录（/run/nervus）由 systemd RuntimeDirectory + preflight 保证存在，

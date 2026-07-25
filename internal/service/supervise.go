@@ -285,6 +285,21 @@ func (m *Manager) backoffWait(backoff *time.Duration, inst *Instance) bool {
 // jvm：  ExecStart = 平台 JRE；-jar 指向包内 entry；-Djava.library.path 指向包内库。
 // 两种 runtime 的包内路径都进 ContainedPaths，由 authority.Validate 逐一核对在
 // PackageRoot 之内
+// readWritePaths 给出组件在 ProtectSystem=strict 下的可写路径集合。
+//
+// 默认只有自己的私有数据目录。装包服务额外要 staging 根：nervud 在那底下
+// 给它建 stage-* 目录让它解包，而 strict 让整个文件系统只读——不在这个列表里
+// 的话，即便属主与权限都对，写进去也是 read-only file system。
+//
+// 【权限与挂载是两道独立的门】。此前只做了属主那道，装包卡在这道上。
+func (m *Manager) readWritePaths(e pkgregistry.Entry, dataDir string) []string {
+	paths := []string{dataDir}
+	if m.stagingPkgID != "" && m.stagingRoot != "" && e.Manifest.PackageID == m.stagingPkgID {
+		paths = append(paths, m.stagingRoot)
+	}
+	return paths
+}
+
 func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, unit string) (authority.StartSandboxedProcessRequest, error) {
 	verDir := codeDir(m.inv, e)
 	dataDir := filepath.Join(m.inv.DataRoot, e.Manifest.PackageID)
@@ -302,7 +317,7 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 			CPUQuotaPercent: c.Limits.CPUQuotaPercent,
 			TasksMax:        uint64(c.Limits.TasksMax),
 		},
-		ReadWritePaths: []string{dataDir},
+		ReadWritePaths: m.readWritePaths(e, dataDir),
 		ReadOnlyPaths:  []string{verDir},
 		// 不能把整个 PackageRoot 设 InaccessiblePaths - 那会连组件自己的代码目录
 		// （verDir 在 PackageRoot 之下）一起隐藏，且 InaccessiblePaths 隐藏子目录后无法
