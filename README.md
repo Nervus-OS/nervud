@@ -51,26 +51,7 @@ go build ./... && go vet ./... && go test ./... && go test ./... -race
 
 按严重度排。每一条都在代码里有对应注释，grep 括号里的标记能找到位置。
 
-### 1. App UID 没有登记进系统用户库 ⚠ 会导致组件起不来
-
-`pkgregistry` 分配稳定 UID（20000–59999）并持久化进
-`/var/lib/nervus/registry/<pkg>.json`，`service` 让 systemd 以该 UID 起进程——
-但**中间没有任何一步把这个 UID 登记进 `/etc/passwd`**。
-
-systemd 的 `User=` 即便给数字 UID 也要求它能被 NSS 解析，否则 spawn 在
-`step USER` 失败，退出码 `217/USER`。**这意味着在一个没有预建这些用户的系统上，
-任何 Package 组件都起不来。**
-
-两条候选解法：
-
-| 方案 | 代价 |
-|---|---|
-| 合成 NSS 模块（Android AID_APP 段的做法） | 要写一个 NSS plugin 进镜像；干净，UID 段天然可解析，内核不必关心用户库 |
-| `authority` 分配 UID 时同步写 passwd | 简单，但把用户库管理拉进 TCB |
-
-在决定之前，镜像 provisioning 必须自己按 registry 里的记账建好对应用户。
-
-### 2. 权限执法整体短路（`V1GrantAll`）
+### 1. 权限执法整体短路（`V1GrantAll`）
 
 `permission.V1GrantAll = true` 让安装时「申请即授予」、运行期跳过用户确认。
 恢复执法要改回 `false` 并补齐 `DefaultCatalog`——权限 ID 的正式命名空间与取值表
@@ -80,7 +61,7 @@ systemd 的 `User=` 即便给数字 UID 也要求它能被 NSS 解析，否则 s
 与 `control/class.go` 的「不能接受客户端自报值」暂时不一致。
 `grep CONTROL_CLASS_SELF_REPORTED` 找全部位置。
 
-### 3. Safety 停机信号发不出去
+### 2. Safety 停机信号发不出去
 
 `safety.NopPath{}.SendHalt()` 直接 `return nil`，`NopReports{}.Reports()` 返回
 nil channel。判定、锁存、epoch 递增、Supervisor 三级超时全都在跑，
@@ -89,7 +70,7 @@ nil channel。判定、锁存、epoch 递增、Supervisor 三级超时全都在�
 `safety.proto` 的五条消息已冻结，缺的是承载方式的决定：走专用高优先级通道
 还是 Dispatch（该文件注释里标着「留待冻结」）。
 
-### 4. 三张硬编码常量表
+### 3. 三张硬编码常量表
 
 | 表 | 位置 |
 |---|---|
@@ -100,25 +81,25 @@ nil channel。判定、锁存、epoch 递增、Supervisor 三级超时全都在�
 `provider_descriptor.proto` 是替换它们的解药（从签名 Descriptor 数据驱动注册），
 但内核侧尚未接线。接线之前，加一款硬件仍然要改内核。
 
-### 5. operation 没有调用方
+### 4. operation 没有调用方
 
 `operation.Manager` 完整实现且有测试，但**零调用方**：Operation 查询在
 envelope.proto 里标着 `[v2+]`，dispatch 也不创建 operation。
 `LeaseValidator` 因此仍传 nil，运动类 operation 一律 fail-closed 拒绝。
 
-### 6. 内建 endpoint 传不出 typed error_detail
+### 5. 内建 endpoint 传不出 typed error_detail
 
 `endpoint.BuiltinHandler` 的签名是 `(payload, StatusCode)`，没地方放
 typed detail。`safety/builtin.go` 已经算出了 `WRONG_STATE`（别试了）与
 `STOP_NOT_SETTLED`（等一会儿）的区分，但传不到调用方。
 `grep TODO(builtin-detail)`。
 
-### 7. 审计没有防篡改
+### 6. 审计没有防篡改
 
 `audit` 仍是往 slog 写。`internal/audit/audit.go` 的 TODO 写着要换
 append-only 文件 + 轮转 + 完整性保护。
 
-### 8. 其它接缝
+### 7. 其它接缝
 
 - `health.New(safetyMod, ctl, nil)` —— 第三个观察者是 nil，因为
   `*service.Manager` 没实现 `Instances()`。补个方法就能接上

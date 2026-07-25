@@ -114,10 +114,12 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 		// 验签定 trust。缺 sig 或验不过 -> Ordinary（fail-closed），仍装载；
 		// 有效的 platform/oem 签名 -> 经 Arbitrate 给对应特权 trust
 		pkgTrust := identity.TrustOrdinary
+		var signerRoles []string
 		sigPath := filepath.Join(pkgDir, SignatureFileName)
 		if sigBytes, serr := os.ReadFile(sigPath); serr == nil {
 			if signers, verr := trust.VerifySignature(manifestBytes, sigBytes); verr == nil {
 				pkgTrust = Arbitrate(SourceSystemImage, signers)
+				signerRoles = signers.RoleStrings()
 			} else if log != nil {
 				log.Warn("pkgregistry: system package signature not verified; downgrading to Ordinary",
 					"package_id", m.PackageID, "err", verr)
@@ -136,6 +138,8 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 		if log != nil {
 			log.Info("pkgregistry: loaded system package", "package_id", m.PackageID, "version", m.Version, "trust", pkgTrust.String())
 		}
+		// GrantedPermissions 不在这里算：Scan 是纯函数（不持有 PermissionArbiter），
+		// 裁决由 Module.Start 调 arbitrateSystemGrants 完成。见 sysgrants.go。
 		entries = append(entries, Entry{
 			Manifest:      m,
 			ActiveVersion: m.Version,
@@ -143,6 +147,7 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 			UID:           uid,
 			Trust:         pkgTrust,
 			Source:        SourceSystemImage,
+			SignerRoles:   signerRoles,
 		})
 	}
 	return entries, skipped

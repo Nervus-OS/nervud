@@ -31,6 +31,14 @@ type Entry struct {
 	// scanDynamicInstalls）
 	GrantedPermissions []string
 
+	// SignerRoles 是本次验签认出的签名者角色（platform-release 等），供
+	// permission.Intersect 的 RequireSignerRole 判定。
+	//
+	// 只有系统镜像来源会填它，且【不持久化】：系统包每次启动扫描都重新验签
+	// （见 scanSystemImage），角色因此每次现算。动态安装路径在 Install 当时就
+	// 裁决完并把结果存进记账文件，重启只读回 GrantedPermissions，不需要角色。
+	SignerRoles []string
+
 	// DisabledComponents 是被停用的 Component ID 集合。
 	// 停用按 Component；服务生命周期与 IPC 握手据此拒绝该组件
 	DisabledComponents []string

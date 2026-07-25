@@ -101,6 +101,15 @@ func (m *Module) Start(_ context.Context) error {
 			"ok", n, "total", len(result.Entries))
 	}
 
+	// 系统镜像包的权限裁决。同样【必须在这里】：它们不走 Install，那条路径才是
+	// 调 Intersect 的地方。少了这一步，每个系统服务的 GrantedPermissions 都是
+	// nil，注册/解析 endpoint 一律被拒。见 sysgrants.go。
+	//
+	// 放在 Replace 之前：下面三条投影要把裁决结果一起推出去。
+	if n := m.arbitrateSystemGrants(context.Background(), result.Entries); m.log != nil && n > 0 {
+		m.log.Info("pkgregistry: arbitrated system package permissions", "packages", n)
+	}
+
 	if err := m.registry.Replace(result.Entries); err != nil {
 		return err
 	}
@@ -127,14 +136,12 @@ func projectIdentity(entries []Entry) []identity.Package {
 }
 
 // projectGrants 把 Registry 的全量状态投影成 permission.Registry 需要的
-// 瘦视图：只留 ID 与已授予权限集合。与 projectIdentity 同一原则：GrantedPermissions
-// 只在 Install 时裁决一次（见 install.go），这里只是把已经算好的结果投影出去，
-// 不重新调用 Intersect
+// 瘦视图：只留 ID 与已授予权限集合。与 projectIdentity 同一原则，这里只把已经
+// 算好的结果投影出去，不重新调用 Intersect
 //
-// 系统镜像来源的 Entry（scanSystemImage 产出）目前 GrantedPermissions 始终为
-// nil，因为 scanSystemImage 不经过 Install/Arbitrate，本阶段也未接入 Intersect。
-// 因此系统包在 v1 里还拿不到任何已注册权限，这是已知的 fail-closed 缺口，
-// 不是本函数遗漏投影字段
+// 裁决发生在两处，各自只跑一次：动态安装在 Install 当时（install.go，结果随
+// 记账文件持久化）；系统镜像在每次启动扫描（sysgrants.go，不持久化，因为签名
+// 每次都重验）
 func projectGrants(entries []Entry) []permission.Grant {
 	out := make([]permission.Grant, 0, len(entries))
 	for _, e := range entries {
