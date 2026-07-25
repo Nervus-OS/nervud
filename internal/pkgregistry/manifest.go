@@ -95,6 +95,13 @@ var (
 	// ErrInvalidLaunchMode Component.LaunchMode 取值非法
 	ErrInvalidLaunchMode = errors.New("pkgregistry: component has invalid launch_mode")
 
+	// ErrInvalidCapability Component.Capabilities 里有不认识的 capability 名。
+	// 见 privilege.go：白名单挡的是打字错误与注入，不是策略筛选
+	ErrInvalidCapability = errors.New("pkgregistry: component requests an unknown capability")
+
+	// ErrInvalidAddressFamily Component.AddressFamilies 里有不认识的地址族名
+	ErrInvalidAddressFamily = errors.New("pkgregistry: component requests an unknown address family")
+
 	// ErrLaunchModeTypeMismatch launch_mode 与 type 冲突：app 不能 always-on，
 	// service 不能 manual
 	ErrLaunchModeTypeMismatch = errors.New("pkgregistry: launch_mode incompatible with component type")
@@ -235,6 +242,50 @@ type Component struct {
 	Interfaces   []string        `json:"interfaces,omitempty"`       // 请求消费的接口 ID
 	IdleTimeout  int             `json:"idle_timeout_sec,omitempty"` // 仅 on-demand 有效
 	Limits       ComponentLimits `json:"limits,omitempty"`
+
+	// Privileged 是「把沙箱能给的都给这个组件」的总开关：展开成全部
+	// capability + 全部额外地址族 + 设备节点访问。
+	//
+	// 存在的理由是【它替代的东西更糟】。没有它，一个要驱动硬件的系统服务
+	// 得逐条列出自己需要哪些 capability——列漏一条的症状是运行期某个操作
+	// EPERM，而错误信息不会说是缺哪个 capability。于是实践中人们会去抄一份
+	// 更长的列表，最后每个包都带着一份没人看得懂的清单。一个诚实的
+	// "privileged": true 至少让 review 的人一眼知道这个包不受沙箱约束。
+	//
+	// 【它不等于 root】：进程仍以 App UID 运行、仍有 SystemCallFilter、
+	// ProtectSystem=strict 与各自的数据目录隔离。但拿到 CAP_SETUID 的进程
+	// 可以把自己变成 root，所以实际效果接近——按「这个包完全可信」来判断，
+	// 不要按「稍微多一点权限」。
+	//
+	// 与 Capabilities/AddressFamilies 同一条规则：【只有系统镜像来源的包
+	// 拿得到】。动态安装的包填了会被忽略。
+	Privileged bool `json:"privileged,omitempty"`
+
+	// Capabilities 是本组件请求的 Linux capability，如 "CAP_NET_ADMIN"。
+	//
+	// Privileged 为 true 时本字段不必填（会被全集覆盖）。想精确控制就填它，
+	// 那比 Privileged 好——但请确认列全了。
+	//
+	// 【只有系统镜像来源的包拿得到】。动态安装的包填了也会被 service 层忽略，
+	// 与 AllowDeviceAccess 同一条规则——把 capability 交给任意第三方包，
+	// 等于沙箱不存在。
+	//
+	// 为什么必须有这条口子：组件以 App UID（20000-59999）运行，非 root、
+	// 且沙箱不给任何 capability。驱动无线电（蓝牙 rfkill、hci up）、配置网络
+	// 这类操作因此一律 EPERM。而【不能改成让组件跑 root】——ipc 握手会
+	// CheckUID 拒绝 root 对端（internal/ipc/ipc.go），跑 root 的组件根本连不上
+	// 控制面。capability 是唯一不破坏身份模型的路。
+	Capabilities []string `json:"capabilities,omitempty"`
+
+	// AddressFamilies 是本组件请求额外放行的 socket 地址族，如 "AF_BLUETOOTH"。
+	//
+	// 与 Capabilities 分开是因为它们是【两道互不相干的墙】：
+	// RestrictAddressFamilies 是 seccomp 层的，再多 capability 也绕不过去——
+	// socket(AF_BLUETOOTH, ...) 会直接 EAFNOSUPPORT。只给 capability 不给
+	// 地址族，蓝牙一样打不开，而错误看起来像「协议不支持」，与权限毫无关系。
+	//
+	// 同样只有系统镜像来源的包拿得到。
+	AddressFamilies []string `json:"address_families,omitempty"`
 }
 
 // Manifest 是 manifest.json 的解析结果
@@ -388,6 +439,11 @@ func (m Manifest) validate() error {
 		}
 		if c.NativeLibDir != "" && !validRelPath(c.NativeLibDir) {
 			return fmt.Errorf("%w: component %q native_lib_dir %q", ErrUnsafeRelPath, c.ID, c.NativeLibDir)
+		}
+		// capability 与地址族的名字会原样进 systemd 的 unit 属性，必须先过白名单。
+		// 见 privilege.go
+		if err := validateComponentPrivileges(c); err != nil {
+			return err
 		}
 	}
 

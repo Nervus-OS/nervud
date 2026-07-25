@@ -390,6 +390,30 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		AllowDeviceAccess: e.Source == pkgregistry.SourceSystemImage,
 	}
 
+	// Linux 层特权：capability 与额外 socket 地址族。
+	//
+	// 【只给系统镜像来源的包】，与 AllowDeviceAccess 同一条规则。动态安装的包
+	// 即便在 manifest 里填了也拿不到——把 capability 交给任意第三方包等于沙箱
+	// 不存在，而这条判断【必须在内核里做】：manifest 是包自己写的，不能让它
+	// 自称有资格。
+	//
+	// 静默忽略而不是拒绝装载：一个第三方包声明了 CAP_NET_ADMIN 不该让整个包
+	// 装不上，它只是拿不到而已。真要用到那个能力时它会在运行期 EPERM，
+	// 那个失败点比装不上更贴近问题。
+	if e.Source == pkgregistry.SourceSystemImage {
+		req.AmbientCapabilities = pkgregistry.EffectiveCapabilities(c)
+		req.ExtraAddressFamilies = pkgregistry.EffectiveAddressFamilies(c)
+		// 授予特权是要留痕的事。审计里记下具体给了什么，而不只是「起了个进程」——
+		// 事后追一个包为什么能碰硬件时，这一行是唯一的线索
+		if len(req.AmbientCapabilities) > 0 || len(req.ExtraAddressFamilies) > 0 {
+			m.aud.Record(context.Background(), audit.Event{
+				Action:  "service.GrantLinuxPrivileges",
+				Subject: e.Manifest.PackageID + "/" + c.ID,
+				Detail:  pkgregistry.DescribePrivileges(req.AmbientCapabilities, req.ExtraAddressFamilies),
+			})
+		}
+	}
+
 	// 图形界面组件的额外接线。判据用 type == app：内核里 app 与 service 的区别
 	// 就是"有没有界面"（app 由 Launcher 点开，service 在后台跑），不需要再往
 	// manifest 里加一个 gui 标志让人多填一处、还可能填错

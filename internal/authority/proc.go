@@ -81,6 +81,21 @@ type StartSandboxedProcessRequest struct {
 	// 不接受来自 manifest 的任意路径——否则一个包就能把宿主任意目录挂进自己
 	// 的命名空间。
 	BindReadOnlyPaths []string
+
+	// AmbientCapabilities 是要授予该组件的 Linux capability 名（如 CAP_NET_ADMIN）。
+	//
+	// 组件以 App UID 运行、非 root，默认拿不到任何 capability——驱动无线电、
+	// 配置网络这类操作因此一律 EPERM。名字的合法性由 pkgregistry 的白名单保证
+	// （privilege.go），Gate 只如实转发：与 AllowDeviceAccess 同理，
+	// 「谁配拿到它」是调用方的策略，Gate 守的是不变量。
+	AmbientCapabilities []string
+
+	// ExtraAddressFamilies 是在基线（AF_UNIX/AF_INET/AF_INET6）之外额外放行的
+	// socket 地址族。
+	//
+	// 与 capability 是【两道互不相干的墙】：RestrictAddressFamilies 在 seccomp 层，
+	// 再多 capability 也绕不过去。
+	ExtraAddressFamilies []string
 }
 
 func (StartSandboxedProcessRequest) Kind() Kind { return KindStartSandboxedProcess }
@@ -159,11 +174,13 @@ func (g *Gate) osStartSandboxedProcess(ctx context.Context, req StartSandboxedPr
 			TasksMax:        req.Limits.TasksMax,
 		},
 		Sandbox: systemd.Sandbox{
-			ReadWritePaths:    req.ReadWritePaths,
-			ReadOnlyPaths:     req.ReadOnlyPaths,
-			InaccessiblePaths: req.InaccessiblePaths,
-			AllowDeviceAccess: req.AllowDeviceAccess,
-			BindReadOnlyPaths: req.BindReadOnlyPaths,
+			ReadWritePaths:       req.ReadWritePaths,
+			ReadOnlyPaths:        req.ReadOnlyPaths,
+			InaccessiblePaths:    req.InaccessiblePaths,
+			AllowDeviceAccess:    req.AllowDeviceAccess,
+			BindReadOnlyPaths:    req.BindReadOnlyPaths,
+			AmbientCapabilities:  req.AmbientCapabilities,
+			ExtraAddressFamilies: req.ExtraAddressFamilies,
 		},
 	}
 	if err := g.spawner.StartTransientUnit(ctx, spec); err != nil {

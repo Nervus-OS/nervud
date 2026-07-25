@@ -87,6 +87,24 @@ type Sandbox struct {
 	// 组件应当照常启动然后自己失败，而不是连 unit 都拉不起来 ——
 	// 后者在 systemd 层报错，排查时根本看不到是哪个组件要图形界面。
 	BindReadOnlyPaths []string
+
+	// AmbientCapabilities 是授予该 unit 的 Linux capability 名。
+	//
+	// 【为什么 Ambient 而不是 Bounding】：进程以非 root 的 User= 运行，
+	// 普通的 permitted/effective 集在 execve 后会被清空（非 root 且二进制没有
+	// file capability）。Ambient 集是唯一能跨 execve 保留、并在非 root 身份上
+	// 生效的途径——systemd 在降权之前 raise 它们。
+	//
+	// 同时下发 CapabilityBoundingSet：bounding 集是 ambient 的上界，不设的话
+	// systemd 的缺省 bounding 集可能不含要授予的 cap，ambient raise 会失败，
+	// 而 unit 照常启动、只是没有那个能力——症状是运行期 EPERM，跟没配一样。
+	AmbientCapabilities []string
+
+	// ExtraAddressFamilies 是在基线之外额外放行的 socket 地址族。
+	//
+	// 基线（AF_UNIX/AF_INET/AF_INET6）无条件给所有组件，见 BuildProperties。
+	// 蓝牙的 AF_BLUETOOTH、CAN 总线的 AF_CAN 走这里。
+	ExtraAddressFamilies []string
 }
 
 // UnitSpec 是一次 StartTransientUnit 的完整输入
@@ -215,8 +233,32 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 		// SystemCallFilter=@system-service（whitelist）已排除 @mount/@module/@raw-io/
 		// @privileged/@debug
 		{"SystemCallFilter", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"@system-service"}})},
-		// 仅允许 UNIX/INET/INET6：堵住 raw/packet socket 等
-		{"RestrictAddressFamilies", dbus.MakeVariant(restrictSet{Whitelist: true, Values: []string{"AF_UNIX", "AF_INET", "AF_INET6"}})},
+	}
+
+	// 地址族：基线 UNIX/INET/INET6 堵住 raw/packet socket 等；组件可按 manifest
+	// 声明追加（蓝牙的 AF_BLUETOOTH、CAN 的 AF_CAN）。
+	//
+	// 【这道墙与 capability 无关】：它在 seccomp 层，socket(AF_BLUETOOTH, ...)
+	// 不在白名单里就是 EAFNOSUPPORT，进程即便有 CAP_NET_ADMIN 也一样。
+	families := append([]string{"AF_UNIX", "AF_INET", "AF_INET6"}, spec.Sandbox.ExtraAddressFamilies...)
+	props = append(props, property{
+		"RestrictAddressFamilies",
+		dbus.MakeVariant(restrictSet{Whitelist: true, Values: families}),
+	})
+
+	// Capability：ambient + bounding 一起下发。
+	//
+	// 只在非空时下发：空集时保持 systemd 对非 root User= 的缺省行为（无能力），
+	// 显式下发一个空的 CapabilityBoundingSet 反而会写成 unit 属性，让
+	// systemctl show 的输出与「什么都没配」区分不开。
+	if len(spec.Sandbox.AmbientCapabilities) > 0 {
+		caps := append([]string(nil), spec.Sandbox.AmbientCapabilities...)
+		props = append(props,
+			// bounding 必须先于/同时给出：它是 ambient 的上界，缺了 ambient
+			// raise 会静默失败，unit 照常起来但没有那个能力
+			property{"CapabilityBoundingSet", dbus.MakeVariant(caps)},
+			property{"AmbientCapabilities", dbus.MakeVariant(caps)},
+		)
 	}
 
 	// 设备访问：默认（AllowDeviceAccess=false）保持原来的两条硬项不变；
