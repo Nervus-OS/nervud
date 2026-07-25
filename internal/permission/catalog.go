@@ -195,6 +195,21 @@ func DefaultCatalog() Catalog {
 			RequireSignerRole: "platform-release",
 			Description:       "Clear the safety latch and re-allow motion (platform-release signer only)",
 		},
+		{
+			// 装包/卸载。调用 nervus.interface.pkg.manager 的门槛。
+			//
+			// 【为什么必须有这一条】：endpoint 的 Resolve 在接口目录里查不到
+			// 条目时 requiredPermission 取空串，也就是【不设门槛】。没有它，
+			// 任意一个 Ordinary 应用都能解析到 pkgmanagerd 并让它装包——
+			// 装包是能往系统里放任意可执行文件的操作，那是提权。
+			//
+			// GrantUser 而不是 GrantInstall：装第三方软件这件事，用户必须
+			// 当场知情。Android 的 REQUEST_INSTALL_PACKAGES 是同一判断。
+			ID:          "perm.pkg.install",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantUser,
+			Description: "Install and uninstall packages (dangerous; requires user confirmation)",
+		},
 	})
 	if err != nil {
 		// 硬编码表必须自洽；如果连这里都校验不过，说明代码本身有 bug，

@@ -57,5 +57,13 @@ func DefaultInterfaceCatalog() InterfaceCatalog {
 		// 取严不取松：让一个只想读状态的包暂时也需要 rearm 权限，代价是它读不到；
 		// 反过来取松，一个只该读状态的包就能解开停机锁存。
 		{InterfaceID: "nervus.interface.safety.control", RequiredPermission: "perm.safety.rearm"},
+		// 装包接口。由 nervus.pkgmanagerd 实现（本仓库之外，见
+		// nervus-system-server）。
+		//
+		// 【漏登记这一条是提权】：下面 Resolve 的 Lookup 未命中时
+		// requiredPermission 取空串，即不设门槛——任意 Ordinary 应用都能解析到
+		// pkgmanagerd 并让它把任意 .nspkg 装进系统。目录缺条目在这里不是
+		// fail-closed 而是 fail-open，凡新增标准接口必须同步登记。
+		{InterfaceID: "nervus.interface.pkg.manager", RequiredPermission: "perm.pkg.install"},
 	})
 }
