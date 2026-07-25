@@ -246,6 +246,21 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		}
 	}()
 
+	// 系统用户必须【每次安装都确保】，不能只在 !hadPrev 时做。
+	//
+	// 它与数据目录不同：数据目录是本机状态，建了就一直在；而 /etc/passwd 可能
+	// 被镜像 OTA 换掉、被运维手工清理，或者这个包本来就是在别处装好后随
+	// 记账文件恢复过来的。EnsureAppUser 幂等（条目在就什么都不做），无条件调
+	// 的成本是一次文件读，漏调的代价是这个包的组件永远起不来（217/USER）。
+	//
+	// 【放在数据目录之前】：目录的属主是这个 UID，用户先在，属主才是有名字的。
+	if err := m.auth.EnsureAppUser(ctx, subj, authority.EnsureAppUserRequest{
+		UID: uid, GID: uid, Name: authority.AppUserName(uid),
+	}); err != nil {
+		m.auditInstall(ctx, tx, false, err)
+		return Entry{}, err
+	}
+
 	// 私有数据目录是 per-package（不是 per-version），升级不动它 - 它在首次
 	// 安装时创建，跨升级保留。升级时若无条件再建一次，Linux mkdirat 会 EEXIST
 	// 失败、拖垮整条升级（ops.go 的 osCreateDataDir）。因此只在全新安装时创建

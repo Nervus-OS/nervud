@@ -401,6 +401,76 @@ func newProvisionModule(t *testing.T, auth *fakeInstaller) *Module {
 		filepath.Join(dir, "packages"), filepath.Join(dir, "data"))
 }
 
+// 动态安装也必须建系统用户。
+//
+// 这条曾经漏过：install.go 在 PackageInstaller 接口里声明了 EnsureAppUser，
+// 却一次都没调，只建了数据目录。装出来的包因此没有 passwd 条目，它的组件
+// 第一次启动就 217/USER。
+//
+// 没有立刻暴露，是因为端到端验证用的 fixture 是 launch_mode: "manual"，
+// 没人去启动它。换成 always-on 立刻就炸。
+func TestInstall_EnsuresAppUser(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	staging, manifestBytes, sig := newValidStaging(t, root, "com.example.app", "1.0.0")
+
+	entry, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes,
+		SigBlock:      sig,
+		StagingDir:    staging,
+		Source:        SourceDynamicInstall,
+	})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if len(auth.appUsers) != 1 {
+		t.Fatalf("EnsureAppUser 调用了 %d 次, want 1", len(auth.appUsers))
+	}
+	u := auth.appUsers[0]
+	if u.UID != entry.UID || u.GID != entry.UID {
+		t.Errorf("uid/gid = %d/%d, want %d/%d（GID 恒等于 UID）", u.UID, u.GID, entry.UID, entry.UID)
+	}
+	if u.Name != authority.AppUserName(entry.UID) {
+		t.Errorf("name = %q, want %q", u.Name, authority.AppUserName(entry.UID))
+	}
+}
+
+// 升级路径【也要】确保用户存在，不能跟数据目录一样只在首次安装时做。
+//
+// 数据目录是本机状态，建了就一直在；/etc/passwd 则可能被镜像 OTA 换掉、
+// 被运维清理，或者这个包本来就是随记账文件从别处恢复过来的。EnsureAppUser
+// 幂等，无条件调的成本是一次文件读。
+func TestInstall_EnsuresAppUserOnUpgradeToo(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+
+	// 两次安装必须用【同一把开发者密钥】：升级要求签名者是已装版本血统的
+	// 后继者，换把新钥匙就是身份劫持，内核会拒（这条判断是对的，别绕过它）。
+	key := newDevKey(t)
+	for i, ver := range []string{"1.0.0", "1.0.1"} {
+		staging, manifestBytes, sig := newValidStagingWithKey(
+			t, root, "com.example.app", ver, uint64(100+i), key)
+		if _, err := mod.Install(context.Background(), InstallTransaction{
+			ManifestBytes: manifestBytes,
+			SigBlock:      sig,
+			StagingDir:    staging,
+			Source:        SourceDynamicInstall,
+		}); err != nil {
+			t.Fatalf("Install %s: %v", ver, err)
+		}
+	}
+
+	if len(auth.appUsers) != 2 {
+		t.Errorf("EnsureAppUser 调用了 %d 次, want 2（每次安装都确保）", len(auth.appUsers))
+	}
+	// 数据目录反过来：per-package 不是 per-version，升级不该再建一次，
+	// 否则 mkdirat 会 EEXIST 失败、拖垮整条升级。
+	if len(auth.dataDirs) != 1 {
+		t.Errorf("CreatePrivateDataDirectory 调用了 %d 次, want 1（升级不重建）", len(auth.dataDirs))
+	}
+}
+
 func TestProvision_CreatesUserAndDataDir(t *testing.T) {
 	// 系统镜像包走 scanSystemImage，那条路径分配 UID、登记 Entry，却从不建
 	// 用户也不建数据目录。缺前者 systemd 在 step USER 失败（217/USER），
