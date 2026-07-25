@@ -156,6 +156,19 @@ func DefaultCatalog() Catalog {
 			Mode:        GrantInstall,
 			Description: "Read/write the shared user documents area",
 		},
+		// 启动别的组件（Envelope 的 LaunchComponent(80)）。Launcher 与会话服务
+		// 需要它。
+		//
+		// MinTrust 取 Platform：这不是普通应用该有的能力。能任意拉起组件意味着
+		// 能绕过 on-demand 的节能语义（把所有服务全拉起来耗电），也能把一个刚被
+		// 用户停用又启用的组件立刻拉起。给它 Platform 门槛，等于「只有随系统镜像
+		// 发布、平台签名的包」才拿得到——第三方装的 Launcher 拿不到。
+		{
+			ID:          "perm.system.launch",
+			MinTrust:    identity.TrustPlatform,
+			Mode:        GrantInstall,
+			Description: "Launch other installed components (launcher / session manager)",
+		},
 		// GrantUser 危险权限示例：安装只给可请求，实际访问需运行期用户确认、可撤销
 		{
 			ID:          "perm.camera.capture",

@@ -164,6 +164,10 @@ type Config struct {
 	// 与 Endpoints 为 nil 时的降级同一形态。
 	Leases ControlLeases
 
+	// Launcher 把 LaunchComponent 接到 internal/service 的 EnsureStarted。
+	// 由 *service.Manager 隐式满足；为 nil 时该 body 回 UNAVAILABLE。
+	Launcher ComponentLauncher
+
 	// Resources 把 AcquireControl 的 ResourceSelector 解析成 resource_handle。
 	// 为 nil 时只认协议规定的隐式默认（BaseMotion 的 base.main）。
 	Resources ResourceResolver
@@ -243,6 +247,7 @@ type Server struct {
 	components ComponentResolver
 	endpoints  EndpointResolver
 	leases     ControlLeases
+	launcher   ComponentLauncher
 	resources  ResourceResolver
 	limits     Limits
 
@@ -331,6 +336,7 @@ func New(cfg Config) (*Server, error) {
 		components:               cfg.Components,
 		endpoints:                cfg.Endpoints,
 		leases:                   cfg.Leases,
+		launcher:                 cfg.Launcher,
 		resources:                cfg.Resources,
 		limits:                   normalizeLimits(cfg.Limits),
 		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
@@ -1049,6 +1055,17 @@ type ControlLeases interface {
 	RevokeConn(conn control.ConnID)
 }
 
+// ComponentLauncher 是 ipc 对 internal/service 的窄接口依赖：拉起一个组件，
+// 并回答它此刻在不在跑。*service.Manager 隐式满足。
+//
+// 与 ComponentResolver（unit → 组件的反查，握手时核对身份用）分成两个接口：
+// 两者的调用时机、失败后果与所需权限都不同，合成一个只会让「谁需要什么」
+// 变模糊。
+type ComponentLauncher interface {
+	EnsureStarted(ctx context.Context, pkg, comp string) error
+	IsRunning(pkg, comp string) bool
+}
+
 // ResourceResolver 是 ipc 对 internal/resource 的窄接口依赖：把 (type, role)
 // 解析成 resource_handle。
 type ResourceResolver interface {
@@ -1089,6 +1106,25 @@ func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, bool
 // 见 lease.go 里同名说明：v1 因为 permission.V1GrantAll 已经把权限执法整体
 // 短路了，此刻加 class 门槛只是做样子。审计留痕，让这段时间里「谁声称自己是
 // HUMAN」这件事至少是可追溯的。
+// auditLaunch 记一条成功的组件启动。
+//
+// 启动别的组件是一个跨 Package 的动作，审计里必须能回答「谁把它拉起来的」——
+// 排查一个不该在跑的组件时，这是第一个要看的地方。
+func (s *Server) auditLaunch(caller identity.Caller, pkg, comp string, alreadyRunning bool) {
+	if s.auditor == nil {
+		return
+	}
+	detail := "target=" + pkg + "/" + comp
+	if alreadyRunning {
+		detail += " already_running=true"
+	}
+	s.auditor.Record(context.Background(), audit.Event{
+		Action:  "ipc.LaunchComponent",
+		Subject: caller.PackageID,
+		Detail:  detail,
+	})
+}
+
 func (s *Server) auditLeaseClass(caller identity.Caller, class control.Class, resource string) {
 	if s.auditor == nil {
 		return

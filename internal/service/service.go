@@ -13,6 +13,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -263,8 +264,44 @@ func (m *Manager) LookupByUnit(unit string) (Instance, bool) {
 	return inst.snapshot(), true
 }
 
-// EnsureStarted 在 endpoint 解析到 on-demand 组件时拉起它。
-// 已在运行则幂等返回
+// 启动失败的哨兵错误。
+//
+// 用哨兵而不是只有错误字符串：调用方（ipc 的 LaunchComponent 接线）要把失败
+// 原因映射成 wire 上的 typed reason，好让 Launcher 区分「没这个应用」和
+// 「应用被停用了」——后者应当提示用户去设置里启用，前者不该。
+// 靠匹配错误字符串做这件事，会在有人改一句措辞时静默失效。
+var (
+	// ErrUnknownPackage 目标 Package 未安装
+	ErrUnknownPackage = errors.New("service: unknown package")
+	// ErrUnknownComponent Package 存在但没有该 Component
+	ErrUnknownComponent = errors.New("service: unknown component")
+	// ErrComponentDisabled 组件被停用（nervusctl disable 或 manifest 声明）
+	ErrComponentDisabled = errors.New("service: component disabled")
+	// ErrComponentFailed 组件已耗尽重启预算被熔断。
+	//
+	// 【EnsureStarted 目前不会返回它】：熔断只停止自动重启，显式请求仍允许
+	// 重试（见 EnsureStarted 里的说明）。保留它是因为 wire 上
+	// LAUNCH_COMPONENT_REASON_COMPONENT_FAILED 这个 reason 已经冻结，
+	// 将来若改成"熔断后拒绝显式拉起"，映射不用再动。
+	ErrComponentFailed = errors.New("service: component failed (restart budget exhausted)")
+)
+
+// IsRunning 报告某组件此刻是否在跑（含正在启动）。
+//
+// 供 LaunchComponent 回答 already_running。它是一个瞬时快照，返回后状态随时
+// 可能变——调用方不该用它做「先查再启动」的判断，那是 TOCTOU；EnsureStarted
+// 本身就幂等，直接调即可，这个值只用于告知。
+func (m *Manager) IsRunning(pkg, comp string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.byKey[componentKey{pkg, comp}]
+	return ok && (inst.State == StateRunning || inst.State == StateStarting)
+}
+
+// EnsureStarted 拉起一个组件；已在运行则幂等返回。
+//
+// 两个调用方：endpoint.Resolve 解析到 on-demand 提供者时，以及 ipc 的
+// LaunchComponent（Launcher 点开一个 App）。
 func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -275,20 +312,24 @@ func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
 			return nil // 幂等
 		}
 		if inst.State == StateDisabled {
-			return fmt.Errorf("service: component %s/%s is disabled", pkg, comp)
+			return fmt.Errorf("%w: %s/%s", ErrComponentDisabled, pkg, comp)
 		}
+		// StateFailed（熔断）【不】在这里拦：重启预算挡的是"自动无限重启"，
+		// 而 EnsureStarted 的两个调用方都是显式动作——用户点图标，或有人
+		// Resolve 了这个接口。人主动重试一次该被允许，否则一个组件崩过五次
+		// 之后就永远打不开了，只能重启整机。见 TestEnsureStarted_RestartsAfterCircuitBreak
 	}
 
 	e, ok := m.pkgs.Lookup(pkg)
 	if !ok {
-		return fmt.Errorf("service: unknown package %q", pkg)
+		return fmt.Errorf("%w: %q", ErrUnknownPackage, pkg)
 	}
 	c, ok := e.Manifest.Component(comp)
 	if !ok {
-		return fmt.Errorf("service: package %q has no component %q", pkg, comp)
+		return fmt.Errorf("%w: %q has no component %q", ErrUnknownComponent, pkg, comp)
 	}
 	if e.ComponentDisabled(comp) {
-		return fmt.Errorf("service: component %s/%s is disabled", pkg, comp)
+		return fmt.Errorf("%w: %s/%s", ErrComponentDisabled, pkg, comp)
 	}
 	m.startLocked(e, c)
 	return nil

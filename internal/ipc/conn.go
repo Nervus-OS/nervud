@@ -371,6 +371,9 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 	case *ipcv1.Envelope_ReleaseControl:
 		return co.handleReleaseControl(body.ReleaseControl)
 
+	case *ipcv1.Envelope_LaunchComponent:
+		return co.handleLaunchComponent(body.LaunchComponent)
+
 	case *ipcv1.Envelope_Hello:
 		// 握手已完成，再来一个 Hello 是非法握手状态
 		co.log.Warn("ipc: duplicate Hello after handshake, closing")
@@ -391,6 +394,7 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		*ipcv1.Envelope_Dispatch,
 		*ipcv1.Envelope_CancelDispatch,
 		*ipcv1.Envelope_AcquireControlResult,
+		*ipcv1.Envelope_LaunchComponentResult,
 		*ipcv1.Envelope_ReleaseControlResult:
 		// 全是 nervud -> 对端方向的 body：响应（HelloAck/*Result/Response）、推送
 		// （Event/EndpointDied/EndpointRevoked/SubscriptionClosed）、以及 nervud 派发

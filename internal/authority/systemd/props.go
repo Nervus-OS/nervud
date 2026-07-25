@@ -71,6 +71,22 @@ type Sandbox struct {
 	// 其余沙箱硬项（NoNewPrivileges / ProtectSystem=strict / SystemCallFilter /
 	// RestrictAddressFamilies ...）不受本开关影响，仍然无条件生效。
 	AllowDeviceAccess bool
+
+	// BindReadOnlyPaths 把宿主上的路径【绑定挂载】进 unit 的挂载命名空间（只读）。
+	//
+	// 存在的直接原因是图形界面：PrivateTmp=true 给组件一个私有 /tmp，而 X11
+	// 客户端要通过 /tmp/.X11-unix/X<n> 这个 unix socket 连显示服务器 ——
+	// 私有 /tmp 里没有那个目录，于是任何 GUI 组件都以
+	// 「Can't connect to X11 window server」启动失败，报错和沙箱看不出关系。
+	//
+	// 绑定挂载在 PrivateTmp 之后生效，所以能把宿主的 X11 socket 目录送回
+	// 私有 /tmp 里，同时保留「组件之间 /tmp 互相隔离」这条性质 ——
+	// 比直接关掉 PrivateTmp 精确得多。
+	//
+	// 只读、且 ignore_enoent：无头启动（没有 X 服务器）时路径不存在，
+	// 组件应当照常启动然后自己失败，而不是连 unit 都拉不起来 ——
+	// 后者在 systemd 层报错，排查时根本看不到是哪个组件要图形界面。
+	BindReadOnlyPaths []string
 }
 
 // UnitSpec 是一次 StartTransientUnit 的完整输入
@@ -111,6 +127,18 @@ type execStartItem struct {
 type restrictSet struct {
 	Whitelist bool
 	Values    []string
+}
+
+// bindPath 对应 BindPaths / BindReadOnlyPaths 的 D-Bus 类型 a(ssbt)：
+// 源路径、目标路径、路径不存在时是否忽略、mount flags。
+//
+// MountFlags 取 0（等价 MS_NONE，非递归）。X11 socket 目录下没有嵌套挂载，
+// 不需要 MS_REC；用 0 是最小权限，避免把宿主上恰好挂在该路径下的东西一并带进去。
+type bindPath struct {
+	Source       string
+	Destination  string
+	IgnoreENOENT bool
+	MountFlags   uint64
 }
 
 // validateSpec 做发起 D-Bus 前的本地白名单校验（本地白名单校验，不接受调用方
@@ -224,6 +252,18 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 	}
 	if len(spec.Sandbox.InaccessiblePaths) > 0 {
 		props = append(props, property{"InaccessiblePaths", dbus.MakeVariant(spec.Sandbox.InaccessiblePaths)})
+	}
+	if len(spec.Sandbox.BindReadOnlyPaths) > 0 {
+		binds := make([]bindPath, 0, len(spec.Sandbox.BindReadOnlyPaths))
+		for _, p := range spec.Sandbox.BindReadOnlyPaths {
+			// 源与目标同路径：目的是"把宿主的这个路径原样送进命名空间"，
+			// 而不是改变它在组件眼里的位置。换位置只会让组件里的绝对路径
+			// （X11 的 /tmp/.X11-unix 是写死在客户端库里的）对不上
+			binds = append(binds, bindPath{
+				Source: p, Destination: p, IgnoreENOENT: true, MountFlags: 0,
+			})
+		}
+		props = append(props, property{"BindReadOnlyPaths", dbus.MakeVariant(binds)})
 	}
 
 	// ---- 资源上限（零值不设）----

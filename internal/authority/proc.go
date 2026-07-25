@@ -72,6 +72,15 @@ type StartSandboxedProcessRequest struct {
 	// Package 来源判定的策略，Gate 只负责把它如实翻给 systemd。Gate 守的是
 	// 不变量（路径包含、UID 区段），不是策略。
 	AllowDeviceAccess bool
+	// BindReadOnlyPaths 只读绑定挂载进组件命名空间的宿主路径。
+	// 语义与约束见 systemd.Sandbox.BindReadOnlyPaths（当前唯一用途是把
+	// X11 socket 目录送进 PrivateTmp 之后的私有 /tmp）。
+	//
+	// 【不】走 CheckContained：这些路径按定义就在 PackageRoot/DataRoot 之外，
+	// 那正是绑定挂载存在的理由。取值由 service.Manager 从固定清单给出，
+	// 不接受来自 manifest 的任意路径——否则一个包就能把宿主任意目录挂进自己
+	// 的命名空间。
+	BindReadOnlyPaths []string
 }
 
 func (StartSandboxedProcessRequest) Kind() Kind { return KindStartSandboxedProcess }
@@ -154,6 +163,7 @@ func (g *Gate) osStartSandboxedProcess(ctx context.Context, req StartSandboxedPr
 			ReadOnlyPaths:     req.ReadOnlyPaths,
 			InaccessiblePaths: req.InaccessiblePaths,
 			AllowDeviceAccess: req.AllowDeviceAccess,
+			BindReadOnlyPaths: req.BindReadOnlyPaths,
 		},
 	}
 	if err := g.spawner.StartTransientUnit(ctx, spec); err != nil {

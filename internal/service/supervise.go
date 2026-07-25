@@ -8,6 +8,7 @@ package service
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -38,7 +39,38 @@ const (
 	// permStorageUser 是访问共享用户文档区（Invariants.UserDataRoot）所需的权限。
 	// 与 permission.DefaultCatalog 里的条目【必须同名】——那边是定义，这边是执法点
 	permStorageUser = "perm.storage.user"
+
+	// x11SocketDir 是 X11 显示服务器的 unix socket 目录。
+	//
+	// 路径写死是对的：它由 X11 协议实现（libxcb / libX11）硬编码，客户端不读
+	// 任何配置就去连 /tmp/.X11-unix/X<display>。这里换个位置只会让客户端找不到。
+	x11SocketDir = "/tmp/.X11-unix"
+
+	// defaultDisplay 是 DISPLAY 未在 nervud 环境里给出时的取值。
+	// 机器人是单显示设备，:0 是唯一合理的缺省
+	defaultDisplay = ":0"
 )
+
+// displayEnv 给图形组件准备 DISPLAY / XAUTHORITY。
+//
+// 取值透传自 nervud 自己的环境（由 systemd unit 或镜像的 environment 文件给出），
+// 而不是写死：接了外接屏、跑在 WSLg、或用 Wayland 的 Xwayland 时 DISPLAY 都不同，
+// 写死等于把部署形态钉进内核。DISPLAY 缺失时退回 :0 —— 一个能工作的缺省，
+// 比让组件带着空 DISPLAY 启动再报一句难懂的错强。
+//
+// XAUTHORITY 只在 nervud 环境里确实有时才传：传一个指向不存在文件的路径，
+// X11 客户端会拒绝连接，比不传更糟（不传时会走 no-auth 或 XDG 缺省查找）。
+func displayEnv() []string {
+	display := os.Getenv("DISPLAY")
+	if display == "" {
+		display = defaultDisplay
+	}
+	env := []string{"DISPLAY=" + display}
+	if xauth := os.Getenv("XAUTHORITY"); xauth != "" {
+		env = append(env, "XAUTHORITY="+xauth)
+	}
+	return env
+}
 
 // unitName 由 (pkg, comp) 生成 systemd 瞬态 unit 名。pkg/comp 的字符集都禁止 '-'
 // （manifest.validIDSegment），因此 "nervus-<pkg>-<comp>.service" 对不同组件唯一、
@@ -358,6 +390,20 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		AllowDeviceAccess: e.Source == pkgregistry.SourceSystemImage,
 	}
 
+	// 图形界面组件的额外接线。判据用 type == app：内核里 app 与 service 的区别
+	// 就是"有没有界面"（app 由 Launcher 点开，service 在后台跑），不需要再往
+	// manifest 里加一个 gui 标志让人多填一处、还可能填错
+	if c.Type == pkgregistry.ComponentApp {
+		req.BindReadOnlyPaths = append(req.BindReadOnlyPaths, x11SocketDir)
+		req.Env = append(req.Env, displayEnv()...)
+		// XAUTHORITY 指向的 cookie 文件通常在 root/用户 home 下，而 ProtectHome=yes
+		// 让那两处完全不可访问。只传环境变量不把文件送进去，组件会拿着一个
+		// 打不开的路径去连 X，报「No protocol specified」——比不设更难查
+		if xauth := os.Getenv("XAUTHORITY"); xauth != "" {
+			req.BindReadOnlyPaths = append(req.BindReadOnlyPaths, xauth)
+		}
+	}
+
 	var nativeLibDir string
 	if c.NativeLibDir != "" {
 		nativeLibDir = filepath.Join(verDir, c.NativeLibDir)
@@ -377,6 +423,29 @@ func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, un
 		if nativeLibDir != "" {
 			req.Args = append(req.Args, "-Djava.library.path="+nativeLibDir)
 		}
+		// 把 JVM 的临时目录与 home 都指向本包私有数据目录。
+		//
+		// ## 为什么必须显式设
+		//
+		// 很多 JVM 库把原生库（.so）打在 jar 里，运行时【解压到磁盘再 dlopen】。
+		// Compose Desktop 的渲染后端 skiko 就是典型：libskiko-linux-*.so 有 30 MB，
+		// 每次启动都要落盘。默认落点有两个，在本沙箱里都不可靠：
+		//
+		//   java.io.tmpdir → /tmp   PrivateTmp 给的私有 /tmp 【可写】，但很多加固过
+		//                           的系统把宿主 /tmp 挂成 noexec，私有 /tmp 继承它。
+		//                           那样 .so 写得进去、dlopen 失败，报
+		//                           UnsatisfiedLinkError —— 与权限看着毫无关系
+		//   user.home      → ~      ProtectHome=yes 让它完全不可访问
+		//
+		// 指向私有数据目录同时解决三件事：它在 ReadWritePaths 里（可写）、在
+		// /var/lib 上（不会是 noexec）、而且**持久**——解压只发生一次，
+		// 而不是每次开机搬 30 MB。
+		//
+		// 对不解压原生库的组件，这两个属性只是换了个临时目录位置，无副作用。
+		req.Args = append(req.Args,
+			"-Djava.io.tmpdir="+dataDir,
+			"-Duser.home="+dataDir,
+		)
 		req.Args = append(req.Args, "-jar", entryPath)
 	}
 	return req, nil

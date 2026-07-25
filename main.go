@@ -441,6 +441,11 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 		// Resources 让 AcquireControl 的 selector 能解析成 resource_handle，
 		// 与 ResolveEndpoint 用同一张表、同一套隐式默认。
 		Resources: resMod,
+		// Launcher 接通 LaunchComponent（envelope 80/81）：Launcher 点开一个 App、
+		// 会话服务开机唤起桌面，都走它。在此之前唯一能拉起组件的路径是
+		// endpoint.Resolve 拉起 on-demand 提供者，于是"启动应用"只能伪装成
+		// "解析接口"——审计里两件事分不开，且没有接口的纯 UI 应用根本启动不了。
+		Launcher: svcMgr,
 	})
 	if err != nil {
 		return nil, cleanup, err

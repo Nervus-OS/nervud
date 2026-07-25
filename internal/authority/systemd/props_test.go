@@ -228,3 +228,42 @@ func TestBuildProperties_CollectModeSurvivesDeviceAccess(t *testing.T) {
 		t.Fatalf("CollectMode = %v, want inactive-or-failed", got)
 	}
 }
+
+func TestBuildProperties_BindReadOnlyPathsForX11(t *testing.T) {
+	spec := validSpec()
+	spec.Sandbox.BindReadOnlyPaths = []string{"/tmp/.X11-unix"}
+	m := propMap(t, spec)
+
+	binds, ok := m["BindReadOnlyPaths"].([]bindPath)
+	if !ok {
+		t.Fatalf("BindReadOnlyPaths type = %T, want []bindPath", m["BindReadOnlyPaths"])
+	}
+	if len(binds) != 1 {
+		t.Fatalf("len(binds) = %d, want 1", len(binds))
+	}
+	b := binds[0]
+	// 源与目标必须同路径：X11 客户端库里 /tmp/.X11-unix 是硬编码的，
+	// 换个挂载点等于让它找不到
+	if b.Source != "/tmp/.X11-unix" || b.Destination != "/tmp/.X11-unix" {
+		t.Errorf("bind = %s -> %s, want 同路径", b.Source, b.Destination)
+	}
+	// ignore_enoent 必须为真：无头启动时该目录不存在，组件应当照常拉起后
+	// 自己失败，而不是 unit 在 systemd 层就起不来
+	if !b.IgnoreENOENT {
+		t.Error("IgnoreENOENT 必须为 true，否则无头环境下 unit 直接启动失败")
+	}
+
+	// PrivateTmp 仍要开着：绑定挂载在它之后生效，两者不冲突。
+	// 若为了图形界面把 PrivateTmp 关掉，组件之间的 /tmp 隔离就没了
+	if m["PrivateTmp"] != true {
+		t.Error("绑定 X11 socket 不得以关闭 PrivateTmp 为代价")
+	}
+}
+
+func TestBuildProperties_NoBindPathsByDefault(t *testing.T) {
+	// 后台服务不该被挂进任何宿主路径
+	m := propMap(t, validSpec())
+	if _, ok := m["BindReadOnlyPaths"]; ok {
+		t.Error("默认不应下发 BindReadOnlyPaths")
+	}
+}
