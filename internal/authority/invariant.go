@@ -27,8 +27,26 @@ type Invariants struct {
 	// 起进程时的路径包含校验必须认这两个根中的任意一个，否则系统包的可执行
 	// 文件会被判成「逃出 PackageRoot」而拒绝启动。
 	SystemPackageRoot string
-	MinAppUID         uint32 // App UID/GID 下界，低于此值属系统保留
-	MaxAppUID         uint32
+	// UserDataRoot 是【跨 Package 共享】的用户文档区，如 /var/lib/nervus/user-data。
+	//
+	// 与 DataRoot 的区别是本质性的：DataRoot 下每个包一个 0700 的私有目录，谁也
+	// 看不见谁；UserDataRoot 是一块公共地，文件管理器、文件选择器与任何声明了
+	// perm.storage.user 的包共同读写同一批文件——"用户的文档"这个概念要求它们
+	// 看到的是同一份东西，私有目录表达不了。
+	//
+	// 权限模型是 sticky（01777，语义同 /tmp）：任何有权进来的包都能创建文件、
+	// 能读别人的文件，但【只能删自己的】。
+	//
+	// [v1 取舍] 这意味着没有按包隔离的读保护——等价于 Android scoped storage
+	// 之前的共享外部存储。选它是因为 v1 需要"文件管理器能管、选择器能选、别的
+	// app 能打开"这条最基本的链路先成立，而按包隔离需要每包一个 GID +
+	// SupplementaryGroups 或 bind mount，那是 v2 的工作量。
+	//
+	// 只有声明了 perm.storage.user 的包才会拿到它（见 service.readWritePaths）；
+	// 没声明的包在 ProtectSystem=strict 下连写都写不进去。
+	UserDataRoot string
+	MinAppUID    uint32 // App UID/GID 下界，低于此值属系统保留
+	MaxAppUID    uint32
 }
 
 // DefaultInvariants 是生产镜像的固定取值。不做成配置文件读取
@@ -40,6 +58,7 @@ func DefaultInvariants() *Invariants {
 		DataRoot:          "/var/lib/nervus/package-data",
 		PackageRoot:       "/var/lib/nervus/packages",
 		SystemPackageRoot: "/usr/lib/nervus/system-packages",
+		UserDataRoot:      "/var/lib/nervus/user-data",
 		MinAppUID:         20000, // 避开发行版的系统和普通用户段
 		MaxAppUID:         59999,
 	}

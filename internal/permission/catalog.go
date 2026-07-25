@@ -141,6 +141,21 @@ func DefaultCatalog() Catalog {
 			Mode:        GrantInstall,
 			Description: "Register a Service callable by other Packages (placeholder)",
 		},
+		// 共享用户文档区（Invariants.UserDataRoot）的读写权。文件管理器、文件
+		// 选择器，以及任何要打开/保存用户文档的 app 需要它。
+		//
+		// 为什么是 GrantInstall 而不是 GrantUser：v1 不做运行期用户确认
+		// （见 V1GrantAll）。等确认 UI 落地后这条应当改成 GrantUser + 独立
+		// Group——"访问我的文件"正是典型的该问一句的权限。
+		//
+		// MinTrust 取 Ordinary：普通第三方 app 也该能存取用户文档，这不是特权。
+		// 真正的约束在别处——目录是 sticky 的，谁也删不掉别人的东西。
+		{
+			ID:          "perm.storage.user",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantInstall,
+			Description: "Read/write the shared user documents area",
+		},
 		// GrantUser 危险权限示例：安装只给可请求，实际访问需运行期用户确认、可撤销
 		{
 			ID:          "perm.camera.capture",

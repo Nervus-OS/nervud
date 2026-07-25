@@ -9,6 +9,7 @@ package service
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/nervus-os/nervud/internal/audit"
@@ -34,6 +35,9 @@ const (
 	// registryDir 是 nervud 的可信状态目录，含 _grants/_devmode/ledger/uid 分配器。
 	// 组件沙箱把它设 InaccessiblePaths，任何组件都读不到
 	registryDir = "/var/lib/nervus/registry"
+	// permStorageUser 是访问共享用户文档区（Invariants.UserDataRoot）所需的权限。
+	// 与 permission.DefaultCatalog 里的条目【必须同名】——那边是定义，这边是执法点
+	permStorageUser = "perm.storage.user"
 )
 
 // unitName 由 (pkg, comp) 生成 systemd 瞬态 unit 名。pkg/comp 的字符集都禁止 '-'
@@ -297,7 +301,27 @@ func (m *Manager) readWritePaths(e pkgregistry.Entry, dataDir string) []string {
 	if m.stagingPkgID != "" && m.stagingRoot != "" && e.Manifest.PackageID == m.stagingPkgID {
 		paths = append(paths, m.stagingRoot)
 	}
+	// 共享用户文档区：声明了 perm.storage.user 的包才拿得到。文件管理器、
+	// 文件选择器和任何要打开用户文档的 app 靠它看到同一批文件。
+	//
+	// 判据用 GrantedPermissions（裁决结果）而不是 manifest.Permissions（申请）：
+	// 前者是内核裁决过的事实，后者只是包自己的声明。当前 permission.V1GrantAll
+	// 打开时两者内容一致，但执法恢复后就会分叉——那时这里必须继续跟着裁决走，
+	// 否则一个被拒的权限仍然能拿到目录。
+	//
+	// 系统镜像包的 GrantedPermissions 由 pkgregistry.arbitrateSystemGrants 在
+	// 启动扫描时算出，动态安装包由 Install 的 Intersect 算出，两条路都已填好。
+	if m.inv.UserDataRoot != "" && hasPermission(e, permStorageUser) {
+		paths = append(paths, m.inv.UserDataRoot)
+	}
 	return paths
+}
+
+// hasPermission 报告某 Package 是否已被授予某权限。
+//
+// 读 GrantedPermissions 而非 manifest：见 readWritePaths 的说明。
+func hasPermission(e pkgregistry.Entry, perm string) bool {
+	return slices.Contains(e.GrantedPermissions, perm)
 }
 
 func (m *Manager) buildStartReq(e pkgregistry.Entry, c pkgregistry.Component, unit string) (authority.StartSandboxedProcessRequest, error) {

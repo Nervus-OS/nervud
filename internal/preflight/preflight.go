@@ -90,12 +90,35 @@ func DefaultConfig(log *slog.Logger) Config {
 			{Path: "/var/lib/nervus", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/registry", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/packages", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
-			// 动态安装 staging 根：nervusctl/安装器解包 .nspkg 的落点，随后由 nervud
+			// 动态安装 staging 根：装包服务解包 .nspkg 的落点，随后由 nervud
 			// 经 renameat2 提交进 PackageRoot（同处 /var/lib/nervus = 同一文件系统）。
-			// 0700 且属主为 nervud，避免装包中间态被其它进程读取或篡改
-			{Path: "/var/lib/nervus/staging", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
+			//
+			// 0711 不是 0700：装包服务以自己的 UID 跑，要能【穿过】这个根进到
+			// nervud 分配给它的那个 stage-* 目录里。0700 的话它连穿都穿不过去，
+			// 装包在解包这一步以 permission denied 失败。
+			//
+			// 「装包中间态不被其它进程读取」这条仍然成立，而且靠的是更强的东西：
+			// 0711 让 other 无法【列出】根里有什么，而每个 stage-* 子目录是 0700
+			// 且属主为那次装包的服务 UID（见 admin.handleBeginStaging 的 chown）。
+			// 即便猜到目录名也进不去。
+			//
+			// 【这条必须与 admin.Server.Start 里的 Chmod 保持一致】。两处对同一个
+			// 目录的权限各执一词的话，preflight 对可写区是就地修正，两边会每次
+			// 开机互相覆盖一次——功能上能跑，但谁也说不清最终值是什么。
+			{Path: "/var/lib/nervus/staging", Kind: kindDir, Perm: 0o711, PermExact: true, Writable: true},
 			{Path: inv.PackageRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: inv.DataRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
+			// 跨 Package 共享的用户文档区。01777 = sticky，语义同 /tmp：
+			// 任何声明了 perm.storage.user 的包都能在里面建文件、读别人的文件，
+			// 但只能删自己创建的那些。
+			//
+			// 为什么必须是 1777 而不是 0775 + 某个共享组：各包以【自己的 UID/GID】
+			// 运行（buildStartReq 里 GID = e.UID），彼此不共享任何附加组，0775 的
+			// group 位对它们一个也不生效——结果是除属主外谁都写不进去，共享目录
+			// 就成了空谈。要走组方案得先给每个包加 SupplementaryGroups，那是 v2。
+			//
+			// sticky 位不可省：没有它，任何一个包都能删掉其它包（以及用户）的文件。
+			{Path: inv.UserDataRoot, Kind: kindDir, Perm: 0o1777, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/jvm-cache", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			// /run 是 tmpfs，chattr +i 不被支持；等价保护是父目录 sticky：01755 让
 			// 非 root 进程无法在其中 create/unlink 任何条目，socket 就删不掉、换不掉
