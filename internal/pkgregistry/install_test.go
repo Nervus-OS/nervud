@@ -471,6 +471,101 @@ func TestInstall_EnsuresAppUserOnUpgradeToo(t *testing.T) {
 	}
 }
 
+// 同版本重装必须显式要求 authority 覆盖。
+//
+// checkUpgrade 明写着「同版本重装（修复损坏安装），允许」，但 authority 默认
+// 用 RENAME_NOREPLACE 拒绝一切已存在的目标——不把意图说出口，那条策略就交付
+// 不了，装包以裸 renameat2 EEXIST 失败、透给调用方一个 INTERNAL。
+func TestInstall_SameVersionAsksToReplace(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	key := newDevKey(t)
+
+	// 首装：绝不能要求覆盖——那会把「重复提交 / 版本号复用」这类错误静默吞掉。
+	staging, mb, sig := newValidStagingWithKey(t, root, "com.example.app", "1.0.0", 100, key)
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: mb, SigBlock: sig, StagingDir: staging, Source: SourceDynamicInstall,
+	}); err != nil {
+		t.Fatalf("首装: %v", err)
+	}
+	if auth.installed[0].ReplaceExisting {
+		t.Error("首装要求了 ReplaceExisting，这会吞掉重复提交这类错误")
+	}
+
+	// 同版本重装：必须要求覆盖。
+	staging2, mb2, sig2 := newValidStagingWithKey(t, root, "com.example.app", "1.0.0", 100, key)
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: mb2, SigBlock: sig2, StagingDir: staging2, Source: SourceDynamicInstall,
+	}); err != nil {
+		t.Fatalf("重装: %v", err)
+	}
+	if len(auth.installed) != 2 {
+		t.Fatalf("InstallVerifiedPackage 调用了 %d 次, want 2", len(auth.installed))
+	}
+	if !auth.installed[1].ReplaceExisting {
+		t.Error("同版本重装没要求 ReplaceExisting，会以 renameat2 EEXIST 失败")
+	}
+}
+
+// 升级到【新】版本不该要求覆盖：目标路径是一个全新的版本目录，
+// 用覆盖语义等于放弃了 RENAME_NOREPLACE 那道「不静默替换」的保护。
+func TestInstall_UpgradeDoesNotAskToReplace(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	key := newDevKey(t)
+
+	for i, ver := range []string{"1.0.0", "1.0.1"} {
+		staging, mb, sig := newValidStagingWithKey(t, root, "com.example.app", ver, uint64(100+i), key)
+		if _, err := mod.Install(context.Background(), InstallTransaction{
+			ManifestBytes: mb, SigBlock: sig, StagingDir: staging, Source: SourceDynamicInstall,
+		}); err != nil {
+			t.Fatalf("Install %s: %v", ver, err)
+		}
+	}
+	for i, req := range auth.installed {
+		if req.ReplaceExisting {
+			t.Errorf("第 %d 次安装（升级到新版本）要求了 ReplaceExisting", i+1)
+		}
+	}
+}
+
+// 覆盖安装失败时【不能删代码目录】。
+//
+// 那种场景下 destDir 是这个包唯一的代码目录——旧树在 RENAME_EXCHANGE 时被换出
+// 并删掉了。删了就得到「记账说装着 version X、盘上什么都没有」，比不回滚糟得多。
+func TestInstall_FailedReplaceKeepsCodeDir(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	key := newDevKey(t)
+
+	staging, mb, sig := newValidStagingWithKey(t, root, "com.example.app", "1.0.0", 100, key)
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: mb, SigBlock: sig, StagingDir: staging, Source: SourceDynamicInstall,
+	}); err != nil {
+		t.Fatalf("首装: %v", err)
+	}
+	auth.removed = nil
+
+	// 让重装在落盘之后失败，触发补偿。
+	//
+	// 注入点选 EnsureAppUser 而不是 CreatePrivateDataDirectory：后者只在
+	// !hadPrev 时调，重装路径上根本不跑，注进去不会触发任何失败。
+	auth.appUserErr = errors.New("injected failure after code landed")
+	staging2, mb2, sig2 := newValidStagingWithKey(t, root, "com.example.app", "1.0.0", 100, key)
+	_, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: mb2, SigBlock: sig2, StagingDir: staging2, Source: SourceDynamicInstall,
+	})
+	if err == nil {
+		t.Fatal("注入了失败但 Install 成功了，补偿路径没被走到")
+	}
+
+	for _, r := range auth.removed {
+		if r.Root == mod.packageRoot {
+			t.Fatalf("覆盖安装失败后删掉了代码目录 %s —— 那是这个包唯一的代码目录", r.Path)
+		}
+	}
+}
+
 func TestProvision_CreatesUserAndDataDir(t *testing.T) {
 	// 系统镜像包走 scanSystemImage，那条路径分配 UID、登记 Entry，却从不建
 	// 用户也不建数据目录。缺前者 systemd 在 step USER 失败（217/USER），

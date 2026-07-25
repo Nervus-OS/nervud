@@ -214,9 +214,19 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	subj := authority.Subject{PackageID: manifest.PackageID, UID: uid}
 
 	destDir := filepath.Join(m.packageRoot, manifest.PackageID, manifest.Version)
+	// 同版本重装（修复损坏安装）必须显式要求覆盖。checkUpgrade 上面已经放行了
+	// 这种情况，但 authority 默认用 RENAME_NOREPLACE 拒绝一切已存在的目标——
+	// 不把这个意图说出口，那条策略就交付不了，装包以裸 renameat2 EEXIST 失败。
+	//
+	// 判据用 ActiveVersion 而不是 VersionCode：撞车的是【路径】
+	// <PackageRoot>/<id>/<version>，而路径由版本字符串决定。同一个 version_code
+	// 配不同 version 字符串是畸形 manifest，但那该由 manifest 校验拦，
+	// 不该让这里因为判错而去覆盖一个不该覆盖的目录
+	replacing := hadPrev && prev.ActiveVersion == manifest.Version
 	if err := m.auth.InstallVerifiedPackage(ctx, subj, authority.InstallVerifiedPackageRequest{
-		StagingDir: tx.StagingDir,
-		DestDir:    destDir,
+		StagingDir:      tx.StagingDir,
+		DestDir:         destDir,
+		ReplaceExisting: replacing,
 	}); err != nil {
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err
@@ -232,12 +242,21 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		if committed {
 			return
 		}
-		if rerr := m.auth.RemovePackageTree(ctx, subj, authority.RemovePackageTreeRequest{
-			Root: m.packageRoot, Path: destDir,
-		}); rerr != nil {
-			m.aud.Record(ctx, audit.Event{
-				Action: "pkgregistry.Install.compensate", Subject: manifest.PackageID, Denied: true, Err: rerr,
-			})
+		// 【覆盖安装不删代码目录】。那种场景下 destDir 是这个包【唯一】的代码
+		// 目录——旧树在 RENAME_EXCHANGE 时被换出并删掉了。删了就得到「记账说
+		// 装着 version X、盘上什么都没有」，比不回滚糟得多。
+		//
+		// 不删是安全的：destDir 里那棵树已经过完整的签名与 digest 复核，而
+		// 记账仍指向 version X ——记账与磁盘一致，只是内容换成了新提交的那份。
+		// 而重装的前提本就是旧的那份坏了。
+		if !replacing {
+			if rerr := m.auth.RemovePackageTree(ctx, subj, authority.RemovePackageTreeRequest{
+				Root: m.packageRoot, Path: destDir,
+			}); rerr != nil {
+				m.aud.Record(ctx, audit.Event{
+					Action: "pkgregistry.Install.compensate", Subject: manifest.PackageID, Denied: true, Err: rerr,
+				})
+			}
 		}
 		if newDataDir != "" {
 			_ = m.auth.RemovePackageTree(ctx, subj, authority.RemovePackageTreeRequest{

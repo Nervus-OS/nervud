@@ -130,6 +130,18 @@ func (g *Gate) Reboot(ctx context.Context, subj Subject, req RebootRequest) erro
 type InstallVerifiedPackageRequest struct {
 	StagingDir string // pkgmanagerd 产出、已被 pkgregistry 复核过的 staging 目录
 	DestDir    string // 必须位于 Invariants.PackageRoot 之下：<PackageRoot>/<id>/<version>
+
+	// ReplaceExisting 允许覆盖一个【同路径已存在】的版本目录，用于同版本重装
+	// （修复损坏的安装）。
+	//
+	// 默认关闭，因为「同一个 <id>/<version> 出现第二次」通常意味着重复提交或
+	// 版本号复用，静默覆盖会把这两种错误吞掉。但 pkgregistry 的 checkUpgrade
+	// 明确允许同版本重装——那条策略之前交付不了，因为本层无条件用
+	// RENAME_NOREPLACE 拒绝，装包以裸 renameat2 EEXIST 失败。
+	//
+	// 做成显式开关而不是本层自己判断「是不是重装」：本层看不到 registry
+	// 记账，判不了。谁允许覆盖，必须由看得见上下文的那一层说出口。
+	ReplaceExisting bool
 }
 
 func (InstallVerifiedPackageRequest) Kind() Kind { return KindInstallVerifiedPackage }

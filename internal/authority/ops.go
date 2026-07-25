@@ -176,24 +176,48 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 	}
 	defer func() { _ = unix.Close(idFD) }()
 
-	// RENAME_NOREPLACE：目标版本目录已存在时整体失败、不静默覆盖 - 同一个
+	// 默认 RENAME_NOREPLACE：目标版本目录已存在时整体失败、不静默覆盖 - 同一个
 	// <id>/<version> 出现第二次通常意味着重复提交或版本号复用，都不该被
 	// 无声吞掉。源端用绝对路径：renameat2(2) 里 pathname 为绝对路径时对应
 	// 的 dirfd 被忽略，staging 目录自身的隔离由 pkgmanagerd 的独立 UID/
 	// mount namespace 负责，不在本次调用的职责范围内
-	if err := unix.Renameat2(unix.AT_FDCWD, req.StagingDir, idFD, version, unix.RENAME_NOREPLACE); err != nil {
+	//
+	// ReplaceExisting 时改用 RENAME_EXCHANGE：两棵树【原子对调】，新树就位的
+	// 同一瞬间旧树落到 staging 路径上。不用「先删旧再 rename」——那中间有一个
+	// 包不存在的窗口，此刻掉电就得到一个记账说装着、目录却没有的系统。
+	flags := uint(unix.RENAME_NOREPLACE)
+	if req.ReplaceExisting {
+		flags = unix.RENAME_EXCHANGE
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, req.StagingDir, idFD, version, flags); err != nil {
 		return struct{}{}, fmt.Errorf("renameat2 %s -> %s: %w", req.StagingDir, req.DestDir, err)
 	}
 
 	if err := g.finishInstalledPackage(idFD, version); err != nil {
 		// 回滚：把刚移入的目录 rename 回 staging 原路径。用 rename 而不是
 		// 递归删除 - 这已经是一整棵从 pkgmanagerd 移过来的目录树，递归删除
-		// 一个属主可能已经改了一半的目录风险更高；成功的 renameat2 保证了
-		// staging 原路径此刻必然空闲、可以直接 rename 回去
-		if rerr := unix.Renameat2(idFD, version, unix.AT_FDCWD, req.StagingDir, unix.RENAME_NOREPLACE); rerr != nil {
+		// 一个属主可能已经改了一半的目录风险更高
+		//
+		// 回滚要用与去程【相同】的 flag：NOREPLACE 去程成功保证了 staging 原
+		// 路径此刻空闲；而 EXCHANGE 去程把旧树留在了那里，再用 NOREPLACE 回滚
+		// 必然 EEXIST，等于回滚不了——那会留下一个新树已就位但没 finish 的包
+		if rerr := unix.Renameat2(idFD, version, unix.AT_FDCWD, req.StagingDir, flags); rerr != nil {
 			return struct{}{}, fmt.Errorf("%w (rollback rename to staging failed: %v)", err, rerr)
 		}
 		return struct{}{}, err
+	}
+
+	// EXCHANGE 之后旧树落在 staging 路径上，删掉它。
+	//
+	// 【失败不算安装失败】：新版本已经原子就位、finish 也过了，安装这件事
+	// 已经成立。删不掉只是漏一棵旧树在 staging 根下，admin 的 sweepStaleStaging
+	// 会在下一次 begin-staging 时回收。为此把一次已成功的安装报成失败，会让
+	// 调用方重装，而重装会再走一遍同样的路——把一个磁盘回收问题放大成死循环
+	if req.ReplaceExisting {
+		if rerr := os.RemoveAll(req.StagingDir); rerr != nil && g.log != nil {
+			g.log.Warn("authority: replaced package tree left behind in staging",
+				"path", req.StagingDir, "err", rerr)
+		}
 	}
 	return struct{}{}, nil
 }

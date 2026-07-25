@@ -4,6 +4,7 @@ package authority
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -112,8 +113,20 @@ func do[Req Request, Res any](
 		Action: kind.String(), Subject: subj.String(), Denied: false, Err: err, Detail: detail,
 	})
 	if err != nil {
-		g.log.Error("authority: operation failed",
-			"kind", kind.String(), "subject", subj.String(), "err", err)
+		// ErrAlreadyExists 降到 Debug：它是【幂等操作的预期结果】，不是故障。
+		// 调用方拿它当「已经做过了」（见 pkgregistry.provisionEntry），而
+		// provisionAll 每次启动都对每个包跑一遍——记成 ERROR 的话，每次开机
+		// 每个已装的包都会刷一条，运维很快就学会无视 ERROR 这一级。
+		//
+		// 审计记录不受影响：上面的 Record 无条件带上 err，取证材料仍然完整。
+		// 降的只是给人看的那一路。
+		if errors.Is(err, ErrAlreadyExists) {
+			g.log.Debug("authority: target already exists (idempotent no-op)",
+				"kind", kind.String(), "subject", subj.String(), "err", err)
+		} else {
+			g.log.Error("authority: operation failed",
+				"kind", kind.String(), "subject", subj.String(), "err", err)
+		}
 		return zero, fmt.Errorf("authority: %s: %w", kind, err)
 	}
 	return res, nil
