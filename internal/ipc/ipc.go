@@ -17,12 +17,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/service"
@@ -157,6 +159,15 @@ type Config struct {
 	// - 允许 endpoint 与 ipc 分批合入
 	Endpoints EndpointResolver
 
+	// Leases 把 AcquireControl/ReleaseControl 接到 internal/control 的租约状态机。
+	// 为 nil 时这两个 body 回 UNAVAILABLE（能力缺口，不是协议违规）——
+	// 与 Endpoints 为 nil 时的降级同一形态。
+	Leases ControlLeases
+
+	// Resources 把 AcquireControl 的 ResourceSelector 解析成 resource_handle。
+	// 为 nil 时只认协议规定的隐式默认（BaseMotion 的 base.main）。
+	Resources ResourceResolver
+
 	// AllowUnverifiedComponent 显式放行Component 核对基础设施未接线（Components 为
 	// nil）时的握手，仅供开发/测试。默认 false = fail closed：核对不可用即拒绝握手。
 	// 注意它只放行基础设施缺失，绝不放行核对到不一致 - 后者永远拒绝
@@ -231,7 +242,13 @@ type Server struct {
 	permission PermissionChecker
 	components ComponentResolver
 	endpoints  EndpointResolver
+	leases     ControlLeases
+	resources  ResourceResolver
 	limits     Limits
+
+	// nextConnID 给每条连接分配 control 模块用的标识。从 1 开始（0 留作
+	// "未指定"哨兵，与协议里 request_id 0 保留同一习惯）。
+	nextConnID atomic.Uint64
 
 	// allowUnverifiedComponent 见 Config.AllowUnverifiedComponent
 	allowUnverifiedComponent bool
@@ -313,6 +330,8 @@ func New(cfg Config) (*Server, error) {
 		permission:               cfg.Permission,
 		components:               cfg.Components,
 		endpoints:                cfg.Endpoints,
+		leases:                   cfg.Leases,
+		resources:                cfg.Resources,
 		limits:                   normalizeLimits(cfg.Limits),
 		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
 		quit:                     make(chan struct{}),
@@ -700,6 +719,16 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		// 靠这份指针身份区分，而不是数字本身
 		defer s.endpoints.ConnClosed(co)
 	}
+	if s.leases != nil {
+		// 撤掉本连接名下的全部 ControlLease。租约绑连接、断开即失效，不撤的话
+		// 一个断了线的 App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL
+		// 自然到期 —— 对机器人来说那是一段谁都动不了的时间。
+		//
+		// 放在 endpoints.ConnClosed 之后注册 = 【先于】它执行（defer 后进先出）：
+		// 先撤运动授权，再拆路由。反过来的话，拆路由与撤租之间存在一个窗口，
+		// 期间本连接的 lease 仍然有效而路由已经没了。
+		defer s.leases.RevokeConn(co.leaseConnID())
+	}
 	defer s.dispatchConnClosed(co)
 
 	for {
@@ -1000,4 +1029,73 @@ func (r *rateLimiter) allow() bool {
 	}
 	r.tokens--
 	return true
+}
+
+// ControlLeases 是 ipc 对 internal/control 的窄接口依赖：申请、释放、连接断开
+// 时撤销该连接名下的全部租约。
+//
+// 接口由消费者（ipc）定义，*control.Module 隐式满足——与 EndpointResolver、
+// PermissionChecker 同一范式。ipc 不需要 control 的续租/抢占/快照能力，
+// 就不把它们写进这个接口。
+type ControlLeases interface {
+	Acquire(req control.Request) (control.Lease, error)
+	Release(id control.ID, conn control.ConnID) error
+	// RevokeConn 撤销某连接名下的全部租约。
+	//
+	// 【连接收尾时必须调用】。租约绑本连接、不可转让、断开即失效
+	// （envelope.proto: AcquireControlSuccess.lease_id）。不撤的话，一个断了线的
+	// App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL 自然到期——对机器人
+	// 来说那意味着一段谁都动不了的时间。
+	RevokeConn(conn control.ConnID)
+}
+
+// ResourceResolver 是 ipc 对 internal/resource 的窄接口依赖：把 (type, role)
+// 解析成 resource_handle。
+type ResourceResolver interface {
+	Resolve(resourceType, role string) (handle string, ok bool)
+}
+
+// 协议规定的隐式默认 Resource（envelope.proto: ResolveEndpoint.selector
+// 「[REWRITE-v1] 固定 BaseMotion 可以留空，由 nervud 隐式取
+// {type=nervus.resource.motion.base, role=main}」）。
+//
+// AcquireControl 沿用同一默认：同一个「留空」在两条路径上必须是同一个含义，
+// 否则是最容易写出 bug 的那类不一致。
+const (
+	defaultResourceType = "nervus.resource.motion.base"
+	defaultResourceRole = "main"
+)
+
+// resolveLeaseResource 把 AcquireControl 的 selector 解析成 resource_handle。
+func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, bool) {
+	typ, role := sel.GetType(), sel.GetRole()
+	if typ == "" && role == "" {
+		typ, role = defaultResourceType, defaultResourceRole
+	}
+	if s.resources == nil {
+		// resource 未接线：只认隐式默认，其余一律拒绝。
+		// fail closed —— 不认识的资源不该被签发租约。
+		if typ == defaultResourceType && role == defaultResourceRole {
+			return "base.main", true
+		}
+		return "", false
+	}
+	return s.resources.Resolve(typ, role)
+}
+
+// auditLeaseClass 记录一次「客户端自报 controller_class 被直接采信」。
+//
+// CONTROL_CLASS_SELF_REPORTED —— 这个标记是给执法恢复时 grep 用的。
+// 见 lease.go 里同名说明：v1 因为 permission.V1GrantAll 已经把权限执法整体
+// 短路了，此刻加 class 门槛只是做样子。审计留痕，让这段时间里「谁声称自己是
+// HUMAN」这件事至少是可追溯的。
+func (s *Server) auditLeaseClass(caller identity.Caller, class control.Class, resource string) {
+	if s.auditor == nil {
+		return
+	}
+	s.auditor.Record(context.Background(), audit.Event{
+		Action:  "ipc.AcquireControl.classSelfReported",
+		Subject: caller.PackageID,
+		Detail:  "class=" + class.String() + " resource=" + resource,
+	})
 }

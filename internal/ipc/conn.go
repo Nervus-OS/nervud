@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
@@ -108,6 +110,22 @@ type conn struct {
 	// inFlight 是本连接当前挂起的 Dispatch 转发数，供 handleRequest 强制
 	// ConnectionLimits.max_inflight_requests（已下发但此前从未强制）
 	inFlight atomic.Int32
+
+	// connID 是本连接在 control 模块里的标识。control 的 ConnID 是 uint64，
+	// 而 endpoint 那边用 ConnHandle(interface{}) 直接吃 *conn 指针——两套是因为
+	// control 的租约表要能被 RevokeConn 按值查，指针做键在跨模块传递时容易
+	// 意外持有已释放的连接。
+	connID control.ConnID
+
+	// leaseMu 保护下面两张 lease 句柄映射表。
+	//
+	// 为什么要映射：wire 上的 lease_id 是 uint64，而 control.ID 是 [16]byte。
+	// 直接把内部 ID 截断成 uint64 会碰撞；直接把 [16]byte 塞进 uint64 装不下。
+	// 于是按连接分配单调递增的对外句柄，内部 ID 不出进程——与 endpoint_id
+	// 同一原则：查找键是 (连接, 句柄)，别处的相同数字不是同一个东西。
+	leaseMu   sync.Mutex
+	nextLease uint64
+	leases    map[uint64]control.ID
 }
 
 func newConn(s *Server, c net.Conn, caller identity.Caller, log *slog.Logger) *conn {
@@ -122,7 +140,40 @@ func newConn(s *Server, c net.Conn, caller identity.Caller, log *slog.Logger) *c
 		negMinor:   protocolMinorMax,
 		outbox:     newOutboundQueue(maxOutboundQueueBytes),
 		writerDone: make(chan struct{}),
+		connID:     control.ConnID(s.nextConnID.Add(1)),
+		leases:     make(map[uint64]control.ID),
 	}
+}
+
+// leaseConnID 返回本连接在 control 模块里的标识。
+func (co *conn) leaseConnID() control.ConnID { return co.connID }
+
+// registerLease 给一个刚签发的租约分配本连接作用域的对外句柄。
+func (co *conn) registerLease(l control.Lease) uint64 {
+	co.leaseMu.Lock()
+	defer co.leaseMu.Unlock()
+	co.nextLease++
+	co.leases[co.nextLease] = l.ID
+	return co.nextLease
+}
+
+// lookupLease 把对外句柄翻回内部 control.ID。
+func (co *conn) lookupLease(handle uint64) (control.ID, bool) {
+	co.leaseMu.Lock()
+	defer co.leaseMu.Unlock()
+	id, ok := co.leases[handle]
+	return id, ok
+}
+
+// forgetLease 注销一个已释放的句柄。
+//
+// 句柄【不复用】：同一连接上的下一个租约拿新号。复用会让一条迟到的
+// ReleaseControl 释放掉一个刚签发的新租约——两者的 lease_id 相同、连接也相同，
+// 接收方没有任何办法分辨。与 request_id 不回绕是同一条理由。
+func (co *conn) forgetLease(handle uint64) {
+	co.leaseMu.Lock()
+	delete(co.leases, handle)
+	co.leaseMu.Unlock()
 }
 
 // runWriter 是本连接唯一真正调用 co.c.Write 的 goroutine：循环从 outbox 取出
@@ -313,6 +364,12 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 	case *ipcv1.Envelope_UnregisterEndpoint:
 		return co.handleUnregisterEndpoint(env, body.UnregisterEndpoint)
 
+	case *ipcv1.Envelope_AcquireControl:
+		return co.handleAcquireControl(body.AcquireControl)
+
+	case *ipcv1.Envelope_ReleaseControl:
+		return co.handleReleaseControl(body.ReleaseControl)
+
 	case *ipcv1.Envelope_Hello:
 		// 握手已完成，再来一个 Hello 是非法握手状态
 		co.log.Warn("ipc: duplicate Hello after handshake, closing")
@@ -331,7 +388,9 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		*ipcv1.Envelope_EndpointDied,
 		*ipcv1.Envelope_EndpointRevoked,
 		*ipcv1.Envelope_Dispatch,
-		*ipcv1.Envelope_CancelDispatch:
+		*ipcv1.Envelope_CancelDispatch,
+		*ipcv1.Envelope_AcquireControlResult,
+		*ipcv1.Envelope_ReleaseControlResult:
 		// 全是 nervud -> 对端方向的 body：响应（HelloAck/*Result/Response）、推送
 		// （Event/EndpointDied/EndpointRevoked/SubscriptionClosed）、以及 nervud 派发
 		// 给 Service 的 Dispatch/CancelDispatch（只能由 nervud 发给 Service）。

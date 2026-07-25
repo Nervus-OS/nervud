@@ -382,12 +382,19 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// 就绪后 operation 才谈得上被 dispatch 创建，IPC 开门前状态机须已就绪。窄接口注入
 	// resource（resMod.Valid 校验 resource_handle）与 audit。
 	//
-	// LeaseValidator（运动类 operation 的 lease + 新鲜 epoch 校验）暂传 nil = fail-closed：
-	// leaseID <-> control lease 句柄（[16]byte + ConnID）的映射需要尚未落地的
-	// operation wire proto 与 dispatch 接线。接线前运动类 operation 一律被 Create
-	// 前置拒绝，这是安全缺省。TODO(operation-wire)：wire 与 dispatch 落地后，
-	// 注入一个由 ctl 支撑的真实 LeaseValidator
-	// （把 wire lease 句柄解析为 control.Check + epoch 复核）。
+	// LeaseValidator 仍传 nil = fail-closed，运动类 operation 一律被 Create 前置拒绝。
+	//
+	// 【ControlLease wire 已接通，但这一处仍然接不了】，原因有两层：
+	//
+	//  1. operation.Manager 目前【没有任何调用方】。envelope.proto 把 Operation
+	//     查询（GetOperation/CancelOperation）标为 [v2+]，dispatch 也不创建
+	//     operation——接一个没人调的校验器是假工作。
+	//  2. LeaseValidator.ValidLease 收的是 uint64 leaseID，而那是【连接作用域】的
+	//     wire 句柄；control.Check 要的是 (control.ID [16]byte, ConnID)。这层映射
+	//     住在 ipc 的 conn 里，operation 那一层看不见连接。真要接，得先决定
+	//     operation 怎么携带连接身份——那是 operation wire 设计的一部分。
+	//
+	// 换言之这里不是漏接，是被 operation wire 挡着。wire 落地时两条一起解决。
 	opMod := operation.New(resMod, nil, aud, logger)
 	k.Register(opMod)
 
@@ -404,6 +411,12 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 		Permission: permReg,
 		Components: svcMgr,
 		Endpoints:  epMod,
+		// Leases 接通 AcquireControl/ReleaseControl（envelope 70-73）。在此之前
+		// control 模块虽然完整，却没有任何入口——App 拿不到运动 lease。
+		Leases: ctl,
+		// Resources 让 AcquireControl 的 selector 能解析成 resource_handle，
+		// 与 ResolveEndpoint 用同一张表、同一套隐式默认。
+		Resources: resMod,
 	})
 	if err != nil {
 		return nil, cleanup, err
