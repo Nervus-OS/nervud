@@ -151,6 +151,24 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 	argv := append([]string{spec.ExecPath}, spec.Args...)
 	props := []property{
 		{"Description", dbus.MakeVariant(spec.Description)},
+
+		// CollectMode=inactive-or-failed：进程退出后让 systemd【自动回收】这个
+		// 瞬态 unit，不留残骸。
+		//
+		// 【没有它，任何组件崩一次之后就再也起不来】。systemd 默认把退出的
+		// 瞬态 unit 保留在 inactive/failed 状态；supervisor 按退避重启时用同一个
+		// unit 名再调 StartTransientUnit，systemd 直接报
+		// "Unit ... was already loaded or has a fragment file" 并失败。
+		// 于是整套退避重启与熔断机制被彻底废掉——第一次崩溃就是最后一次。
+		//
+		// 这不是理论问题：端到端验证里 pkgmanagerd 起来两秒后退出，重启立刻
+		// 撞上它。
+		//
+		// 为什么用 CollectMode 而不是每次 start 前先 ResetFailedUnit：
+		// 后者是「先清残骸再启动」的补救，两步之间有窗口，而且只覆盖 failed，
+		// 覆盖不了正常退出留下的 inactive。CollectMode 让回收成为 unit 自身的
+		// 属性，由 systemd 在它退出那一刻负责。
+		{"CollectMode", dbus.MakeVariant("inactive-or-failed")},
 		{"ExecStart", dbus.MakeVariant([]execStartItem{{Path: spec.ExecPath, Argv: argv, UncleanIsFailure: false}})},
 		// 数字 UID/GID 以字符串形式传给 systemd（User/Group 接受数字字符串）
 		{"User", dbus.MakeVariant(fmt.Sprintf("%d", spec.UID))},

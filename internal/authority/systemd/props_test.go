@@ -203,3 +203,28 @@ func TestBuildProperties_DeviceAccessOptIn(t *testing.T) {
 		t.Error("放开设备访问不得放松 SystemCallFilter")
 	}
 }
+
+func TestBuildProperties_CollectModeIsSet(t *testing.T) {
+	// 没有 CollectMode=inactive-or-failed，任何组件崩一次之后就再也起不来：
+	// systemd 把退出的瞬态 unit 留在 inactive/failed 状态，supervisor 按退避
+	// 重启时用同一个 unit 名再调 StartTransientUnit，直接报
+	// "Unit ... was already loaded or has a fragment file"。
+	// 整套退避重启与熔断机制会被彻底废掉——第一次崩溃就是最后一次。
+	//
+	// 这不是理论问题：端到端验证里真撞上了。
+	m := propMap(t, validSpec())
+	if got := m["CollectMode"]; got != "inactive-or-failed" {
+		t.Fatalf("CollectMode = %v, want inactive-or-failed", got)
+	}
+}
+
+func TestBuildProperties_CollectModeSurvivesDeviceAccess(t *testing.T) {
+	// 放开设备访问不该影响回收语义——两者正交，但同一个属性数组里，
+	// 加分支时很容易顺手漏掉。
+	spec := validSpec()
+	spec.Sandbox.AllowDeviceAccess = true
+	m := propMap(t, spec)
+	if got := m["CollectMode"]; got != "inactive-or-failed" {
+		t.Fatalf("CollectMode = %v, want inactive-or-failed", got)
+	}
+}

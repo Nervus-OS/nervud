@@ -84,7 +84,20 @@ func (c *Conn) StartTransientUnit(ctx context.Context, spec UnitSpec) error {
 	if err != nil {
 		return err
 	}
-	// mode "replace"：同名 unit 残留则替换。aux 为空
+	// 启动前先清掉同名残骸。
+	//
+	// 【mode "replace" 不做这件事】——它替换的是排队中的 job，不动一个已经
+	// 加载的 unit。同名 unit 若还留在 failed/inactive 状态，StartTransientUnit
+	// 直接报 "Unit ... was already loaded or has a fragment file"。
+	//
+	// 正常路径上 CollectMode=inactive-or-failed（见 props.go）已经让 systemd 在
+	// 进程退出那一刻回收掉 unit，这里不会有残骸。这一步覆盖的是它覆盖不到的
+	// 情形：nervud 自己崩溃/被 SIGKILL 后重启，上一轮的 unit 可能还在。
+	//
+	// best-effort：unit 不存在时 ResetFailedUnit 会报错，那是正常情况，忽略。
+	// 真正的失败会在下面的 StartTransientUnit 上暴露出来。
+	_ = c.mgr.CallWithContext(ctx, mgrIface+".ResetFailedUnit", 0, spec.Name).Err
+
 	call := c.mgr.CallWithContext(ctx, mgrIface+".StartTransientUnit", 0,
 		spec.Name, "replace", props, []auxUnit{})
 	if call.Err != nil {
