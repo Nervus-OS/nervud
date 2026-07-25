@@ -248,16 +248,27 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 
 	// Capability：ambient + bounding 一起下发。
 	//
+	// 【必须是 uint64 位掩码，不是字符串数组】。unit 文件里写
+	// "AmbientCapabilities=CAP_NET_ADMIN" 是 systemd 的配置语法糖；而
+	// StartTransientUnit 走的是 D-Bus，这两个属性的签名是 t（uint64）。
+	// 发字符串数组 systemd 会以 "Failed to set unit properties: Unexpected
+	// message contents" 整体拒绝——错误里不会提是哪个属性，排查时看不出
+	// 是类型问题还是值不合法。
+	//
 	// 只在非空时下发：空集时保持 systemd 对非 root User= 的缺省行为（无能力），
-	// 显式下发一个空的 CapabilityBoundingSet 反而会写成 unit 属性，让
-	// systemctl show 的输出与「什么都没配」区分不开。
+	// 显式下发一个 0 掩码反而会写成 unit 属性，让 systemctl show 的输出与
+	// 「什么都没配」区分不开。
 	if len(spec.Sandbox.AmbientCapabilities) > 0 {
-		caps := append([]string(nil), spec.Sandbox.AmbientCapabilities...)
+		mask, err := capMask(spec.Sandbox.AmbientCapabilities)
+		if err != nil {
+			return nil, err
+		}
 		props = append(props,
-			// bounding 必须先于/同时给出：它是 ambient 的上界，缺了 ambient
-			// raise 会静默失败，unit 照常起来但没有那个能力
-			property{"CapabilityBoundingSet", dbus.MakeVariant(caps)},
-			property{"AmbientCapabilities", dbus.MakeVariant(caps)},
+			// bounding 必须一并给出：它是 ambient 的上界，缺了 ambient raise
+			// 会静默失败，unit 照常起来但没有那个能力——症状是运行期 EPERM，
+			// 跟没配一样
+			property{"CapabilityBoundingSet", dbus.MakeVariant(mask)},
+			property{"AmbientCapabilities", dbus.MakeVariant(mask)},
 		)
 	}
 
@@ -322,6 +333,47 @@ func BuildProperties(spec UnitSpec) ([]property, error) {
 	}
 
 	return props, nil
+}
+
+// ---- Capability 名字 -> 位掩码 -------------------------------------------
+
+// ErrUnknownCapability capability 名不认识，无法翻成位序号
+var ErrUnknownCapability = errors.New("systemd: unknown capability name")
+
+// capBits 是 capability 名 -> 位序号。序号即 linux/capability.h 里的 CAP_*
+// 常量值，与 /proc/<pid>/status 的 CapEff/CapAmb 位掩码一一对应。
+//
+// 为什么本包要自己存一份而不是从 pkgregistry 拿：systemd 子包不 import
+// pkgregistry（那会依赖倒挂，见 Runtime 枚举同样的处理）。两份表都是对
+// capabilities(7) 的抄写，抄错会被 TestCapMask 逐条比出来。
+var capBits = map[string]uint{
+	"CAP_CHOWN": 0, "CAP_DAC_OVERRIDE": 1, "CAP_DAC_READ_SEARCH": 2, "CAP_FOWNER": 3,
+	"CAP_FSETID": 4, "CAP_KILL": 5, "CAP_SETGID": 6, "CAP_SETUID": 7,
+	"CAP_SETPCAP": 8, "CAP_LINUX_IMMUTABLE": 9, "CAP_NET_BIND_SERVICE": 10,
+	"CAP_NET_BROADCAST": 11, "CAP_NET_ADMIN": 12, "CAP_NET_RAW": 13,
+	"CAP_IPC_LOCK": 14, "CAP_IPC_OWNER": 15, "CAP_SYS_MODULE": 16, "CAP_SYS_RAWIO": 17,
+	"CAP_SYS_CHROOT": 18, "CAP_SYS_PTRACE": 19, "CAP_SYS_PACCT": 20, "CAP_SYS_ADMIN": 21,
+	"CAP_SYS_BOOT": 22, "CAP_SYS_NICE": 23, "CAP_SYS_RESOURCE": 24, "CAP_SYS_TIME": 25,
+	"CAP_SYS_TTY_CONFIG": 26, "CAP_MKNOD": 27, "CAP_LEASE": 28, "CAP_AUDIT_WRITE": 29,
+	"CAP_AUDIT_CONTROL": 30, "CAP_SETFCAP": 31, "CAP_MAC_OVERRIDE": 32, "CAP_MAC_ADMIN": 33,
+	"CAP_SYSLOG": 34, "CAP_WAKE_ALARM": 35, "CAP_BLOCK_SUSPEND": 36, "CAP_AUDIT_READ": 37,
+	"CAP_PERFMON": 38, "CAP_BPF": 39, "CAP_CHECKPOINT_RESTORE": 40,
+}
+
+// capMask 把 capability 名字列表翻成 systemd D-Bus 要的 uint64 位掩码。
+//
+// 不认识的名字【整体失败】而不是跳过：跳过的话组件照常起来、照常缺那个能力，
+// 症状是运行期 EPERM，而日志里没有任何线索说少了一条。
+func capMask(names []string) (uint64, error) {
+	var mask uint64
+	for _, n := range names {
+		bit, ok := capBits[n]
+		if !ok {
+			return 0, fmt.Errorf("%w: %q", ErrUnknownCapability, n)
+		}
+		mask |= 1 << bit
+	}
+	return mask, nil
 }
 
 // ---- 本地白名单校验 ------------------------------------------------------
