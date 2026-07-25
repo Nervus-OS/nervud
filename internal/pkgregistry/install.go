@@ -51,6 +51,11 @@ type PackageInstaller interface {
 	CreatePrivateDataDirectory(ctx context.Context, subj authority.Subject, req authority.CreateDataDirRequest) (authority.DirHandle, error)
 	// RemovePackageTree 递归删除已安装 Package 的代码或数据目录（卸载 / 安装失败补偿）
 	RemovePackageTree(ctx context.Context, subj authority.Subject, req authority.RemovePackageTreeRequest) error
+	// EnsureAppUser 把已分配的 App UID 登记进系统用户库。幂等。
+	//
+	// systemd 的 User= 即便给数字 UID 也要求它能被 NSS 解析，否则 spawn 在
+	// step USER 失败（217/USER）。没有这一步，任何 Package 组件都起不来。
+	EnsureAppUser(ctx context.Context, subj authority.Subject, req authority.EnsureAppUserRequest) error
 }
 
 // IdentityUpdater 是 pkgregistry 对 identity.Registry 的窄接口依赖：

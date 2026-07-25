@@ -58,9 +58,18 @@ type fakeInstaller struct {
 	installErr error
 	dataDirErr error
 	removeErr  error
+	appUserErr error
 	installed  []authority.InstallVerifiedPackageRequest
 	dataDirs   []authority.CreateDataDirRequest
 	removed    []authority.RemovePackageTreeRequest
+	appUsers   []authority.EnsureAppUserRequest
+}
+
+func (f *fakeInstaller) EnsureAppUser(
+	_ context.Context, _ authority.Subject, req authority.EnsureAppUserRequest,
+) error {
+	f.appUsers = append(f.appUsers, req)
+	return f.appUserErr
 }
 
 func (f *fakeInstaller) InstallVerifiedPackage(
@@ -377,5 +386,102 @@ func TestInstall_UpgradeReplacesOldVersion(t *testing.T) {
 	e, ok := mod.registry.Lookup("com.example.app")
 	if !ok || e.ActiveVersion != "2.0.0" || e.VersionCode != 200 {
 		t.Fatalf("got %+v, want active version 2.0.0 code 200", e)
+	}
+}
+
+// ---- 运行前置补齐（provision.go）------------------------------------------
+
+// newProvisionModule 构造一个只为 provision 测试用的 Module。
+func newProvisionModule(t *testing.T, auth *fakeInstaller) *Module {
+	t.Helper()
+	dir := t.TempDir()
+	return New(auth, &fakeIdentityUpdater{}, &fakePermissionArbiter{}, NewRegistry(),
+		TrustStore{}, &fakeAuditor{}, nil,
+		filepath.Join(dir, "registry"), filepath.Join(dir, "system-packages"),
+		filepath.Join(dir, "packages"), filepath.Join(dir, "data"))
+}
+
+func TestProvision_CreatesUserAndDataDir(t *testing.T) {
+	// 系统镜像包走 scanSystemImage，那条路径分配 UID、登记 Entry，却从不建
+	// 用户也不建数据目录。缺前者 systemd 在 step USER 失败（217/USER），
+	// 缺后者在 step NAMESPACE 失败（226/NAMESPACE）——两条都是真实撞到的。
+	auth := &fakeInstaller{}
+	m := newProvisionModule(t, auth)
+
+	e := Entry{
+		Manifest: Manifest{PackageID: "nervus.example"},
+		UID:      20005,
+		Source:   SourceSystemImage,
+	}
+	if err := m.provisionEntry(context.Background(), e); err != nil {
+		t.Fatalf("provisionEntry: %v", err)
+	}
+
+	if len(auth.appUsers) != 1 {
+		t.Fatalf("EnsureAppUser 调用了 %d 次, want 1", len(auth.appUsers))
+	}
+	u := auth.appUsers[0]
+	if u.UID != 20005 || u.GID != 20005 {
+		t.Errorf("uid/gid = %d/%d, want 20005/20005（GID 恒等于 UID）", u.UID, u.GID)
+	}
+	if u.Name != authority.AppUserName(20005) {
+		t.Errorf("name = %q, want %q", u.Name, authority.AppUserName(20005))
+	}
+
+	if len(auth.dataDirs) != 1 {
+		t.Fatalf("CreatePrivateDataDirectory 调用了 %d 次, want 1", len(auth.dataDirs))
+	}
+	d := auth.dataDirs[0]
+	if d.Perm != 0o700 {
+		t.Errorf("perm = %#o, want 0700（私有的定义本身）", d.Perm)
+	}
+	if d.UID != 20005 {
+		t.Errorf("data dir uid = %d, want 20005", d.UID)
+	}
+}
+
+func TestProvision_IsIdempotent(t *testing.T) {
+	// 每次启动扫描都会对每个包跑一遍。数据目录已存在时 authority 回
+	// ErrAlreadyExists，那在这里是【正常结果】而不是错误。
+	auth := &fakeInstaller{dataDirErr: fmt.Errorf("%w: nervus.example", authority.ErrAlreadyExists)}
+	m := newProvisionModule(t, auth)
+
+	e := Entry{Manifest: Manifest{PackageID: "nervus.example"}, UID: 20006}
+	if err := m.provisionEntry(context.Background(), e); err != nil {
+		t.Fatalf("目录已存在不该算失败: %v", err)
+	}
+}
+
+func TestProvision_RealDataDirErrorStillFails(t *testing.T) {
+	// 只有 ErrAlreadyExists 被容忍。别的错误（权限不足、路径逃逸）必须报出来
+	// ——否则一个建不出来的数据目录会被静默吞掉，组件随后在 NAMESPACE 失败，
+	// 而日志里看不出根因。
+	auth := &fakeInstaller{dataDirErr: errors.New("permission denied")}
+	m := newProvisionModule(t, auth)
+
+	e := Entry{Manifest: Manifest{PackageID: "nervus.example"}, UID: 20007}
+	if err := m.provisionEntry(context.Background(), e); err == nil {
+		t.Fatal("真实的目录创建失败必须报出来")
+	}
+}
+
+func TestProvisionAll_OneFailureDoesNotBlockOthers(t *testing.T) {
+	// 一个包的用户建不出来不该让整机起不来。那个包的组件随后会在 systemd 侧
+	// 失败，由 service 的监督链按 criticality 处置——那条路径本来就是为
+	// 「组件起不来」准备的。
+	auth := &fakeInstaller{appUserErr: errors.New("boom")}
+	m := newProvisionModule(t, auth)
+
+	entries := []Entry{
+		{Manifest: Manifest{PackageID: "a"}, UID: 20010},
+		{Manifest: Manifest{PackageID: "b"}, UID: 20011},
+	}
+	ok := m.provisionAll(context.Background(), entries)
+	if ok != 0 {
+		t.Errorf("全部失败时 ok = %d, want 0", ok)
+	}
+	// 关键：第二个包仍然被尝试过，没有在第一个失败时提前返回
+	if len(auth.appUsers) != 2 {
+		t.Fatalf("只尝试了 %d 个包，第一个失败不该阻断其余", len(auth.appUsers))
 	}
 }

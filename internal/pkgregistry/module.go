@@ -88,6 +88,19 @@ func (m *Module) Start(_ context.Context) error {
 		}
 	}
 
+	// 补齐运行前置：系统用户 + 私有数据目录。
+	//
+	// 【必须在这里，不能只在 install.go 里做】。系统镜像包走 scanSystemImage，
+	// 那条路径分配 UID、登记 Entry，却从不建用户也不建数据目录——于是系统包
+	// 在一台干净机器上永远起不来（217/USER 与 226/NAMESPACE）。
+	//
+	// 放在 Replace 之前：投影推出去之后 service 模块随时可能拿它去拉进程，
+	// 那时前置必须已经就位。
+	if n := m.provisionAll(context.Background(), result.Entries); m.log != nil {
+		m.log.Info("pkgregistry: provisioned package runtime prerequisites",
+			"ok", n, "total", len(result.Entries))
+	}
+
 	if err := m.registry.Replace(result.Entries); err != nil {
 		return err
 	}

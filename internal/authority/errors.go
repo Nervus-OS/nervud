@@ -21,3 +21,10 @@ var (
 	// 属于危险的假成功。开发机（Windows/macOS）上碰到本错误应视为装配错误
 	ErrUnsupportedPlatform = errors.New("authority: operation requires linux")
 )
+
+// ErrAlreadyExists 目标已经存在。
+//
+// 独立成哨兵而不是让调用方判 unix.EEXIST：那会把 x/sys/unix 拖进
+// pkgregistry 等业务包，而 .golangci.yml 的 depguard 明确只允许本包碰它。
+// 「已存在」对幂等调用方是正常结果，它们需要能识别出这一种。
+var ErrAlreadyExists = errors.New("authority: target already exists")

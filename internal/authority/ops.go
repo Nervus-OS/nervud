@@ -73,6 +73,12 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 	// mkdirat 成功 = 本调用创建了这个目录（若已存在会 EEXIST），因此后续
 	// 任一步失败时，回滚删除它是安全的 - 我们删的一定是自己刚建的
 	if err := unix.Mkdirat(parentFD, leaf, req.Perm); err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			// 目录已存在。对幂等调用方（启动扫描时逐包补齐运行前置）这是正常
+			// 结果，包成 ErrAlreadyExists 让它们能识别，而不必自己判 EEXIST
+			// ——那会把 x/sys/unix 拖进业务包，depguard 不允许。
+			return DirHandle{}, fmt.Errorf("%w: %s", ErrAlreadyExists, leaf)
+		}
 		return DirHandle{}, fmt.Errorf("mkdirat %s: %w", leaf, err)
 	}
 

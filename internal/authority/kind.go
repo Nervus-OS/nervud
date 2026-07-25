@@ -23,10 +23,13 @@ const (
 	KindEnableFsVerity         Kind = 7
 	KindReboot                 Kind = 8
 	KindRemovePackageTree      Kind = 9
+	KindEnsureAppUser          Kind = 10
 )
 
 func (k Kind) String() string {
 	switch k {
+	case KindEnsureAppUser:
+		return "EnsureAppUser"
 	case KindPrepareAppIdentity:
 		return "PrepareAppIdentity"
 	case KindInstallVerifiedPackage:
