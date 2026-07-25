@@ -266,3 +266,37 @@ func (g *Gate) osReboot(ctx context.Context, req RebootRequest) (struct{}, error
 	}
 	return struct{}{}, nil
 }
+
+// osPower 经 systemd 发起有序重启/关机。
+func (g *Gate) osPower(ctx context.Context, req PowerRequest) (struct{}, error) {
+	pm, ok := g.spawner.(PowerManager)
+	if !ok {
+		// 没有 systemd 后端（测试替身/非 Linux 装配）。fail-closed：
+		// 绝不退回 reboot(2) 硬重启——那是另一个语义，用户点的是「有序关机」
+		return struct{}{}, ErrUnsupportedPlatform
+	}
+
+	// 与 osReboot 同一个特例：成功即不返回（systemd 立刻开始停机，本进程随之
+	// 被 SIGTERM），do 里 run 之后的那条审计走不到。所以先落 intent 记录。
+	// 这是全包第二处、也是最后一处允许在 run 内部直接调 auditor 的地方
+	g.auditor.Record(ctx, audit.Event{
+		Action: "PowerAction.initiated", Subject: "kernel", Detail: req.Detail(),
+	})
+	// 不做 unix.Sync()：systemd 的 shutdown.target 会正常卸载文件系统，
+	// 那比这里抢一次 sync 完整得多
+
+	var err error
+	switch req.Action {
+	case PowerActionReboot:
+		err = pm.Reboot(ctx)
+	case PowerActionPowerOff:
+		err = pm.PowerOff(ctx)
+	default:
+		// Validate 已经挡过，这里是纵深：不认识的动作绝不猜
+		return struct{}{}, fmt.Errorf("%w: unknown power action %d", ErrInvariantViolated, req.Action)
+	}
+	if err != nil {
+		return struct{}{}, err
+	}
+	return struct{}{}, nil
+}

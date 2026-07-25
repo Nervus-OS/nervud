@@ -24,6 +24,11 @@ const (
 	KindReboot                 Kind = 8
 	KindRemovePackageTree      Kind = 9
 	KindEnsureAppUser          Kind = 10
+	// KindPowerAction 是【有序】重启/关机（经 systemd 走完整 shutdown.target）。
+	// 与 KindReboot 分开是因为它们是两件事：KindReboot 是 reboot(2) 硬重启，
+	// 属于故障恢复；本操作是用户在设置里发起的正常电源动作。
+	// 具体是重启还是关机由 PowerRequest.Action 决定，落进审计的 Detail
+	KindPowerAction Kind = 11
 )
 
 func (k Kind) String() string {
@@ -48,6 +53,8 @@ func (k Kind) String() string {
 		return "Reboot"
 	case KindRemovePackageTree:
 		return "RemovePackageTree"
+	case KindPowerAction:
+		return "PowerAction"
 	default:
 		return "Unspecified"
 	}

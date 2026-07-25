@@ -77,5 +77,12 @@ func DefaultInterfaceCatalog() InterfaceCatalog {
 		// 但 v1 只能挂一个接口级门槛，与 safety.control 同一取舍——宁可让只想读
 		// 状态的包也需要 control 权限，也不能让只该读状态的包能让手臂动起来。
 		{InterfaceID: "nervus.interface.manipulator.arm", RequiredPermission: "perm.manipulator.control"},
+		// 整机电源（有序重启/关机）。内建接口，由 nervud 自己实现，
+		// 见 internal/power/builtin.go。
+		//
+		// 与 safety.control / pkg.manager 同一个教训：漏登记这一条不是
+		// fail-closed 而是 fail-open —— Lookup 未命中时 requiredPermission
+		// 取空串，即【不设门槛】，任意 Ordinary 应用都能把机器关掉。
+		{InterfaceID: "nervus.interface.power", RequiredPermission: "perm.authority.power"},
 	})
 }

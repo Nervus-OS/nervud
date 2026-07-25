@@ -114,6 +114,60 @@ func (g *Gate) Reboot(ctx context.Context, subj Subject, req RebootRequest) erro
 	return err
 }
 
+// ---- PowerAction ----------------------------------------------------------
+
+// PowerAction 是有序电源动作的种类
+type PowerAction uint8
+
+const (
+	// PowerActionUnspecified 零值即无效，防止未初始化的请求被当成合法操作。
+	// 缺省绝不能是「重启」——一个漏填字段的调用不该让整机重启
+	PowerActionUnspecified PowerAction = iota
+	PowerActionReboot
+	PowerActionPowerOff
+)
+
+func (a PowerAction) String() string {
+	switch a {
+	case PowerActionReboot:
+		return "reboot"
+	case PowerActionPowerOff:
+		return "poweroff"
+	default:
+		return "unspecified"
+	}
+}
+
+// PowerRequest 有序重启/关机整机（经 systemd 走完整 shutdown.target）。
+//
+// 与 RebootRequest 的分工见 authority/systemd/power.go 顶部：那个是 reboot(2)
+// 硬重启（故障恢复），这个是用户发起的正常电源动作
+type PowerRequest struct {
+	Action PowerAction
+	Reason string // 必填：无理由的关机不接受，审计必须能回答为什么
+}
+
+func (PowerRequest) Kind() Kind { return KindPowerAction }
+
+// Detail 进审计的 Detail 字段。把 action 也带上——同一个 Kind 下
+// 「重启」和「关机」是两个不同的事件，审计必须能区分
+func (r PowerRequest) Detail() string { return r.Action.String() + ": " + r.Reason }
+
+func (r PowerRequest) Validate(*Invariants) error {
+	if r.Action != PowerActionReboot && r.Action != PowerActionPowerOff {
+		return fmt.Errorf("%w: unknown power action %d", ErrInvariantViolated, r.Action)
+	}
+	if r.Reason == "" {
+		return fmt.Errorf("%w: power action without a reason is not accepted", ErrInvariantViolated)
+	}
+	return nil
+}
+
+func (g *Gate) Power(ctx context.Context, subj Subject, req PowerRequest) error {
+	_, err := do(ctx, g, subj, req, g.osPower)
+	return err
+}
+
 // ---- InstallVerifiedPackage -------------------------------------------
 
 // InstallVerifiedPackageRequest 把已经完成签名、digest 和权限裁决的 staging

@@ -201,6 +201,24 @@ func DefaultCatalog() Catalog {
 			Description:       "Reboot the device (platform-release signer only)",
 		},
 		{
+			// 用户发起的有序重启/关机。设置里的「电源」按钮走这条。
+			//
+			// 【与 perm.authority.reboot 的分界是「有序」而不是「谁签的」】：
+			// 那一条是 reboot(2) 硬重启，属于故障恢复——内核已判定系统不可信，
+			// 越快离开当前状态越好，所以只给 platform-release。
+			// 本条经 systemd 走完整 shutdown.target，组件收得到 SIGTERM、
+			// 文件系统正常卸载，与在终端敲 systemctl reboot 等价。
+			//
+			// 不设 RequireSignerRole：设置是 platform-systemapp 签的，
+			// 加了它就永远拿不到，而「用户能关自己的机器」不该需要内核发布密钥。
+			// MinTrust=Platform 仍然挡住了所有第三方应用——一个 Ordinary 应用
+			// 能随时把机器关掉，是拒绝服务。
+			ID:          "perm.authority.power",
+			MinTrust:    identity.TrustPlatform,
+			Mode:        GrantSignature,
+			Description: "Orderly reboot / power off the device via systemd",
+		},
+		{
 			// Safety 观察：读顶层状态 / motion epoch / 停止相位。
 			//
 			// 不是 Ordinary：安全态是判断机器此刻能不能动的依据，一个能持续

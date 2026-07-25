@@ -26,6 +26,7 @@ import (
 	"github.com/nervus-os/nervud/internal/operation"
 	"github.com/nervus-os/nervud/internal/permission"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
+	"github.com/nervus-os/nervud/internal/power"
 	"github.com/nervus-os/nervud/internal/preflight"
 	"github.com/nervus-os/nervud/internal/resource"
 	"github.com/nervus-os/nervud/internal/safety"
@@ -398,6 +399,19 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 		return nil, cleanup, fmt.Errorf("register builtin %s: %w", safety.BuiltinInterfaceID, err)
 	}
 	logger.Info("endpoint: builtin registered", "interface", safety.BuiltinInterfaceID)
+
+	// 整机电源（有序重启/关机）。同样是内建：真正执行的是 Authority Gate，
+	// 只有 nervud 有那个权限，不可能由外部 Provider 提供。
+	//
+	// 注册失败同样是硬错误：一个起来了但关不掉的系统，用户只能拔电，
+	// 而拔电正是这条通道存在的目的（避免非正常掉电损坏文件系统）
+	powerMod := power.New(auth, logger)
+	if err := epMod.RegisterBuiltin(
+		power.BuiltinInterfaceID, 1, 0, powerMod.BuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf("register builtin %s: %w", power.BuiltinInterfaceID, err)
+	}
+	logger.Info("endpoint: builtin registered", "interface", power.BuiltinInterfaceID)
 
 	k.Register(epMod)
 

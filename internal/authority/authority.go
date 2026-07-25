@@ -22,6 +22,19 @@ type UnitManager interface {
 	WaitUnit(ctx context.Context, name string) (systemd.ExitInfo, error)
 }
 
+// PowerManager 是 UnitManager 的【可选】扩展：整机有序电源动作。
+// *systemd.Conn 隐式满足（见 systemd/power.go）。
+//
+// 【为什么不直接并进 UnitManager】：起进程和关机是两种权限影响面完全不同的能力，
+// 合成一个接口意味着每个想注入 fake spawner 的测试都被迫实现关机方法——而那正是
+// 最不该被随手实现的东西。用可选接口 + 类型断言，拿不到就 fail-closed
+// （osPower 返回 ErrUnsupportedPlatform），既不扩大现有测试替身的责任，
+// 也不给「没有真实 systemd 时悄悄退回硬重启」留任何余地
+type PowerManager interface {
+	Reboot(ctx context.Context) error
+	PowerOff(ctx context.Context) error
+}
+
 // Gate 是 NSOS 全部 Linux 特权操作的唯一入口
 //
 // 它是 代码架构与审计边界，不是进程级隔离空间
