@@ -25,6 +25,14 @@ type RouteInfo struct {
 	TargetConn        ConnHandle
 	ServiceEndpointID uint64
 	ResourceHandle    string
+
+	// Builtin 非 nil 表示目标是 nervud 自己实现的内建 endpoint（见 builtin.go）：
+	// 调用方应当就地执行它，而不是把 Dispatch 转发给某条 Service 连接。
+	//
+	// 与 TargetConn 互斥：Builtin 非 nil 时 TargetConn 恒为 nil——内建没有连接。
+	// 调用方【先判 Builtin 再判 TargetConn】，顺序反了会把内建当成「路由成功但
+	// 没有转发目标」而回 UNAVAILABLE。
+	Builtin BuiltinHandler
 }
 
 // RouteError 是 Route 查表失败的结果
@@ -64,6 +72,10 @@ type serviceRegistration struct {
 	resourceHandle string // v1 固定 "base.main" 或空
 	visibility     pkgregistry.Visibility
 	generation     uint64 // 每次同一 (pkg,comp,interface) 重新注册递增
+
+	// builtin 非 nil 表示这是 nervud 自己实现的内建 endpoint（见 builtin.go）：
+	// 没有 conn、恒 live，Route 返回它而不是转发目标。
+	builtin BuiltinHandler
 
 	// live 为 false 表示该 registration 已失效（连接断开 / UnregisterEndpoint）。
 	// 引用它的 binding 在下次 Route 时据此判定失效 - 这是 v1 被动失效的落点，

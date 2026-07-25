@@ -281,28 +281,42 @@ func TestRejectsNonAdminUID(t *testing.T) {
 
 // ---- ServiceUID 放行（pkgmanagerd 装包链路的准入）------------------------
 
-// newServerWithServiceUID 构造一个放行了 serviceUID 的 Server，但【不 Start】。
-// 只验构造期的集合合并与配置，不碰真实 socket——chown 到一个不存在的 GID
-// 需要 root，普通开发机上跑不了。
+// newServerWithServiceUID 构造一个 Server 并【模拟 Start 时的服务 UID 解析】。
+//
+// 不真的 Start：chown 到一个不存在的 GID 需要 root，普通开发机跑不了。
+// 这里直接调 resolveServiceUID，验的是解析与集合合并本身。
 func newServerWithServiceUID(t *testing.T, adminUID, serviceUID uint32) *Server {
 	t.Helper()
 	dir := t.TempDir()
+
+	reg := &fakeLister{}
+	if serviceUID != 0 {
+		reg.entries = []pkgregistry.Entry{{
+			Manifest: pkgregistry.Manifest{PackageID: testServicePkgID},
+			UID:      serviceUID,
+		}}
+	}
 	srv, err := New(Config{
-		SockPath:    filepath.Join(dir, "s.sock"),
-		StagingRoot: filepath.Join(dir, "staging"),
-		AdminUID:    adminUID,
-		ServiceUID:  serviceUID,
-		Packages:    &fakePkgService{},
-		Registry:    &fakeLister{},
-		Permissions: &fakePermSetter{},
-		Auditor:     audit.New(discardLog()),
-		Log:         discardLog(),
+		SockPath:         filepath.Join(dir, "s.sock"),
+		StagingRoot:      filepath.Join(dir, "staging"),
+		AdminUID:         adminUID,
+		ServicePackageID: testServicePkgID,
+		Packages:         &fakePkgService{},
+		Registry:         reg,
+		Permissions:      &fakePermSetter{},
+		Auditor:          audit.New(discardLog()),
+		Log:              discardLog(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Start 里做的那一步。真实路径上它跑在启动扫描【之后】——装配期查不到 UID，
+	// 那正是这个改动要修的 bug。
+	srv.resolveServiceUID()
 	return srv
 }
+
+const testServicePkgID = "nervus.pkgmanagerd"
 
 func TestServiceUID_AdmittedAlongsideAdmin(t *testing.T) {
 	srv := newServerWithServiceUID(t, 0, 20001)
@@ -334,6 +348,35 @@ func TestServiceUID_ZeroDoesNotAdmitRootThroughBackDoor(t *testing.T) {
 	}
 	if len(srv.allowedUIDs) != 1 {
 		t.Errorf("allowed set = %v, want exactly the admin uid", srv.allowedUIDs)
+	}
+}
+
+func TestServiceUID_ResolvedAtStartNotAssembly(t *testing.T) {
+	// 这条锁住本次修的 bug：UID 是启动扫描时才分配的，装配期查不到。
+	// 构造完但还没解析时，允许集合里只该有运维身份。
+	dir := t.TempDir()
+	reg := &fakeLister{entries: []pkgregistry.Entry{{
+		Manifest: pkgregistry.Manifest{PackageID: testServicePkgID},
+		UID:      20001,
+	}}}
+	srv, err := New(Config{
+		SockPath: filepath.Join(dir, "s.sock"), StagingRoot: filepath.Join(dir, "staging"),
+		AdminUID: 1000, ServicePackageID: testServicePkgID,
+		Packages: &fakePkgService{}, Registry: reg, Permissions: &fakePermSetter{},
+		Auditor: audit.New(discardLog()), Log: discardLog(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, ok := srv.allowedUIDs[20001]; ok {
+		t.Error("构造期不该已经解析出服务 UID（那时扫描还没跑）")
+	}
+	srv.resolveServiceUID()
+	if _, ok := srv.allowedUIDs[20001]; !ok {
+		t.Error("Start 时的解析没有把服务 UID 补进允许集合")
+	}
+	if srv.serviceUID != 20001 {
+		t.Errorf("serviceUID = %d, want 20001", srv.serviceUID)
 	}
 }
 

@@ -375,6 +375,26 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// Endpoint 注册/解析/路由必须在 service 之后、IPC 之前注册，
 	// 因为 Resolve 拉起 on-demand 组件时依赖 svcMgr.EnsureStarted
 	epMod := endpoint.New(pkgReg, permReg, svcMgr, resMod, aud, logger)
+
+	// 注册内建 endpoint：由 nervud 自己实现、不经外部 Service 的 Interface。
+	//
+	// Safety 的观察与 re-arm 天生长在内核里，不可能由 Provider 提供——它们直接
+	// 操作内核状态。但 App 与恢复服务要用到，而控制面上唯一的调用形态是
+	// ResolveEndpoint → Request → Response。
+	//
+	// envelope.proto 堵死了「加一个新 body」这条路（「不属于那八件事就应该做成
+	// 某个 Interface 的 method」），所以走内建 endpoint：调用方用完全标准的
+	// Resolve+Request 访问，不知道也不需要知道对面是内核还是 Provider。
+	//
+	// 装配期注册失败是硬错误：一个少了 Safety 恢复通道的系统起来了也不该被信任
+	// ——机器一旦停机就再也解不开，只能重启整个内核。
+	if err := epMod.RegisterBuiltin(
+		safety.BuiltinInterfaceID, 1, 0, safetyMod.BuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf("register builtin %s: %w", safety.BuiltinInterfaceID, err)
+	}
+	logger.Info("endpoint: builtin registered", "interface", safety.BuiltinInterfaceID)
+
 	k.Register(epMod)
 
 	// Operation Manager：给机械臂轨迹/回零/移到位姿这类系统协调长任务一个由 nervud
@@ -431,31 +451,21 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// StagingRoot 留空 = admin.DefaultStagingDir（/var/lib/nervus/staging，由 preflight
 	// 建好，与 PackageRoot 同一文件系统，安装期 renameat2 才不跨盘）
 	// pkgmanagerd 需要连管理通道才能替 App 装包（App 不可能是 root，而系统服务
-	// 跑在 App UID 段）。它的 UID 是启动扫描时分配并持久化的，此刻 pkgregistry
-	// 已经注册在前（k.Register 顺序 1 vs 11）且 scanSystemImage 里已调过
-	// stableUID，所以这里查得到。
+	// 跑在 App UID 段）。
 	//
-	// 查不到（未装该包，例如最小镜像或开发机）就留 0：管理通道退回只认运维身份，
-	// 不报错也不放宽——这条链路缺失只意味着「装不了包」，不该拖垮内核启动。
-	var pkgManagerUID uint32
-	if e, ok := pkgReg.Lookup(pkgManagerPackageID); ok {
-		pkgManagerUID = e.UID
-		logger.Info("admin: package manager service will be admitted",
-			"package_id", pkgManagerPackageID, "uid", pkgManagerUID)
-	} else {
-		logger.Info("admin: package manager service not installed; admin channel is operator-only",
-			"package_id", pkgManagerPackageID)
-	}
-
+	// 【这里只传 Package ID，不传 UID】。UID 是启动扫描时才分配的，而扫描发生在
+	// pkgregistry 的 Start 里——k.Register 只是登记，Start 要等 k.Run 才执行，
+	// 那时 assemble 早已返回。在这里查 UID 永远查不到，写出来的放行逻辑是死代码。
+	// admin 自己在 Start 里解析（它注册在 pkgregistry 之后，那时扫描已完成）。
 	adminSrv, err := admin.New(admin.Config{
-		SockPath:    adminSockPath,
-		AdminUID:    uint32(os.Geteuid()),
-		ServiceUID:  pkgManagerUID,
-		Packages:    pkgMod,
-		Registry:    pkgReg,
-		Permissions: permReg,
-		Auditor:     aud,
-		Log:         logger,
+		SockPath:         adminSockPath,
+		AdminUID:         uint32(os.Geteuid()),
+		ServicePackageID: pkgManagerPackageID,
+		Packages:         pkgMod,
+		Registry:         pkgReg,
+		Permissions:      permReg,
+		Auditor:          aud,
+		Log:              logger,
 	})
 	if err != nil {
 		return nil, cleanup, err

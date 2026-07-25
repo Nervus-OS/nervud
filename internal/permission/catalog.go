@@ -172,6 +172,29 @@ func DefaultCatalog() Catalog {
 			RequireSignerRole: "platform-release",
 			Description:       "Reboot the device (platform-release signer only)",
 		},
+		{
+			// Safety 观察：读顶层状态 / motion epoch / 停止相位。
+			//
+			// 不是 Ordinary：安全态是判断机器此刻能不能动的依据，一个能持续
+			// 轮询它的进程等于拿到了机器运行状态的高保真侧信道。
+			ID:          "perm.safety.observe",
+			MinTrust:    identity.TrustOEM,
+			Mode:        GrantInstall,
+			Description: "Observe safety state (top state, motion epoch, stop phase)",
+		},
+		{
+			// Safety re-arm：解开停机锁存，让机器重新允许运动。
+			//
+			// 这是【全系统风险最高的一个权限】。运动权限误用只让机器动一下，
+			// 这个误用让整套安全防护失效。因此与 reboot 同级：platform trust +
+			// 只给 platform-release 签的包（即 nervus.safety.recovery 那类
+			// 随镜像发布的恢复服务）。
+			ID:                "perm.safety.rearm",
+			MinTrust:          identity.TrustPlatform,
+			Mode:              GrantSignature,
+			RequireSignerRole: "platform-release",
+			Description:       "Clear the safety latch and re-allow motion (platform-release signer only)",
+		},
 	})
 	if err != nil {
 		// 硬编码表必须自洽；如果连这里都校验不过，说明代码本身有 bug，

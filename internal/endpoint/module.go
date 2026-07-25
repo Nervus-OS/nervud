@@ -105,6 +105,11 @@ type Module struct {
 	// generations 记录每个 (pkg,comp,interface) 三元组已经历过的注册次数，
 	// 供 serviceRegistration.generation 使用
 	generations map[registrationKey]uint64
+
+	// builtinSeq 给内建 endpoint 分配 service 侧 id。与外部注册共用
+	// serviceRegistration 结构但独立编号——内建没有 conn，那个 id 只用于
+	// 诊断，永远不会出现在任何一条 Dispatch 上。
+	builtinSeq uint64
 }
 
 // New 构造 endpoint 的 Module

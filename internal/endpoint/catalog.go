@@ -43,5 +43,19 @@ func (c InterfaceCatalog) Lookup(id string) (InterfaceCatalogEntry, bool) {
 func DefaultInterfaceCatalog() InterfaceCatalog {
 	return NewInterfaceCatalog([]InterfaceCatalogEntry{
 		{InterfaceID: "nervus.interface.motion.base", RequiredPermission: "perm.motion.control"},
+		// 内建接口（由 nervud 自己实现，见 endpoint/builtin.go）。
+		//
+		// 【内建不等于免检】：Resolve 阶段照样查这张表。「谁实现的」与「谁能调」
+		// 是两件独立的事——恰恰因为它由内核实现、能直接操作安全状态，
+		// 门槛才更该登记在这里。
+		//
+		// 这里只能挂一个接口级权限。GetState 只需要 observe，而 Rearm 需要
+		// rearm —— 两者差着 OEM 与 platform 两个 trust 等级。取更严的那个作为
+		// 接口级门槛，method 级细分等 method_registry 接线后由 method_meta 承担
+		// （safety_control.proto 里已经逐方法标好了 required_permission）。
+		//
+		// 取严不取松：让一个只想读状态的包暂时也需要 rearm 权限，代价是它读不到；
+		// 反过来取松，一个只该读状态的包就能解开停机锁存。
+		{InterfaceID: "nervus.interface.safety.control", RequiredPermission: "perm.safety.rearm"},
 	})
 }

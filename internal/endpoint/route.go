@@ -36,6 +36,7 @@ func (m *Module) Route(conn ConnHandle, endpointID uint64) (RouteInfo, RouteErro
 		TargetConn:        b.target.conn,
 		ServiceEndpointID: b.target.id,
 		ResourceHandle:    b.resourceHandle,
+		Builtin:           b.target.builtin,
 	}, RouteError{}
 }
 

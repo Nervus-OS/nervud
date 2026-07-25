@@ -26,6 +26,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/control"
+	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
@@ -495,6 +496,14 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), rerr.Code)))
 	}
 
+	// 内建 endpoint：目标是 nervud 自己，就地执行，不走 Dispatch。
+	//
+	// 【必须先判 Builtin 再判 TargetConn】。内建没有连接，TargetConn 恒为 nil，
+	// 顺序反了会把它当成「路由成功但没有转发目标」直接回 UNAVAILABLE。
+	if route.Builtin != nil {
+		return co.handleBuiltinRequest(req, route.Builtin)
+	}
+
 	target, ok := route.TargetConn.(*conn)
 	if !ok || target == nil {
 		// Route 报告成功，但没有可转发的真实连接（装配缺口，或测试替身故意
@@ -743,4 +752,65 @@ func negotiateVersion(h *ipcv1.Hello, srvMajor, srvMinorMax uint32) (major, mino
 // bodyName 返回 Envelope body 的具体类型名，仅用于诊断日志
 func bodyName(env *ipcv1.Envelope) string {
 	return fmt.Sprintf("%T", env.GetBody())
+}
+
+// handleBuiltinRequest 就地执行一次内建 endpoint 调用并回 Response。
+//
+// 与转发路径的三处不同：
+//
+//  1. 不占 route 表。内建没有「等待对端回结果」这回事——执行完就有结果，
+//     不存在迟到、重复或撤销后到达的 DispatchResult。
+//  2. 不占 in-flight 预算。那个预算是为了限制【本连接压在别的进程上】的
+//     未完成工作量；内建跑在自己的 goroutine 里，由 deadline 约束。
+//  3. panic 必须就地拦住。内建 handler 跑在【内核进程】里，一个 panic 会带走
+//     整个 nervud —— 那比任何一次调用失败都严重。转发路径没有这个风险，
+//     因为 Provider 在别的进程里。
+func (co *conn) handleBuiltinRequest(req *ipcv1.Request, h endpoint.BuiltinHandler) bool {
+	deadline := time.Now().Add(clampTimeout(req.GetTimeoutMs()))
+	if time.Until(deadline) <= 0 {
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED)))
+	}
+
+	// 起 goroutine 而不是同步执行：读循环不能被一个慢 handler 卡住，否则这条
+	// 连接上后续的 Ping/Cancel 全都读不到，客户端会误判为失联。
+	go func() {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+
+		payload, code := co.s.callBuiltin(ctx, h, co.caller, req.GetMethodId(), req.GetPayload())
+
+		var resp *ipcv1.Response
+		if code == ipcv1.StatusCode_STATUS_CODE_OK || code == ipcv1.StatusCode_STATUS_CODE_ACCEPTED {
+			resp = &ipcv1.Response{
+				RequestId: req.GetRequestId(),
+				Outcome: &ipcv1.Response_Success{Success: &ipcv1.Success{
+					Code: code, Payload: payload,
+				}},
+			}
+		} else {
+			resp = failureResponse(req.GetRequestId(), code)
+		}
+		co.enqueue(responseEnvelope(resp))
+	}()
+	return true
+}
+
+// callBuiltin 执行 handler 并把 panic 转成 INTERNAL。
+//
+// 内建 handler 跑在内核进程里，panic 会带走整个 nervud——机器上所有 App 的
+// 连接、在途调用、以及 Safety 监督链一起消失。相比之下让这一次调用失败是
+// 明显更小的代价。
+func (s *Server) callBuiltin(
+	ctx context.Context, h endpoint.BuiltinHandler, caller identity.Caller,
+	methodID uint32, payload []byte,
+) (out []byte, code ipcv1.StatusCode) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("ipc: builtin handler panicked",
+				"method_id", methodID, "caller", caller.PackageID, "panic", r)
+			out, code = nil, ipcv1.StatusCode_STATUS_CODE_INTERNAL
+		}
+	}()
+	return h(ctx, caller, methodID, payload)
 }

@@ -79,9 +79,16 @@ type Config struct {
 	// 是合法值，无法用零值区分未设置。
 	AdminUID uint32
 
-	// ServiceUID 是唯一被额外放行的系统服务 UID（nervus.pkgmanagerd）。
-	// 0 表示不放行任何服务，本通道退回只认运维身份。
+	// ServicePackageID 是唯一被额外放行的系统服务的 Package ID
+	// （生产为 nervus.pkgmanagerd）。空表示不放行任何服务。
 	//
+	// 【存 Package ID 而不是 UID】。UID 是启动扫描时才分配的，而装配期
+	// （main.go 的 assemble）扫描还没跑——k.Register 只是登记，Start 要等
+	// k.Run 才执行。在装配期查 UID 永远查不到，那样写出来的放行逻辑是死代码：
+	// 日志里会一直是 service_uid=0，而 pkgmanagerd 连不上管理通道。
+	//
+	// 改为存 ID、在 Start 里解析：admin 注册在 pkgregistry 之后，Start 也就
+	// 在扫描之后跑，那时 UID 已经分配并持久化。
 	// 为什么需要它：装包必须由一个【系统服务】对 App 提供（App 不可能是 root），
 	// 而系统服务跑在 App UID 段（20000-59999），按单值 root 判定连不上本通道。
 	//
@@ -98,9 +105,9 @@ type Config struct {
 	// 全部命令仍旧只是把请求投递给同进程的 pkgregistry.Module，签名、digest、
 	// 升级裁决、权限交集一律在那里复核。pkgmanagerd 不做任何安全判定。
 	//
-	// 装配时由 main.go 从 Registry 查 nervus.pkgmanagerd 的 UID 填入；查不到
-	// （未安装）就留 0——不报错，也不放宽。
-	ServiceUID uint32
+	// 未安装该包时（最小镜像、开发机）Start 里查不到，本通道退回只认运维身份
+	// ——不报错，也不放宽。这条链路缺失只意味着「装不了包」，不该拖垮内核启动。
+	ServicePackageID string
 
 	Packages    PackageService
 	Registry    PackageLister
@@ -115,7 +122,10 @@ type Server struct {
 	sockPath    string
 	stagingRoot string
 	adminUID    uint32
-	serviceUID  uint32
+	// servicePkgID 是配置给的 Package ID；serviceUID 是 Start 时解析出的结果。
+	// 分成两个字段是因为解析必须推迟到启动扫描之后（见 Config.ServicePackageID）。
+	servicePkgID string
+	serviceUID   uint32
 	// allowedUIDs 是 adminUID + serviceUID 的合并集合，构造时冻结、运行期只读。
 	// 用 map 而不是两次比较：判定在每条连接上执行，集合语义更直白，
 	// 将来真要放宽也不必改判定逻辑。
@@ -165,28 +175,23 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Log == nil {
 		return nil, errors.New("admin: Log is required")
 	}
-	// 合并允许集合。运维身份恒在其中；ServiceUID 为 0 时不加入——UID 0 只能
-	// 通过 AdminUID 这条明确的路径进来，绝不接受从「服务放行」这个口子悄悄
-	// 混进一个 root。这不是理论风险：ServiceUID 由 Registry 查询结果填充，
-	// 查询失败或包未安装时的零值恰好就是 0。
+	// 允许集合此刻只含运维身份。服务 UID 在 Start 里解析后补入——装配期
+	// 启动扫描还没跑，这里查不到（见 Config.ServicePackageID）。
 	allowed := map[uint32]struct{}{cfg.AdminUID: {}}
-	if cfg.ServiceUID != 0 {
-		allowed[cfg.ServiceUID] = struct{}{}
-	}
 
 	return &Server{
-		sockPath:    cfg.SockPath,
-		stagingRoot: filepath.Clean(cfg.StagingRoot),
-		adminUID:    cfg.AdminUID,
-		serviceUID:  cfg.ServiceUID,
-		allowedUIDs: allowed,
-		pkgs:        cfg.Packages,
-		reg:         cfg.Registry,
-		perms:       cfg.Permissions,
-		aud:         cfg.Auditor,
-		log:         cfg.Log,
-		quit:        make(chan struct{}),
-		fatal:       make(chan error, 1),
+		sockPath:     cfg.SockPath,
+		stagingRoot:  filepath.Clean(cfg.StagingRoot),
+		adminUID:     cfg.AdminUID,
+		servicePkgID: cfg.ServicePackageID,
+		allowedUIDs:  allowed,
+		pkgs:         cfg.Packages,
+		reg:          cfg.Registry,
+		perms:        cfg.Permissions,
+		aud:          cfg.Auditor,
+		log:          cfg.Log,
+		quit:         make(chan struct{}),
+		fatal:        make(chan error, 1),
 	}, nil
 }
 
@@ -217,6 +222,10 @@ func (s *Server) Start(context.Context) error {
 		return fmt.Errorf("admin: listen %s: %w", s.sockPath, err)
 	}
 	ln.SetUnlinkOnClose(true)
+
+	// 解析服务 UID。【必须在这里而不是装配期】：本模块注册在 pkgregistry 之后，
+	// 因此本函数跑在启动扫描之后，那时 UID 已经分配并持久化。
+	s.resolveServiceUID()
 
 	// 顺序要紧：先 chown 组、再放宽 mode。
 	//
@@ -379,4 +388,35 @@ func (s *Server) audit(action, subject string, denied bool, err error, detail st
 	s.aud.Record(context.Background(), audit.Event{
 		Action: action, Subject: subject, Denied: denied, Err: err, Detail: detail,
 	})
+}
+
+// resolveServiceUID 从 Registry 里查出被放行服务的 UID 并补进允许集合。
+//
+// 只在 Start 里调用一次。运行期不重查：pkgmanagerd 是系统镜像包，它的 UID
+// 一旦分配就跨重启不变，而且系统包不能被动态卸载（ErrSystemPackageImmutable）。
+//
+// UID 0 一律丢弃——root 只能通过 AdminUID 这条明确路径进来，绝不接受从
+// 「服务放行」这个口子悄悄混进一个 root。这不是理论风险：查不到时的零值
+// 恰好就是 0。
+func (s *Server) resolveServiceUID() {
+	if s.servicePkgID == "" {
+		return
+	}
+	for _, e := range s.reg.List() {
+		if e.Manifest.PackageID != s.servicePkgID {
+			continue
+		}
+		if e.UID == 0 {
+			s.log.Warn("admin: service package has uid 0; refusing to admit",
+				"package_id", s.servicePkgID)
+			return
+		}
+		s.serviceUID = e.UID
+		s.allowedUIDs[e.UID] = struct{}{}
+		s.log.Info("admin: service package admitted",
+			"package_id", s.servicePkgID, "uid", e.UID)
+		return
+	}
+	s.log.Info("admin: service package not installed; channel is operator-only",
+		"package_id", s.servicePkgID)
 }
