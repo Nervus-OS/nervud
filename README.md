@@ -99,7 +99,22 @@ typed detail。`safety/builtin.go` 已经算出了 `WRONG_STATE`（别试了）�
 `audit` 仍是往 slog 写。`internal/audit/audit.go` 的 TODO 写着要换
 append-only 文件 + 轮转 + 完整性保护。
 
-### 7. 其它接缝
+### 7. 所有接口默认绑在运动基座资源上
+
+`endpoint/resolve.go` 的 `resolveSelector`：selector 留空时无条件解析
+`nervus.resource.motion.base / main`。
+
+后果有两层：
+
+- **语义不对**：端到端里 `nervus.interface.pkg.manager` 解析出来的
+  `resource_handle` 是 `base.main` —— 包管理器不是运动资源
+- **耦合**：Resource Registry 里没有运动基座时，**每一个不填 selector 的
+  Resolve 都会 RESOURCE_NOT_FOUND**。一台没有运动底盘的设备因此装不了软件
+
+治本是让「这个接口需不需要绑资源」由接口自己声明（`provider_descriptor.proto`
+数据驱动，见缺口 3），而不是在 Resolve 里兜一个运动专用的默认值。
+
+### 8. 其它接缝
 
 - `health.New(safetyMod, ctl, nil)` —— 第三个观察者是 nil，因为
   `*service.Manager` 没实现 `Instances()`。补个方法就能接上
