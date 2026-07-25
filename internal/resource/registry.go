@@ -127,6 +127,26 @@ func (r *Registry) Resolve(resourceType, role string) (handle string, ok bool) {
 //
 // 对未初始化的 Registry 同样 fail-safe 返回 false。NewRegistry 拒绝空 Handle
 // 输入，因此空字符串天然不会出现在 byHandle 里，不需要额外特判
+// Entries 返回全部已登记的 Resource，供诊断与一致性校验。
+//
+// 存在的具体理由是 endpoint 那边的一条结构不变量：每个已登记的物理资源都必须
+// 有一个设了门槛的接口。没有这个访问器，那条不变量就只能靠人记着——而
+// nervus.interface.manipulator.arm 漏登记那次证明了人记不住，且漏了没有任何
+// 运行期症状（Resolve 对未登记接口是 fail-open）。
+//
+// 对未初始化的 Registry fail-safe 返回空切片，与 Resolve/Valid 一致。
+// 顺序不保证：底层是 map，调用方要稳定输出请自行排序。
+func (r *Registry) Entries() []Entry {
+	if r == nil {
+		return nil
+	}
+	out := make([]Entry, 0, len(r.entries))
+	for _, e := range r.entries {
+		out = append(out, e)
+	}
+	return out
+}
+
 func (r *Registry) Valid(handle string) bool {
 	if r == nil {
 		return false

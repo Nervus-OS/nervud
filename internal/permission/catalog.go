@@ -238,6 +238,62 @@ func DefaultCatalog() Catalog {
 			Mode:        GrantUser,
 			Description: "Install and uninstall packages (dangerous; requires user confirmation)",
 		},
+		{
+			// 机械臂控制。nervus.interface.manipulator.arm 的门槛。
+			//
+			// 【补这条之前那个接口是完全不设防的】：endpoint 的 Resolve 在接口
+			// 目录里查不到条目时 requiredPermission 取空串（见 resolve.go），
+			// 而 manipulator.arm 一直没进目录——任何 Ordinary 应用都能解析到
+			// 机械臂并指挥它运动。manipulator.proto 里逐方法标着
+			// required_permission，只是内核侧从没接上。
+			//
+			// 与 perm.motion.control 并列而不是复用它：底盘和机械臂是两个独立
+			// 的物理危险源，一台只该扫地的机器不必因为要动底盘就把手臂也交出去。
+			// 撤销同样要联动 control 撤租 + 递增 motion epoch，故归入 motion 组。
+			// 查询已装软件列表。pkg_manager.proto 的 LIST 方法标着它。
+			//
+			// 与 perm.pkg.install 分开：列出装了什么是低危操作（设置里的
+			// 「应用管理」要它），而装包能往系统里放任意可执行文件。v1 的
+			// 接口级门槛只能挂一个，两者都由 perm.pkg.install 兜着；等
+			// method_registry 接线后本条才真正生效。
+			//
+			// 现在就登记，是因为 proto 已经冻结并引用了它——一个被 proto 指名
+			// 却不存在的权限 ID，在 V1GrantAll 关掉那天会变成「LIST 突然全被拒」，
+			// 而没人会想到去查一条从来没写进内核的权限。
+			ID:          "perm.pkg.query",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantInstall,
+			Description: "List installed packages",
+		},
+		{
+			ID:          "perm.manipulator.control",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantUser,
+			Group:       GroupMotion,
+			Description: "Command the manipulator arm (dangerous; requires user confirmation)",
+		},
+		{
+			// 蓝牙开关与配对。
+			//
+			// 这是【Nervus 层的门槛】，与组件的 Linux capability 是两件事：
+			// capability 决定那个进程能不能碰 rfkill/HCI（见 pkgregistry/
+			// privilege.go），本权限决定别的包能不能【叫它去碰】。
+			// 只做前者的话，蓝牙服务一旦起来，任何应用都能让它开关无线电。
+			ID:          "perm.bluetooth.admin",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantUser,
+			Description: "Turn Bluetooth on/off and manage pairing (dangerous; requires user confirmation)",
+		},
+		{
+			// 网络配置：连断 Wi-Fi、改地址、开热点。
+			//
+			// 与 perm.bluetooth.admin 同一层：门槛管的是「谁能叫网络服务改配置」，
+			// 不是那个服务自己有没有 CAP_NET_ADMIN。
+			ID:          "perm.network.admin",
+			MinTrust:    identity.TrustOrdinary,
+			Mode:        GrantUser,
+			Description: "Configure networking: join/leave networks, change addresses (dangerous)",
+		},
 	})
 	if err != nil {
 		// 硬编码表必须自洽；如果连这里都校验不过，说明代码本身有 bug，

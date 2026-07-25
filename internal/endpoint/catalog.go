@@ -65,5 +65,17 @@ func DefaultInterfaceCatalog() InterfaceCatalog {
 		// pkgmanagerd 并让它把任意 .nspkg 装进系统。目录缺条目在这里不是
 		// fail-closed 而是 fail-open，凡新增标准接口必须同步登记。
 		{InterfaceID: "nervus.interface.pkg.manager", RequiredPermission: "perm.pkg.install"},
+		// 机械臂。resource.DefaultRegistry 早就登记了 nervus.resource.manipulator.arm，
+		// manipulator.proto 也逐方法标了 required_permission，唯独【这张表】漏了它
+		// ——于是 Resolve 走 fail-open 分支，任何 Ordinary 应用都能解析到机械臂
+		// 并指挥它运动。
+		//
+		// 这条与 pkg.manager 那条是同一个教训：资源登记了、proto 标了，都不构成
+		// 门槛，Resolve 只看这张表。
+		//
+		// 取接口级最严：proto 里 GetArmState/SubscribeArmState 没标权限（只读），
+		// 但 v1 只能挂一个接口级门槛，与 safety.control 同一取舍——宁可让只想读
+		// 状态的包也需要 control 权限，也不能让只该读状态的包能让手臂动起来。
+		{InterfaceID: "nervus.interface.manipulator.arm", RequiredPermission: "perm.manipulator.control"},
 	})
 }
