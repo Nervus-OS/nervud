@@ -46,7 +46,7 @@ type LaneSpawner interface {
 // drainRevoked so the RT path remains lock-free, allocation-free, and
 // non-blocking.
 type LeaseObserver interface {
-	ControlLeaseEnded(conn ConnID, resource string)
+	ControlLeaseEnded(conn ConnID, resource string, leaseID ID)
 }
 
 type leaseObserverHolder struct {
@@ -150,7 +150,7 @@ func (m *Module) SetLeaseObserver(observer LeaseObserver) {
 
 func (m *Module) notifyLeaseEnded(l *Lease) {
 	if holder := m.observer.Load(); holder != nil {
-		holder.observer.ControlLeaseEnded(l.Conn, l.Resource)
+		holder.observer.ControlLeaseEnded(l.Conn, l.Resource, l.ID)
 	}
 }
 

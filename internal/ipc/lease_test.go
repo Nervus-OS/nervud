@@ -19,6 +19,11 @@ import (
 	"github.com/nervus-os/nervud/internal/permission"
 )
 
+type fakeLeaseKey struct {
+	conn     control.ConnID
+	resource string
+}
+
 // fakeLeases 是 ControlLeases 的测试替身。
 //
 // 不用真 control.Module：那需要 scheduler 的实时 Lane（要 CAP_SYS_NICE）与
@@ -43,6 +48,7 @@ type fakeLeases struct {
 		generation uint64
 	}
 	nextID byte
+	active map[fakeLeaseKey]control.Lease
 }
 
 func (f *fakeLeases) Acquire(req control.Request) (control.Lease, error) {
@@ -55,7 +61,7 @@ func (f *fakeLeases) Acquire(req control.Request) (control.Lease, error) {
 	f.nextID++
 	var id control.ID
 	id[0] = f.nextID
-	return control.Lease{
+	lease := control.Lease{
 		ID:                 id,
 		Conn:               req.Conn,
 		Class:              req.Class,
@@ -63,13 +69,23 @@ func (f *fakeLeases) Acquire(req control.Request) (control.Lease, error) {
 		ResourceGeneration: req.ResourceGeneration,
 		Epoch:              42,
 		Deadline:           time.Now().Add(30 * time.Second),
-	}, nil
+	}
+	if f.active == nil {
+		f.active = make(map[fakeLeaseKey]control.Lease)
+	}
+	f.active[fakeLeaseKey{conn: req.Conn, resource: req.Resource}] = lease
+	return lease, nil
 }
 
-func (f *fakeLeases) Release(id control.ID, _ control.ConnID) error {
+func (f *fakeLeases) Release(id control.ID, conn control.ConnID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.released = append(f.released, id)
+	for key, lease := range f.active {
+		if key.conn == conn && lease.ID == id {
+			delete(f.active, key)
+		}
+	}
 	return nil
 }
 
@@ -77,7 +93,7 @@ func (f *fakeLeases) CheckResource(
 	conn control.ConnID,
 	resource string,
 	generation uint64,
-) (uint64, error) {
+) (control.LeaseProof, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.checked = append(f.checked, struct {
@@ -85,13 +101,37 @@ func (f *fakeLeases) CheckResource(
 		resource   string
 		generation uint64
 	}{conn: conn, resource: resource, generation: generation})
-	return 42, f.checkErr
+	if f.checkErr != nil {
+		return control.LeaseProof{}, f.checkErr
+	}
+	lease, ok := f.active[fakeLeaseKey{conn: conn, resource: resource}]
+	if ok && lease.ResourceGeneration == generation {
+		return control.LeaseProof{
+			ID:                 lease.ID,
+			Class:              lease.Class,
+			Resource:           lease.Resource,
+			ResourceGeneration: lease.ResourceGeneration,
+			Deadline:           lease.Deadline,
+			Epoch:              lease.Epoch,
+		}, nil
+	}
+	return control.LeaseProof{
+		Resource:           resource,
+		ResourceGeneration: generation,
+		Deadline:           time.Now().Add(30 * time.Second),
+		Epoch:              42,
+	}, nil
 }
 
 func (f *fakeLeases) RevokeConn(conn control.ConnID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, conn)
+	for key := range f.active {
+		if key.conn == conn {
+			delete(f.active, key)
+		}
+	}
 }
 
 func (f *fakeLeases) RevokeResource(resource string, generation uint64) {
@@ -100,6 +140,11 @@ func (f *fakeLeases) RevokeResource(resource string, generation uint64) {
 	f.resources = append(f.resources, catalog.RevokedResource{
 		Handle: resource, Generation: generation,
 	})
+	for key, lease := range f.active {
+		if key.resource == resource && lease.ResourceGeneration == generation {
+			delete(f.active, key)
+		}
+	}
 }
 
 // snapshot 读取断言需要的计数，全程持锁。
@@ -571,6 +616,37 @@ func TestLeaseHandles_StayStableAcrossRenewalAndAreNeverReused(t *testing.T) {
 	if reissued == first || reissued == 0 {
 		t.Fatalf("reissued lease_id = %d, must be new and non-zero (old %d)",
 			reissued, first)
+	}
+}
+
+func TestControlLeaseEnded_ForgetsOnlyExactWireHandle(t *testing.T) {
+	co := &conn{connID: 41}
+	var endedID, replacementID control.ID
+	endedID[0] = 7
+	replacementID[0] = 8
+	endedHandle := co.registerLease(control.Lease{ID: endedID})
+	replacementHandle := co.registerLease(control.Lease{ID: replacementID})
+
+	s := &Server{
+		controlConns: map[control.ConnID]*conn{co.connID: co},
+		dispatch:     newDispatchTable(),
+		transfer:     newTestTransfer(t),
+	}
+	s.ControlLeaseEnded(co.connID, "base.main", endedID)
+	s.ControlLeaseEnded(co.connID, "base.main", endedID)
+
+	if _, ok := co.lookupLease(endedHandle); ok {
+		t.Fatal("ended lease wire handle is still registered")
+	}
+	if got, ok := co.lookupLease(replacementHandle); !ok || got != replacementID {
+		t.Fatalf("replacement wire handle = %v, ok=%v; want exact replacement lease", got, ok)
+	}
+	co.leaseMu.Lock()
+	forward, reverse := len(co.leases), len(co.leaseHandles)
+	co.leaseMu.Unlock()
+	if forward != 1 || reverse != 1 {
+		t.Fatalf("wire handle maps after terminal cleanup: forward=%d reverse=%d, want 1/1",
+			forward, reverse)
 	}
 }
 

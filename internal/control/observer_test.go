@@ -10,6 +10,7 @@ import (
 type leaseEnd struct {
 	conn     ConnID
 	resource string
+	leaseID  ID
 }
 
 type recordingLeaseObserver struct {
@@ -19,9 +20,9 @@ type recordingLeaseObserver struct {
 
 var _ LeaseObserver = (*recordingLeaseObserver)(nil)
 
-func (o *recordingLeaseObserver) ControlLeaseEnded(conn ConnID, resource string) {
+func (o *recordingLeaseObserver) ControlLeaseEnded(conn ConnID, resource string, leaseID ID) {
 	o.mu.Lock()
-	o.events = append(o.events, leaseEnd{conn: conn, resource: resource})
+	o.events = append(o.events, leaseEnd{conn: conn, resource: resource, leaseID: leaseID})
 	o.mu.Unlock()
 }
 
@@ -39,9 +40,10 @@ func assertSingleLeaseEnd(t *testing.T, observer *recordingLeaseObserver, lease 
 	if len(events) != 1 {
 		t.Fatalf("lease end notifications = %+v, want exactly one", events)
 	}
-	if events[0].conn != lease.Conn || events[0].resource != lease.Resource {
-		t.Fatalf("lease end notification = %+v, want conn=%d resource=%q",
-			events[0], lease.Conn, lease.Resource)
+	if events[0].conn != lease.Conn || events[0].resource != lease.Resource ||
+		events[0].leaseID != lease.ID {
+		t.Fatalf("lease end notification = %+v, want conn=%d resource=%q lease=%s",
+			events[0], lease.Conn, lease.Resource, lease.ID)
 	}
 }
 

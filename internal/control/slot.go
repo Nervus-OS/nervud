@@ -415,27 +415,34 @@ func (m *Module) Check(id ID, conn ConnID) (uint64, error) {
 }
 
 // CheckResource is the Method Gate query: it proves that conn currently owns a
-// valid lease for exactly resource without exposing or guessing the internal
-// 128-bit lease ID. The second lookup closes the race where the slot changes
-// after the first atomic load.
+// valid lease for exactly resource and returns the immutable fields IPC must
+// project into ExecutionContext. The second lookup closes the race where the
+// slot changes after the first atomic load.
 func (m *Module) CheckResource(
 	conn ConnID,
 	resource string,
 	resourceGeneration uint64,
-) (uint64, error) {
+) (LeaseProof, error) {
 	slot := m.slot(resource)
 	if slot == nil {
-		return 0, ErrControlNotHeld
+		return LeaseProof{}, ErrControlNotHeld
 	}
 	l := slot.cur.Load()
 	if l == nil || l.Conn != conn || l.Resource != resource ||
 		l.ResourceGeneration != resourceGeneration {
-		return 0, ErrControlNotHeld
+		return LeaseProof{}, ErrControlNotHeld
 	}
 	if err := m.validateCurrent(slot, l, time.Now()); err != nil {
-		return 0, err
+		return LeaseProof{}, err
 	}
-	return l.Epoch, nil
+	return LeaseProof{
+		ID:                 l.ID,
+		Class:              l.Class,
+		Resource:           l.Resource,
+		ResourceGeneration: l.ResourceGeneration,
+		Deadline:           l.Deadline,
+		Epoch:              l.Epoch,
+	}, nil
 }
 
 // ControlSnapshot 返回 legacy base.main 的控制面一致只读快照。其它 Resource 使用

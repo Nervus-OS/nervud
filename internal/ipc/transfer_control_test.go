@@ -203,6 +203,7 @@ func TestDispatchPublishAndRevocationCannotQueueCancelBeforeDispatch(t *testing.
 		id, status := s.dispatch.publishDispatchAtEpoch(
 			epoch, caller, 1, provider, time.Now().Add(time.Minute), route, 9,
 			1000, []byte("request"), &ipcv1.CallerContext{PackageId: caller.caller.PackageID},
+			nil,
 		)
 		routeID = id
 		published <- status

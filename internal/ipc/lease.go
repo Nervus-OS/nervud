@@ -97,7 +97,7 @@ func (co *conn) handleAcquireControl(req *ipcv1.AcquireControl) bool {
 			ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 			ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_RESOURCE_UNAVAILABLE))
 	}
-	deadlineNanos, err := co.s.leaseDeadlineNanos(lease.Deadline)
+	deadlineNanos, err := co.s.monotonicDeadlineNanos(lease.Deadline)
 	if err != nil {
 		// Do not leave a lease active when its required wire representation could
 		// not be produced. The caller never received a handle for this lease.
@@ -124,9 +124,9 @@ func (co *conn) handleAcquireControl(req *ipcv1.AcquireControl) bool {
 	}})
 }
 
-// leaseDeadlineNanos converts a Go monotonic deadline into the absolute Linux
-// CLOCK_MONOTONIC domain required by AcquireControlSuccess.deadline_nanos.
-func (s *Server) leaseDeadlineNanos(deadline time.Time) (int64, error) {
+// monotonicDeadlineNanos converts a Go monotonic deadline into the absolute
+// Linux CLOCK_MONOTONIC domain used by control and Dispatch execution contexts.
+func (s *Server) monotonicDeadlineNanos(deadline time.Time) (int64, error) {
 	if s == nil || s.monotonicNow == nil {
 		return 0, errors.New("ipc: monotonic clock unavailable")
 	}
@@ -193,6 +193,17 @@ func classFromWire(c ipcv1.ControllerClass) (control.Class, bool) {
 		return control.ClassAI, true
 	default:
 		return control.ClassUnspecified, false
+	}
+}
+
+func classToWire(c control.Class) (ipcv1.ControllerClass, bool) {
+	switch c {
+	case control.ClassHuman:
+		return ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN, true
+	case control.ClassAI:
+		return ipcv1.ControllerClass_CONTROLLER_CLASS_AI, true
+	default:
+		return ipcv1.ControllerClass_CONTROLLER_CLASS_UNSPECIFIED, false
 	}
 }
 

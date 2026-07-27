@@ -45,16 +45,6 @@ type safetyTripAdapter struct{ s *safety.Module }
 
 func (a safetyTripAdapter) Trip() { a.s.Trip(safety.ReasonSupervisorEscalation) }
 
-type transferControlRevoker interface {
-	RevokeControl(transfer.ConnID, string)
-}
-
-type transferLeaseObserver struct{ revoker transferControlRevoker }
-
-func (a transferLeaseObserver) ControlLeaseEnded(conn control.ConnID, resource string) {
-	a.revoker.RevokeControl(transfer.ConnID(conn), resource)
-}
-
 func main() {
 	// 启动参数部分（生产环境无）
 	// 控制面 IPC 入口。生产镜像固定为 /run/nervus/nervud.sock
@@ -517,7 +507,7 @@ func assemble(
 	// is never called by permission.Replace, so a package transaction cannot wait
 	// on systemd or accidentally restart a package while rolling back.
 	permReg.SetRuntimePermissionProjector(svcMgr)
-	ctl.SetLeaseObserver(transferLeaseObserver{revoker: ipcSrv})
+	ctl.SetLeaseObserver(ipcSrv)
 	pkgMod.SetTransferRevoker(ipcSrv)
 	if err := epMod.RegisterBuiltin(
 		catalog.InterfaceTransferControl, 1, 0, ipcSrv.TransferBuiltinHandler(),

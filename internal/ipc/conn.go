@@ -36,8 +36,9 @@ import (
 // nervud 只实现这一个 major；minor 只增不减，握手时在客户端声明的范围内取交集。
 // 重大不兼容提升 major 并拒绝无法协商的连接
 const (
-	protocolMajor    = 1
-	protocolMinorMax = 0
+	protocolMajor                 = 1
+	protocolMinorMax              = 1
+	executionContextProtocolMinor = 1
 )
 
 // 握手/分派阶段发现的、需要关闭连接的情形。分成两类哨兵是为了让离线审计规则
@@ -213,6 +214,16 @@ func (co *conn) lookupLease(handle uint64) (control.ID, bool) {
 	return id, ok
 }
 
+// wireLeaseHandle returns the connection-scoped wire handle for an internal
+// lease proof. A valid control lease without a registered handle is not safe to
+// dispatch: the Provider must see the same lease_id the caller received.
+func (co *conn) wireLeaseHandle(id control.ID) (uint64, bool) {
+	co.leaseMu.Lock()
+	defer co.leaseMu.Unlock()
+	handle, ok := co.leaseHandles[id]
+	return handle, ok && handle != 0
+}
+
 // forgetLease 注销一个已释放的句柄。
 //
 // 句柄【不复用】：同一连接上的下一个租约拿新号。复用会让一条迟到的
@@ -220,11 +231,27 @@ func (co *conn) lookupLease(handle uint64) (control.ID, bool) {
 // 接收方没有任何办法分辨。与 request_id 不回绕是同一条理由。
 func (co *conn) forgetLease(handle uint64) {
 	co.leaseMu.Lock()
+	co.forgetLeaseHandleLocked(handle)
+	co.leaseMu.Unlock()
+}
+
+// forgetLeaseID removes only the wire handle derived from the exact internal
+// lease that ended. Terminal notifications can arrive after timeout,
+// preemption, Safety revocation, or permission changes; deleting by resource
+// would risk removing a newer lease for the same connection and resource.
+func (co *conn) forgetLeaseID(id control.ID) {
+	co.leaseMu.Lock()
+	if handle, ok := co.leaseHandles[id]; ok {
+		co.forgetLeaseHandleLocked(handle)
+	}
+	co.leaseMu.Unlock()
+}
+
+func (co *conn) forgetLeaseHandleLocked(handle uint64) {
 	if id, ok := co.leases[handle]; ok && co.leaseHandles[id] == handle {
 		delete(co.leaseHandles, id)
 	}
 	delete(co.leases, handle)
-	co.leaseMu.Unlock()
 }
 
 // runWriter 是本连接唯一真正调用 co.c.Write 的 goroutine：循环从 outbox 取出
@@ -595,14 +622,17 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), requestValidationCode(err))))
 	}
-	if route.Method.Meta.GetRequiresControlLease() {
+	requiresControl := methodRequiresControl(route.Method.Meta)
+	var leaseProof control.LeaseProof
+	if requiresControl {
 		if route.ResourceHandle == "" || co.s.leases == nil {
 			return co.enqueue(responseEnvelope(failureResponse(
 				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
 		}
-		if _, err := co.s.leases.CheckResource(
+		leaseProof, err = co.s.leases.CheckResource(
 			co.connID, route.ResourceHandle, route.ResourceGeneration,
-		); err != nil {
+		)
+		if err != nil {
 			return co.enqueue(responseEnvelope(failureResponse(
 				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
 		}
@@ -611,7 +641,18 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), code)))
 	}
 
-	deadline := time.Now().Add(methodTimeout(req.GetTimeoutMs(), route.Method.Meta))
+	now := time.Now()
+	deadline := now.Add(methodTimeout(req.GetTimeoutMs(), route.Method.Meta))
+	if requiresControl {
+		if !leaseProof.Deadline.After(now) {
+			co.releaseRequest(req.GetRequestId())
+			return co.enqueue(responseEnvelope(failureResponse(
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
+		}
+		if leaseProof.Deadline.Before(deadline) {
+			deadline = leaseProof.Deadline
+		}
+	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		co.releaseRequest(req.GetRequestId())
@@ -635,6 +676,46 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
 	}
+	if requiresControl && target.negMinor < executionContextProtocolMinor {
+		co.releaseRequest(req.GetRequestId())
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
+	}
+
+	var execution *ipcv1.ExecutionContext
+	if target.negMinor >= executionContextProtocolMinor {
+		if (route.ResourceHandle == "") != (route.ResourceGeneration == 0) {
+			co.releaseRequest(req.GetRequestId())
+			return co.enqueue(responseEnvelope(failureResponse(
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
+		}
+		deadlineNanos, deadlineErr := co.s.monotonicDeadlineNanos(deadline)
+		if deadlineErr != nil {
+			co.log.Error("ipc: project Dispatch monotonic deadline", "err", deadlineErr)
+			co.releaseRequest(req.GetRequestId())
+			return co.enqueue(responseEnvelope(failureResponse(
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
+		}
+		execution = &ipcv1.ExecutionContext{
+			DeadlineNanos:      deadlineNanos,
+			ResourceHandle:     route.ResourceHandle,
+			ResourceGeneration: route.ResourceGeneration,
+		}
+		if requiresControl {
+			leaseID, found := co.wireLeaseHandle(leaseProof.ID)
+			controllerClass, validClass := classToWire(leaseProof.Class)
+			if !found || !validClass || leaseProof.Epoch == 0 ||
+				leaseProof.Resource != route.ResourceHandle ||
+				leaseProof.ResourceGeneration != route.ResourceGeneration {
+				co.releaseRequest(req.GetRequestId())
+				return co.enqueue(responseEnvelope(failureResponse(
+					req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
+			}
+			execution.LeaseId = leaseID
+			execution.ControllerClass = controllerClass
+			execution.MotionEpoch = leaseProof.Epoch
+		}
+	}
 
 	routeID, publishStatus := co.s.dispatch.publishDispatchAtEpoch(
 		dispatchEpoch,
@@ -647,6 +728,7 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		remainingMillis(remaining),
 		payload,
 		callerContext(co.caller, route.RequiredPermissions),
+		execution,
 	)
 	switch publishStatus {
 	case dispatchPublishEpochChanged:
@@ -663,11 +745,19 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
+	case dispatchPublishSequenceExhausted:
+		co.releaseRequest(req.GetRequestId())
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
 	case dispatchPublishOK:
 		return true
 	default:
 		panic("ipc: unknown dispatch publish status")
 	}
+}
+
+func methodRequiresControl(meta *ipcv1.MethodMeta) bool {
+	return meta != nil && (meta.GetRequiresControlLease() || meta.GetIsMotion())
 }
 
 // handleDispatchResult 处理 Service 送回的 DispatchResult：查表

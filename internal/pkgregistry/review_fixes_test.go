@@ -88,6 +88,47 @@ func TestInstall_UpgradeTriggersReload(t *testing.T) {
 	}
 }
 
+func TestInstall_UpgradeReportsCommittedReloadFailure(t *testing.T) {
+	mod, _, _, _ := newTestInstaller(t)
+	reloadErr := errors.New("runtime still stopping")
+	stopper := &fakeStopper{reloadErr: reloadErr}
+	mod.SetLifecycleHooks(stopper, nil)
+	key := newDevKey(t)
+
+	s1, m1, sig1 := newValidStagingWithKey(t, t.TempDir(), "com.example.app", "1.0.0", 100, key)
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: m1, SigBlock: sig1, StagingDir: s1, Source: SourceDynamicInstall,
+	}); err != nil {
+		t.Fatalf("install v1: %v", err)
+	}
+
+	s2, m2, sig2 := newValidStagingWithKey(t, t.TempDir(), "com.example.app", "2.0.0", 200, key)
+	entry, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: m2, SigBlock: sig2, StagingDir: s2, Source: SourceDynamicInstall,
+	})
+	if !errors.Is(err, ErrReloadPending) {
+		t.Fatalf("upgrade error = %v, want ErrReloadPending", err)
+	}
+	if !errors.Is(err, reloadErr) {
+		t.Fatalf("upgrade error = %v, want underlying reload error", err)
+	}
+	if entry.ActiveVersion != "2.0.0" {
+		t.Fatalf("returned entry = %+v, want committed version 2.0.0", entry)
+	}
+	if got, ok := mod.registry.Lookup("com.example.app"); !ok || got.ActiveVersion != "2.0.0" {
+		t.Fatalf("registry after committed reload failure = %+v, ok=%v", got, ok)
+	}
+	found := false
+	for _, event := range mod.aud.(*fakeAuditor).events {
+		if event.Action == "pkgregistry.Install" && event.Denied && errors.Is(event.Err, ErrReloadPending) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("committed reload failure was not recorded as a denied Install")
+	}
+}
+
 func TestUninstall_ClearsRuntimeGrants(t *testing.T) {
 	mod, _, _, _, perm := newTestInstallerWithPerm(t)
 	mod.SetLifecycleHooks(&fakeStopper{}, nil)

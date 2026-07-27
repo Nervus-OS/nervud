@@ -296,10 +296,14 @@ type Server struct {
 	// fatal 承载后台循环已经无法继续的错误，容量 1、只写一次
 	fatal chan error
 
-	mu      sync.Mutex
-	conns   map[*net.UnixConn]struct{}
-	perUID  map[uint32]int
-	started bool
+	mu    sync.Mutex
+	conns map[*net.UnixConn]struct{}
+	// controlConns resolves a control.ConnID back to its live IPC connection so
+	// terminal lease notifications can retire the exact connection-scoped wire
+	// handle. Entries are registered for the whole serve lifecycle.
+	controlConns map[control.ConnID]*conn
+	perUID       map[uint32]int
+	started      bool
 
 	// dispatch 是 route_id -> 在途 Dispatch 的唯一权威（dispatch.go），
 	// handleRequest/handleDispatchResult/runDispatchReaper/dispatchConnClosed
@@ -370,6 +374,7 @@ func New(cfg Config) (*Server, error) {
 		quit:            make(chan struct{}),
 		fatal:           make(chan error, 1),
 		conns:           make(map[*net.UnixConn]struct{}),
+		controlConns:    make(map[control.ConnID]*conn),
 		perUID:          make(map[uint32]int),
 		dispatch:        newDispatchTable(),
 		rejectLog:       newRateLimiter(10, time.Second),
@@ -724,6 +729,16 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 
 	// 连接状态机：第一帧必须是 Hello，握手完成前不接受其它 body（conn.go）
 	co := newConn(s, c, caller, log)
+	s.mu.Lock()
+	s.controlConns[co.connID] = co
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.controlConns[co.connID] == co {
+			delete(s.controlConns, co.connID)
+		}
+		s.mu.Unlock()
+	}()
 
 	// 独立 writer goroutine：本连接自己的出站帧全部经 co.outbox
 	// 排队，只有它真正调用 co.c.Write（conn.go 的 runWriter）。在读循环之前
@@ -1092,7 +1107,7 @@ type ControlLeases interface {
 	Release(id control.ID, conn control.ConnID) error
 	// CheckResource is the method-gate proof that this exact connection still
 	// owns the lease for the resolved resource.
-	CheckResource(conn control.ConnID, resource string, generation uint64) (uint64, error)
+	CheckResource(conn control.ConnID, resource string, generation uint64) (control.LeaseProof, error)
 	// RevokeConn 撤销某连接名下的全部租约。
 	//
 	// 【连接收尾时必须调用】。租约绑本连接、不可转让、断开即失效

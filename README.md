@@ -70,13 +70,15 @@ nil channel。判定、锁存、epoch 递增、Supervisor 三级超时全都在�
 `safety.proto` 的五条消息已冻结，缺的是承载方式的决定：走专用高优先级通道
 还是 Dispatch（该文件注释里标着「留待冻结」）。
 
-### 2. Provider 收不到可信 ExecutionContext
+### 2. ExecutionContext 已接通，Safety floor 尚未送达 Provider
 
-IPC 文档要求运动类 Dispatch 附带 `lease_id/controller_class/motion_epoch/deadline`，
-但当前 `Dispatch` schema 实际只有 `CallerContext`。nervud 可以在派发前验证租约并
-在撤权时取消 route，却无法把可信 epoch 交给 Provider 做最后一道陈旧命令检查。
-这个缺口必须先在 `nervus-ipc` 增加通用 `ExecutionContext` 字段，再由内核接线；
-不能靠某个摄像头或运动 Provider 自定义 IPC 绕过。
+protocol 1.1 的每个 Dispatch 都带内核生成的 `ExecutionContext`；控制/运动方法还会
+附带连接作用域 `lease_id`、`controller_class`、`motion_epoch`、Resource generation、
+单调命令序号以及 Request/Lease 两者中更早的绝对 deadline。minor 0 Provider 不会
+收到控制/运动 Dispatch，Go ServiceHost 也会把缺失或畸形上下文当作协议违规。
+
+这已经让 Provider 能拒绝本地队列里的陈旧命令，但 Safety Trip 的全局 floor 仍受上节
+「停机信号发不出去」影响，尚未形成端到端停机闭环。Provider 不得为此自定义 IPC。
 
 ### 3. 用户确认入口尚未闭合
 

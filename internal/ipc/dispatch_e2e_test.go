@@ -31,6 +31,10 @@ type routingEndpoints struct {
 	registerResult *ipcv1.RegisterEndpointResult
 	routeErr       endpoint.RouteError
 	required       []string
+	resourceHandle string
+	resourceGen    uint64
+	requiresLease  bool
+	isMotion       bool
 }
 
 func (r *routingEndpoints) ResolveEndpoint(endpoint.ConnHandle, identity.Caller, *ipcv1.ResolveEndpoint) *ipcv1.ResolveEndpointResult {
@@ -70,17 +74,21 @@ func (r *routingEndpoints) Route(
 		InterfaceID:         "com.example.test.echo",
 		InterfaceMajor:      1,
 		RequiredPermissions: append([]string(nil), r.required...),
+		ResourceHandle:      r.resourceHandle,
+		ResourceGeneration:  r.resourceGen,
 		Method: catalog.MethodDefinition{
 			InterfaceID: "com.example.test.echo",
 			Major:       1,
 			MethodID:    methodID,
 			Meta: &ipcv1.MethodMeta{
-				MethodId:         methodID,
-				RiskClass:        ipcv1.RiskClass_RISK_CLASS_NORMAL,
-				RequestType:      string(descriptor.FullName()),
-				ResponseType:     string(descriptor.FullName()),
-				DefaultTimeoutMs: defaultMethodTimeoutMs,
-				MaxTimeoutMs:     maxMethodTimeoutMs,
+				MethodId:             methodID,
+				RiskClass:            ipcv1.RiskClass_RISK_CLASS_NORMAL,
+				RequestType:          string(descriptor.FullName()),
+				ResponseType:         string(descriptor.FullName()),
+				DefaultTimeoutMs:     defaultMethodTimeoutMs,
+				MaxTimeoutMs:         maxMethodTimeoutMs,
+				RequiresControlLease: r.requiresLease,
+				IsMotion:             r.isMotion,
 			},
 			Request:  descriptor,
 			Response: descriptor,
@@ -96,8 +104,16 @@ func registerSuccessResult(epID uint64) *ipcv1.RegisterEndpointResult {
 	}
 }
 
-func newRoutingTestServer(t *testing.T, re *routingEndpoints) (*Server, string) {
+func newRoutingTestServer(
+	t *testing.T,
+	re *routingEndpoints,
+	leaseValues ...ControlLeases,
+) (*Server, string) {
 	t.Helper()
+	var leases ControlLeases
+	if len(leaseValues) != 0 {
+		leases = leaseValues[0]
+	}
 
 	sock := filepath.Join(t.TempDir(), "nervud.sock")
 	s, err := New(Config{
@@ -108,11 +124,14 @@ func newRoutingTestServer(t *testing.T, re *routingEndpoints) (*Server, string) 
 		Identity:   selfRegistry(t),
 		Permission: permission.NewDefaultRegistry(),
 		Endpoints:  re,
+		Leases:     leases,
+		Resources:  fakeResources{},
 		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	s.monotonicNow = func() (uint64, error) { return uint64(10 * time.Second), nil }
 	installTestComponentVerifier(s)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -187,6 +206,10 @@ func TestDispatch_FullRoundTrip(t *testing.T) {
 	if d.GetRemainingMs() == 0 || d.GetRemainingMs() > defaultMethodTimeoutMs {
 		t.Fatalf("remaining_ms = %d, want a value in (0, %d]", d.GetRemainingMs(), defaultMethodTimeoutMs)
 	}
+	if ec := d.GetExecutionContext(); ec == nil || ec.GetDeadlineNanos() <= 0 ||
+		ec.GetLeaseId() != 0 || ec.GetCommandSequence() != 0 {
+		t.Fatalf("plain dispatch execution context = %+v", ec)
+	}
 
 	world, err := proto.Marshal(&wrapperspb.StringValue{Value: "world"})
 	if err != nil {
@@ -212,6 +235,103 @@ func TestDispatch_FullRoundTrip(t *testing.T) {
 	var returned wrapperspb.StringValue
 	if err := proto.Unmarshal(resp.GetSuccess().GetPayload(), &returned); err != nil || returned.GetValue() != "world" {
 		t.Fatalf("response payload = %q, err=%v", returned.GetValue(), err)
+	}
+}
+
+func TestDispatch_ControlExecutionContextUsesLeaseProof(t *testing.T) {
+	re := &routingEndpoints{
+		registerResult: registerSuccessResult(55),
+		resourceHandle: "base.main",
+		resourceGen:    11,
+		requiresLease:  true,
+		isMotion:       true,
+	}
+	leases := &fakeLeases{}
+	_, sock := newRoutingTestServer(t, re, leases)
+
+	svc := dial(t, sock)
+	handshakeService(t, svc)
+	registerService(t, svc, 55)
+
+	caller := dial(t, sock)
+	handshake(t, caller)
+	if err := WriteFrame(caller, mustMarshal(t, acquireEnv(
+		1, ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN, nil,
+	))); err != nil {
+		t.Fatal(err)
+	}
+	lease := readEnv(t, caller).GetAcquireControlResult().GetSuccess()
+	if lease == nil {
+		t.Fatal("control lease was not acquired")
+	}
+
+	var previousSequence uint64
+	for requestID := uint64(2); requestID <= 3; requestID++ {
+		req := &ipcv1.Envelope{Body: &ipcv1.Envelope_Request{Request: &ipcv1.Request{
+			RequestId: requestID, EndpointId: 1, MethodId: 1,
+		}}}
+		if err := WriteFrame(caller, mustMarshal(t, req)); err != nil {
+			t.Fatal(err)
+		}
+		dispatch := readEnv(t, svc).GetDispatch()
+		ec := dispatch.GetExecutionContext()
+		if ec == nil || ec.GetLeaseId() != lease.GetLeaseId() ||
+			ec.GetControllerClass() != ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN ||
+			ec.GetMotionEpoch() != lease.GetMotionEpoch() ||
+			ec.GetResourceHandle() != "base.main" || ec.GetResourceGeneration() != 11 ||
+			ec.GetDeadlineNanos() <= 0 || ec.GetDeadlineNanos() > lease.GetDeadlineNanos() ||
+			ec.GetCommandSequence() <= previousSequence {
+			t.Fatalf("control execution context = %+v, lease = %+v", ec, lease)
+		}
+		previousSequence = ec.GetCommandSequence()
+	}
+}
+
+func TestDispatch_ControlMethodRejectsMinorZeroProvider(t *testing.T) {
+	re := &routingEndpoints{
+		registerResult: registerSuccessResult(55),
+		resourceHandle: "base.main",
+		resourceGen:    11,
+		requiresLease:  true,
+	}
+	leases := &fakeLeases{}
+	_, sock := newRoutingTestServer(t, re, leases)
+
+	svc := dial(t, sock)
+	serviceHello := helloEnv()
+	serviceHello.GetHello().DeclaredComponentId = "test-service"
+	serviceHello.GetHello().MaxProtocolMinor = 0
+	if err := WriteFrame(svc, mustMarshal(t, serviceHello)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readEnv(t, svc).GetHelloAck().GetSuccess().GetProtocolMinor(); got != 0 {
+		t.Fatalf("provider minor = %d, want 0", got)
+	}
+	registerService(t, svc, 55)
+
+	caller := dial(t, sock)
+	handshake(t, caller)
+	if err := WriteFrame(caller, mustMarshal(t, acquireEnv(
+		1, ipcv1.ControllerClass_CONTROLLER_CLASS_AI, nil,
+	))); err != nil {
+		t.Fatal(err)
+	}
+	if lease := readEnv(t, caller).GetAcquireControlResult().GetSuccess(); lease == nil {
+		t.Fatal("control lease was not acquired")
+	}
+	request := &ipcv1.Envelope{Body: &ipcv1.Envelope_Request{Request: &ipcv1.Request{
+		RequestId: 2, EndpointId: 1, MethodId: 1,
+	}}}
+	if err := WriteFrame(caller, mustMarshal(t, request)); err != nil {
+		t.Fatal(err)
+	}
+	response := readEnv(t, caller).GetResponse()
+	if code := response.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
+		t.Fatalf("response code = %v, want FAILED_PRECONDITION", code)
+	}
+	_ = svc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := ReadFrameHeader(svc); err == nil {
+		t.Fatal("minor 0 Provider received a controlled Dispatch")
 	}
 }
 

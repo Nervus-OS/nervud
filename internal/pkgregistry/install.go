@@ -22,6 +22,13 @@ import (
 // 已验签的字节不一致 - 验签 A、落盘 B的信号，拒绝安装
 var ErrStagingMetadataMismatch = errors.New("pkgregistry: staging manifest/signature differs from verified bytes")
 
+// ErrReloadPending means the package/catalog commit succeeded, but the running
+// instance could not yet be switched to the new package generation. The new
+// registry state is authoritative and the caller must retry the lifecycle
+// reload; reporting success here would leave a committed but unavailable
+// provider indistinguishable from a healthy upgrade.
+var ErrReloadPending = errors.New("pkgregistry: package committed, runtime reload pending")
+
 // verifyStagingMetadata 核对 staging 目录里的 manifest.json 与 manifest.sig 与调用方
 // 传入、已经过验签的字节逐字节一致。这样落盘（提交）的那棵树里的 manifest/sig
 // 就是被验证的同一个对象，堵住 digest 豁免这两个文件所留下的验签与落盘不是同一份
@@ -375,6 +382,9 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 			m.aud.Record(ctx, audit.Event{
 				Action: "pkgregistry.Install.reload", Subject: manifest.PackageID, Denied: true, Err: rerr,
 			})
+			err := fmt.Errorf("%w: %w", ErrReloadPending, rerr)
+			m.auditInstall(ctx, tx, false, err)
+			return entry, err
 		}
 	}
 

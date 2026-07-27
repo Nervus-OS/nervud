@@ -342,7 +342,7 @@ type blockingLeaseObserver struct {
 	release <-chan struct{}
 }
 
-func (o blockingLeaseObserver) ControlLeaseEnded(ConnID, string) {
+func (o blockingLeaseObserver) ControlLeaseEnded(ConnID, string, ID) {
 	o.entered <- struct{}{}
 	<-o.release
 }

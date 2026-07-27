@@ -77,6 +77,18 @@ type Lease struct {
 	Deadman time.Duration
 }
 
+// LeaseProof is the immutable subset of a valid Lease that IPC may project
+// into a Provider ExecutionContext. It is returned by value so callers cannot
+// mutate the authoritative slot snapshot.
+type LeaseProof struct {
+	ID                 ID
+	Class              Class
+	Resource           string
+	ResourceGeneration uint64
+	Deadline           time.Time
+	Epoch              uint64
+}
+
 // Snapshot 是控制面的一致只读快照，供诊断与未来的 IPC 观察面使用
 type Snapshot struct {
 	// Source 是有效控制来源。Safety 非 NORMAL 时恒为 SourceSafety，

@@ -3,8 +3,27 @@ package ipc
 import (
 	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
+	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/transfer"
 )
+
+// ControlLeaseEnded implements control.LeaseObserver. It first retires the
+// exact connection-scoped wire handle and then closes every route/transfer
+// derived from that lease's resource. The internal ID prevents a delayed old
+// notification from deleting a replacement lease on the same connection.
+func (s *Server) ControlLeaseEnded(
+	caller control.ConnID,
+	resource string,
+	leaseID control.ID,
+) {
+	s.mu.Lock()
+	co := s.controlConns[caller]
+	s.mu.Unlock()
+	if co != nil {
+		co.forgetLeaseID(leaseID)
+	}
+	s.RevokeControl(transfer.ConnID(caller), resource)
+}
 
 // revokeEndpoint closes dispatch authority before scanning the data plane.
 // This order prevents an old Dispatch.route_id from recreating a stream after

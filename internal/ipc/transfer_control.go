@@ -59,7 +59,7 @@ func (s *Server) beginTransferBuiltin(
 			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
 		}
 	}
-	if entry.route.Method.Meta.GetRequiresControlLease() {
+	if methodRequiresControl(entry.route.Method.Meta) {
 		if entry.route.ResourceHandle == "" || s.leases == nil {
 			return endpoint.BuiltinResult{
 				Code: ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
@@ -89,7 +89,7 @@ func (s *Server) beginTransferBuiltin(
 		ResourceGeneration: entry.route.ResourceGeneration,
 		RequiredPermissions: append(
 			[]string(nil), entry.route.RequiredPermissions...),
-		RequiresControlLease: entry.route.Method.Meta.GetRequiresControlLease(),
+		RequiresControlLease: methodRequiresControl(entry.route.Method.Meta),
 		Policy:               entry.route.Method.Meta.GetTransfer(),
 	}, &request)
 	if err != nil {

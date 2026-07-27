@@ -207,9 +207,11 @@ func TestHandshake_ClientSupportsHigherMajor(t *testing.T) {
 	if s == nil {
 		t.Fatal("want success HelloAck")
 	}
-	if s.GetProtocolMajor() != protocolMajor || s.GetProtocolMinor() != protocolMinorMax {
-		t.Fatalf("negotiated version = %d.%d, want %d.%d",
-			s.GetProtocolMajor(), s.GetProtocolMinor(), protocolMajor, protocolMinorMax)
+	// Hello only describes max_protocol_minor for the client's highest major
+	// (9). For selected major 1 the only advertised guarantee is minor 0.
+	if s.GetProtocolMajor() != protocolMajor || s.GetProtocolMinor() != 0 {
+		t.Fatalf("negotiated version = %d.%d, want %d.0",
+			s.GetProtocolMajor(), s.GetProtocolMinor(), protocolMajor)
 	}
 }
 

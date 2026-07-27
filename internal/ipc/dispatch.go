@@ -35,6 +35,7 @@ type routeEntry struct {
 	deadline        time.Time
 	methodID        uint32
 	route           endpoint.RouteInfo
+	execution       *ipcv1.ExecutionContext
 	token           *transfer.RouteToken
 }
 
@@ -71,6 +72,10 @@ type dispatchTable struct {
 	// nextID 从 1 开始,0 视为从未分配,呼应 request_id 的既有约定
 	// (route_id 本身的 proto 注释没有明文保留 0,这是本实现引入的惯例)
 	nextID atomic.Uint64
+	// nextCommandSequence is global within this kernel boot. A global sequence
+	// is also strictly monotonic for every resource/generation subsequence while
+	// avoiding an unbounded map of retired catalog generations.
+	nextCommandSequence uint64
 }
 
 type dispatchPublishStatus uint8
@@ -79,6 +84,7 @@ const (
 	dispatchPublishOK dispatchPublishStatus = iota
 	dispatchPublishEpochChanged
 	dispatchPublishTargetUnavailable
+	dispatchPublishSequenceExhausted
 )
 
 func newDispatchTable() *dispatchTable {
@@ -150,11 +156,31 @@ func (t *dispatchTable) publishDispatchAtEpoch(
 	remainingMS uint32,
 	payload []byte,
 	caller *ipcv1.CallerContext,
+	execution *ipcv1.ExecutionContext,
 ) (uint64, dispatchPublishStatus) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.epoch != expectedEpoch {
 		return 0, dispatchPublishEpochChanged
+	}
+
+	var executionSnapshot *ipcv1.ExecutionContext
+	if execution != nil {
+		executionSnapshot = &ipcv1.ExecutionContext{
+			LeaseId:            execution.GetLeaseId(),
+			ControllerClass:    execution.GetControllerClass(),
+			MotionEpoch:        execution.GetMotionEpoch(),
+			DeadlineNanos:      execution.GetDeadlineNanos(),
+			ResourceHandle:     execution.GetResourceHandle(),
+			ResourceGeneration: execution.GetResourceGeneration(),
+		}
+		if executionSnapshot.GetLeaseId() != 0 {
+			if t.nextCommandSequence == ^uint64(0) {
+				return 0, dispatchPublishSequenceExhausted
+			}
+			t.nextCommandSequence++
+			executionSnapshot.CommandSequence = t.nextCommandSequence
+		}
 	}
 
 	id := t.nextID.Add(1)
@@ -166,6 +192,7 @@ func (t *dispatchTable) publishDispatchAtEpoch(
 		deadline:        deadline,
 		methodID:        methodID,
 		route:           route,
+		execution:       executionSnapshot,
 		token:           transfer.NewRouteToken(),
 	}
 	t.entries[id] = entry
@@ -174,12 +201,13 @@ func (t *dispatchTable) publishDispatchAtEpoch(
 	}
 	if target == nil || target.outbox == nil || !target.outbox.push(&ipcv1.Envelope{
 		Body: &ipcv1.Envelope_Dispatch{Dispatch: &ipcv1.Dispatch{
-			RouteId:     id,
-			EndpointId:  route.ServiceEndpointID,
-			MethodId:    methodID,
-			RemainingMs: remainingMS,
-			Payload:     payload,
-			Caller:      caller,
+			RouteId:          id,
+			EndpointId:       route.ServiceEndpointID,
+			MethodId:         methodID,
+			RemainingMs:      remainingMS,
+			Payload:          payload,
+			Caller:           caller,
+			ExecutionContext: executionSnapshot,
 		}},
 	}) {
 		delete(t.entries, id)
@@ -254,7 +282,7 @@ func (t *dispatchTable) revokeControl(
 	return t.revoke(func(entry *routeEntry) bool {
 		return transfer.ConnID(entry.source.connID) == caller &&
 			entry.route.ResourceHandle == resource &&
-			entry.route.Method.Meta.GetRequiresControlLease()
+			methodRequiresControl(entry.route.Method.Meta)
 	})
 }
 
