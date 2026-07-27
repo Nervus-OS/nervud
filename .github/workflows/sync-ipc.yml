@@ -25,10 +25,10 @@ jobs:
       GOPROXY: direct
     steps:
       - name: Checkout nervud
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -46,7 +46,7 @@ jobs:
           go test ./...
 
       - name: Open pull request
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: codex/sync-nervus-ipc
           delete-branch: true
