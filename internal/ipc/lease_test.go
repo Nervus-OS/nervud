@@ -132,10 +132,53 @@ func (fakeResources) ResolveControl(typ, role string) (string, uint64, bool) {
 	return "", 0, false
 }
 
+type mutableResources struct {
+	mu         sync.Mutex
+	generation uint64
+}
+
+func (r *mutableResources) ResolveControl(typ, role string) (string, uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if typ != defaultResourceType || role != defaultResourceRole || r.generation == 0 {
+		return "", 0, false
+	}
+	return "base.main", r.generation, true
+}
+
+func (r *mutableResources) setGeneration(generation uint64) {
+	r.mu.Lock()
+	r.generation = generation
+	r.mu.Unlock()
+}
+
+type blockingAcquireLeases struct {
+	*fakeLeases
+	entered chan<- struct{}
+	resume  <-chan struct{}
+}
+
+func (l *blockingAcquireLeases) Acquire(req control.Request) (control.Lease, error) {
+	l.entered <- struct{}{}
+	<-l.resume
+	return l.fakeLeases.Acquire(req)
+}
+
 func newLeaseServer(t *testing.T, leases ControlLeases) (string, *fakeLeases) {
+	return newLeaseServerWithResources(t, leases, fakeResources{})
+}
+
+func newLeaseServerWithResources(
+	t *testing.T,
+	leases ControlLeases,
+	resources ResourceResolver,
+) (string, *fakeLeases) {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "n.sock")
 	fl, _ := leases.(*fakeLeases)
+	if blocking, ok := leases.(*blockingAcquireLeases); ok {
+		fl = blocking.fakeLeases
+	}
 	s, err := New(Config{
 		SockPath: sock,
 		Log:      discardLog(),
@@ -150,7 +193,7 @@ func newLeaseServer(t *testing.T, leases ControlLeases) (string, *fakeLeases) {
 		// 连接在 admit 阶段就被拒，表现是握手时「connection reset by peer」
 		Limits:    DefaultLimits(),
 		Leases:    leases,
-		Resources: fakeResources{},
+		Resources: resources,
 		Transfer:  newTestTransfer(t),
 	})
 	if err != nil {
@@ -247,6 +290,42 @@ func TestAcquireControl_ExplicitSelector(t *testing.T) {
 	}
 	if req, _ := fl.firstIssued(); req.Class != control.ClassAI || req.ResourceGeneration != 12 {
 		t.Errorf("request = %+v, want AI on resource generation 12", req)
+	}
+}
+
+func TestAcquireControl_RejectsGenerationPublishedDuringAcquire(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	fl := &fakeLeases{}
+	resources := &mutableResources{generation: 11}
+	sock, _ := newLeaseServerWithResources(t, &blockingAcquireLeases{
+		fakeLeases: fl,
+		entered:    entered,
+		resume:     resume,
+	}, resources)
+	c := dialHandshaked(t, sock)
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- WriteFrame(c, mustMarshal(t, acquireEnv(
+			1, ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN, nil)))
+	}()
+	<-entered
+	resources.setGeneration(12)
+	close(resume)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	failure := readEnv(t, c).GetAcquireControlResult().GetFailure()
+	if failure == nil || failure.GetCode() != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
+		t.Fatalf("generation race result = %v, want FAILED_PRECONDITION", failure)
+	}
+	assertLeaseReason(t, failure,
+		ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_RESOURCE_UNAVAILABLE)
+	issued, released, _ := fl.counts()
+	if issued != 1 || released != 1 {
+		t.Fatalf("generation race issued/released = %d/%d, want 1/1", issued, released)
 	}
 }
 

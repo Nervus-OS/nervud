@@ -84,6 +84,19 @@ func (co *conn) handleAcquireControl(req *ipcv1.AcquireControl) bool {
 		code, reason := leaseErrToWire(err)
 		return co.enqueue(acquireFailure(reqID, code, reason))
 	}
+	// Catalog publication and its RevokeResource callback are intentionally
+	// separate operations. If publication happened after the first resolve but
+	// its old-generation revoke completed before Acquire, that scan could not
+	// see the lease we just created. Resolve again before exposing a wire handle:
+	// either we still observe the exact authority used for the lease, or the
+	// newly published generation will revoke it after this check.
+	currentResource, currentGeneration, current := co.s.resolveLeaseResource(req.GetResource())
+	if !current || currentResource != resource || currentGeneration != resourceGeneration {
+		_ = co.s.leases.Release(lease.ID, co.leaseConnID())
+		return co.enqueue(acquireFailure(reqID,
+			ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+			ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_RESOURCE_UNAVAILABLE))
+	}
 	deadlineNanos, err := co.s.leaseDeadlineNanos(lease.Deadline)
 	if err != nil {
 		// Do not leave a lease active when its required wire representation could
