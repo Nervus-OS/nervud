@@ -59,7 +59,7 @@ func Scan(stateDir, systemPackagesDir, packageRoot string, trust TrustStore, log
 	result.Entries = append(result.Entries, sysEntries...)
 	result.Skipped = append(result.Skipped, sysSkipped...)
 
-	dynEntries, dynSkipped := scanDynamicInstalls(stateDir, packageRoot, log)
+	dynEntries, dynSkipped := scanDynamicInstalls(stateDir, packageRoot, trust, log)
 	result.Entries = append(result.Entries, dynEntries...)
 	result.Skipped = append(result.Skipped, dynSkipped...)
 
@@ -115,11 +115,17 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 		// 有效的 platform/oem 签名 -> 经 Arbitrate 给对应特权 trust
 		pkgTrust := identity.TrustOrdinary
 		var signerRoles []string
+		var verifiedSigners []VerifiedSigner
+		var developerRootID string
 		sigPath := filepath.Join(pkgDir, SignatureFileName)
 		if sigBytes, serr := os.ReadFile(sigPath); serr == nil {
 			if signers, verr := trust.VerifySignature(manifestBytes, sigBytes); verr == nil {
 				pkgTrust = Arbitrate(SourceSystemImage, signers)
 				signerRoles = signers.RoleStrings()
+				verifiedSigners = append([]VerifiedSigner(nil), signers.VerifiedSigners...)
+				if signers.Dev != nil {
+					developerRootID = signers.Dev.RootKeyID
+				}
 			} else if log != nil {
 				log.Warn("pkgregistry: system package signature not verified; downgrading to Ordinary",
 					"package_id", m.PackageID, "err", verr)
@@ -127,6 +133,22 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 		} else if log != nil {
 			log.Warn("pkgregistry: system package missing manifest.sig; treating as Ordinary",
 				"package_id", m.PackageID)
+		}
+
+		legacyEntry := Entry{
+			Manifest:        m,
+			Trust:           pkgTrust,
+			Source:          SourceSystemImage,
+			SignerRoles:     signerRoles,
+			VerifiedSigners: verifiedSigners,
+			DeveloperRootID: developerRootID,
+		}
+		provider, err := loadRequiredProviderArtifacts(
+			pkgDir, m, legacyPackageManagerEligible(legacyEntry),
+		)
+		if err != nil {
+			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
+			continue
 		}
 
 		uid, err := stableUID(stateDir, m.PackageID, m.Version, pkgTrust, SourceSystemImage)
@@ -138,27 +160,32 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 		if log != nil {
 			log.Info("pkgregistry: loaded system package", "package_id", m.PackageID, "version", m.Version, "trust", pkgTrust.String())
 		}
-		// GrantedPermissions 不在这里算：Scan 是纯函数（不持有 PermissionArbiter），
-		// 裁决由 Module.Start 调 arbitrateSystemGrants 完成。见 sysgrants.go。
+		// Scan never supplies grants. Module.Start prepares the complete Catalog
+		// candidate and recomputes every Entry against that exact snapshot.
 		entries = append(entries, Entry{
-			Manifest:      m,
-			ActiveVersion: m.Version,
-			VersionCode:   m.VersionCode,
-			UID:           uid,
-			Trust:         pkgTrust,
-			Source:        SourceSystemImage,
-			SignerRoles:   signerRoles,
+			Manifest:        m,
+			ActiveVersion:   m.Version,
+			VersionCode:     m.VersionCode,
+			UID:             uid,
+			Trust:           pkgTrust,
+			Source:          SourceSystemImage,
+			SignerRoles:     signerRoles,
+			VerifiedSigners: verifiedSigners,
+			DeveloperRootID: developerRootID,
+			provider:        provider,
 		})
 	}
 	return entries, skipped
 }
 
-// scanDynamicInstalls 读取此前 Install 提交并持久化的动态安装记账文件
-//
-// 信任不在这里重新裁决：Install 时 Arbitrate 已经把动态安装的 trust 定死为
-// Ordinary（动态安装永远不能拿到系统权限 profile），boot 时重新
-// 验证的是完整性（digest 是否被篡改），不是身份
-func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entry, []SkippedPackage) {
+// scanDynamicInstalls reads dynamic package ledgers, then revalidates the
+// manifest signature, developer lineage, current device countersign policy,
+// payload digests, and ProviderArtifacts. The persisted grant list is ignored.
+func scanDynamicInstalls(
+	stateDir, packageRoot string,
+	trust TrustStore,
+	log *slog.Logger,
+) ([]Entry, []SkippedPackage) {
 	var entries []Entry
 	var skipped []SkippedPackage
 
@@ -169,7 +196,8 @@ func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entr
 	}
 
 	for _, statePath := range matches {
-		if filepath.Base(statePath) == allocatorStateFile {
+		if filepath.Base(statePath) == allocatorStateFile ||
+			filepath.Base(statePath) == "_grants.json" {
 			continue
 		}
 
@@ -181,11 +209,70 @@ func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entr
 		if st.Source != SourceDynamicInstall.String() {
 			continue // 系统包的记账文件由 scanSystemImage 一侧处理
 		}
+		if st.RemovalPending {
+			// A tombstone is authoritative even if code/data cleanup did not finish.
+			// Uninstall can retry from the ledger; startup must never reactivate it.
+			continue
+		}
 
 		manifestPath := filepath.Join(packageRoot, st.PackageID, st.ActiveVersion, "manifest.json")
-		m, err := readManifest(manifestPath)
+		manifestBytes, err := os.ReadFile(manifestPath)
 		if err != nil {
 			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
+			continue
+		}
+		m, err := ParseManifest(manifestBytes)
+		if err != nil {
+			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
+			continue
+		}
+		if m.PackageID != st.PackageID ||
+			m.Version != st.ActiveVersion ||
+			m.VersionCode != st.VersionCode {
+			skipped = append(skipped, SkippedPackage{
+				Path: manifestPath,
+				Err: fmt.Errorf(
+					"pkgregistry: dynamic manifest identity/version differs from ledger: "+
+						"manifest=%s@%s/%d ledger=%s@%s/%d",
+					m.PackageID, m.Version, m.VersionCode,
+					st.PackageID, st.ActiveVersion, st.VersionCode,
+				),
+			})
+			continue
+		}
+
+		sigPath := filepath.Join(filepath.Dir(manifestPath), SignatureFileName)
+		sigBytes, err := os.ReadFile(sigPath)
+		if err != nil {
+			skipped = append(skipped, SkippedPackage{Path: sigPath, Err: err})
+			continue
+		}
+		signers, err := trust.VerifySignature(manifestBytes, sigBytes)
+		if err != nil {
+			skipped = append(skipped, SkippedPackage{Path: sigPath, Err: err})
+			continue
+		}
+		if !signers.HasDeveloper || signers.Dev == nil {
+			skipped = append(skipped, SkippedPackage{
+				Path: sigPath,
+				Err:  ErrNoDeveloperSignature,
+			})
+			continue
+		}
+		if st.LineageRootKeyID == "" ||
+			signers.Dev.RootKeyID != st.LineageRootKeyID {
+			skipped = append(skipped, SkippedPackage{
+				Path: sigPath,
+				Err: fmt.Errorf("%w: ledger root %q, verified root %q",
+					ErrSignerMismatch, st.LineageRootKeyID, signers.Dev.RootKeyID),
+			})
+			continue
+		}
+		if trust.policyRequireOEMCountersign() && !signers.HasOEMCountersign {
+			skipped = append(skipped, SkippedPackage{
+				Path: sigPath,
+				Err:  ErrOEMCountersignRequired,
+			})
 			continue
 		}
 
@@ -202,6 +289,12 @@ func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entr
 			continue
 		}
 
+		provider, err := loadRequiredProviderArtifacts(filepath.Dir(manifestPath), m, false)
+		if err != nil {
+			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
+			continue
+		}
+
 		if log != nil {
 			log.Info("pkgregistry: loaded dynamic package", "package_id", m.PackageID, "version", m.Version)
 		}
@@ -212,8 +305,11 @@ func scanDynamicInstalls(stateDir, packageRoot string, log *slog.Logger) ([]Entr
 			UID:                st.UID,
 			Trust:              identity.TrustOrdinary,
 			Source:             SourceDynamicInstall,
-			GrantedPermissions: st.GrantedPermissions,
+			SignerRoles:        signers.RoleStrings(),
+			VerifiedSigners:    append([]VerifiedSigner(nil), signers.VerifiedSigners...),
 			DisabledComponents: st.DisabledComponents,
+			DeveloperRootID:    signers.Dev.RootKeyID,
+			provider:           provider,
 		})
 	}
 	return entries, skipped
@@ -268,8 +364,9 @@ type registryState struct {
 	UID           uint32 `json:"uid"`
 	Trust         string `json:"trust"`
 	Source        string `json:"source"`
-	// GrantedPermissions 是 Install 时 permission.Intersect 算出的授予集合，
-	// 随记账文件持久化；scanDynamicInstalls 启动时直接读回，不重新裁决
+	// GrantedPermissions is retained for diagnostics/backward-compatible state
+	// decoding only. Startup never trusts it and always recomputes from the
+	// current verified evidence and candidate Catalog.
 	GrantedPermissions []string `json:"granted_permissions,omitempty"`
 
 	// LineageRootKeyID / LineageKeyIDs 是 developer 签名的血统摘要，供升级期的
@@ -281,6 +378,14 @@ type registryState struct {
 	// DisabledComponents 是被停用的 Component ID 列表。
 	// 停用按 Component 记，升级/重启后仍生效
 	DisabledComponents []string `json:"disabled_components,omitempty"`
+
+	// RemovalPending is an uninstall tombstone. It is persisted before any
+	// runtime projection is removed and remains until code, data, grants, and
+	// the ledger itself have all been cleaned. RemovalComponents lets an
+	// in-process retry finish stopping units after the active Registry entry is
+	// deliberately gone.
+	RemovalPending    bool     `json:"removal_pending,omitempty"`
+	RemovalComponents []string `json:"removal_components,omitempty"`
 }
 
 // stateFilePath 计算某个 Package 记账文件的路径，并做纵深防御校验

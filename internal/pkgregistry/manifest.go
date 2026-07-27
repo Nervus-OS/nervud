@@ -119,6 +119,10 @@ var (
 	// ErrIconNotInDigests manifest.icon 未被 digests 清单覆盖
 	ErrIconNotInDigests = errors.New("pkgregistry: icon not covered by digests")
 
+	// ErrInvalidProviderArtifacts Provider descriptor/schema 引用不完整、不安全、
+	// 指向同一文件或未被 manifest digest 覆盖。
+	ErrInvalidProviderArtifacts = errors.New("pkgregistry: invalid provider artifacts")
+
 	// ErrUnsafeRelPath 一个应为包内相对路径的字段解析后逃出了包目录，
 	// 或本身就是绝对路径
 	ErrUnsafeRelPath = errors.New("pkgregistry: path escapes package directory")
@@ -218,6 +222,16 @@ type RuntimeDeps struct {
 	MinJavaRelease int `json:"min_java_release,omitempty"`
 }
 
+// ProviderArtifactsRef 指向签名包内的数据驱动 Provider 契约。
+//
+// 两个文件都必须被 Digests 覆盖；运行时 RegisterEndpoint 不能提交或替换它们。
+// Descriptor 是 ProviderDescriptor 的确定性 protobuf bytes，Schemas 是
+// InterfaceSchemaBundleSet 的确定性 protobuf bytes。
+type ProviderArtifactsRef struct {
+	Descriptor string `json:"descriptor"`
+	Schemas    string `json:"schemas"`
+}
+
 // ComponentLimits 是传给 systemd 的资源上限
 //
 // 内核按 trust 钳制这些值的上限，Ordinary 包不能给自己开无限额度 - 钳制在
@@ -293,21 +307,22 @@ type Component struct {
 // Signer 故意不是一个 JSON 字段：它来自对分离签名的独立验证（见 signature.go），
 // 不能让 manifest 自己在 JSON 里填一个 signer 字符串就自证身份
 type Manifest struct {
-	Schema          int               `json:"schema"`
-	PackageID       string            `json:"package_id"`
-	Label           string            `json:"label"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Icon            string            `json:"icon,omitempty"`
-	Version         string            `json:"version"`
-	VersionCode     uint64            `json:"version_code"`
-	MinNervusAPI    uint32            `json:"min_nervus_api"`
-	TargetNervusAPI uint32            `json:"target_nervus_api"`
-	SupportedABIs   []string          `json:"supported_abis"`
-	RuntimeDeps     RuntimeDeps       `json:"runtime_deps,omitempty"`
-	Permissions     []string          `json:"permissions,omitempty"`
-	UsesFeatures    []Feature         `json:"uses_features,omitempty"`
-	Components      []Component       `json:"components"`
-	Digests         map[string]string `json:"digests"` // 包内相对路径 -> sha256 hex
+	Schema          int                   `json:"schema"`
+	PackageID       string                `json:"package_id"`
+	Label           string                `json:"label"`
+	Labels          map[string]string     `json:"labels,omitempty"`
+	Icon            string                `json:"icon,omitempty"`
+	Version         string                `json:"version"`
+	VersionCode     uint64                `json:"version_code"`
+	MinNervusAPI    uint32                `json:"min_nervus_api"`
+	TargetNervusAPI uint32                `json:"target_nervus_api"`
+	SupportedABIs   []string              `json:"supported_abis"`
+	RuntimeDeps     RuntimeDeps           `json:"runtime_deps,omitempty"`
+	Permissions     []string              `json:"permissions,omitempty"`
+	UsesFeatures    []Feature             `json:"uses_features,omitempty"`
+	Components      []Component           `json:"components"`
+	Provider        *ProviderArtifactsRef `json:"provider,omitempty"`
+	Digests         map[string]string     `json:"digests"` // 包内相对路径 -> sha256 hex
 
 	Signer string `json:"-"`
 }
@@ -465,6 +480,27 @@ func (m Manifest) validate() error {
 		}
 		if _, ok := m.Digests[m.Icon]; !ok {
 			return fmt.Errorf("%w: %q", ErrIconNotInDigests, m.Icon)
+		}
+	}
+	if m.Provider != nil {
+		descriptor := m.Provider.Descriptor
+		schemas := m.Provider.Schemas
+		if descriptor == "" || schemas == "" || descriptor == schemas {
+			return fmt.Errorf("%w: descriptor and schemas must be distinct non-empty paths",
+				ErrInvalidProviderArtifacts)
+		}
+		for label, rel := range map[string]string{
+			"descriptor": descriptor,
+			"schemas":    schemas,
+		} {
+			if !validRelPath(rel) {
+				return fmt.Errorf("%w: %s path %q: %w",
+					ErrInvalidProviderArtifacts, label, rel, ErrUnsafeRelPath)
+			}
+			if _, ok := m.Digests[rel]; !ok {
+				return fmt.Errorf("%w: %s path %q is not covered by digests",
+					ErrInvalidProviderArtifacts, label, rel)
+			}
 		}
 	}
 	return nil

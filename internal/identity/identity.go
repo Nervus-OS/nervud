@@ -74,9 +74,10 @@ func (t TrustProfile) Valid() bool {
 // 只放解析身份用得着的字段。版本、文件清单、权限集合等属于 Package Registry，
 // 不在这里复制一份 - 两份会漂
 type Package struct {
-	ID    string
-	UID   uint32
-	Trust TrustProfile
+	ID         string
+	UID        uint32
+	Trust      TrustProfile
+	Generation uint64
 }
 
 // Caller 是一条连接的可信身份
@@ -85,6 +86,11 @@ type Package struct {
 // 三者都不来自对端发来的任何字节
 type Caller struct {
 	PackageID string
+
+	// Generation identifies the exact installed runtime that this connection
+	// was admitted for. Package IDs and UIDs are intentionally stable across an
+	// upgrade, so neither can distinguish an old process from its replacement.
+	Generation uint64
 
 	// ComponentID 在解析时为空：连接刚建立时只知道是哪个 Package，
 	// 不知道是它的哪个 Component。它由握手阶段核对 Hello 的自报值后填入，
@@ -152,6 +158,8 @@ func (r *Registry) Replace(pkgs []Package) error {
 			return fmt.Errorf("identity: package %q has uid 0", p.ID)
 		case !p.Trust.Valid():
 			return fmt.Errorf("identity: package %q has invalid trust profile %d", p.ID, p.Trust)
+		case p.Generation == 0:
+			return fmt.Errorf("identity: package %q has zero runtime generation", p.ID)
 		}
 		if prev, dup := next[p.UID]; dup {
 			return fmt.Errorf("%w: uid %d claimed by both %q and %q",
@@ -212,10 +220,11 @@ func (r *Registry) Resolve(cred sysprobe.Ucred) (Caller, error) {
 		return Caller{}, fmt.Errorf("%w: uid %d", ErrUnknownUID, cred.UID)
 	}
 	return Caller{
-		PackageID: p.ID,
-		Trust:     p.Trust,
-		UID:       cred.UID,
-		GID:       cred.GID,
-		PID:       cred.PID,
+		PackageID:  p.ID,
+		Generation: p.Generation,
+		Trust:      p.Trust,
+		UID:        cred.UID,
+		GID:        cred.GID,
+		PID:        cred.PID,
 	}, nil
 }

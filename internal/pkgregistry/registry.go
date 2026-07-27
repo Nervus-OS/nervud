@@ -21,23 +21,36 @@ type Entry struct {
 	Manifest      Manifest
 	ActiveVersion string
 	VersionCode   uint64
-	UID           uint32
-	Trust         identity.TrustProfile
-	Source        Source
 
-	// GrantedPermissions 是 permission.Intersect 对 Manifest.Permissions 的裁决
-	// 结果是请求权限、已注册权限与 trust 门槛的交集。动态安装路径在 Install 时算一次
-	// 并持久化，重启只读回、不重新裁决（见 module.go 的 commit 与 scan.go 的
-	// scanDynamicInstalls）
+	// RuntimeGeneration changes on every successful install or replacement of
+	// this Package. It is an in-memory kernel token, not a manifest claim. The
+	// service instance and IPC identity projections must carry the same value so
+	// old code cannot reconnect under a newly published permission set.
+	RuntimeGeneration uint64
+	UID               uint32
+	Trust             identity.TrustProfile
+	Source            Source
+
+	// GrantedPermissions is recomputed for every Entry against the exact
+	// candidate Catalog before each startup/install/uninstall publication.
+	// Persisted values are diagnostic state only and are never boot authority.
 	GrantedPermissions []string
 
-	// SignerRoles 是本次验签认出的签名者角色（platform-release 等），供
-	// permission.Intersect 的 RequireSignerRole 判定。
-	//
-	// 只有系统镜像来源会填它，且【不持久化】：系统包每次启动扫描都重新验签
-	// （见 scanSystemImage），角色因此每次现算。动态安装路径在 Install 当时就
-	// 裁决完并把结果存进记账文件，重启只读回 GrantedPermissions，不需要角色。
+	// SignerRoles is populated only from the current successful signature
+	// verification. Both system-image and dynamic packages are reverified on
+	// boot; role strings are always paired with VerifiedSigners below.
 	SignerRoles []string
+
+	// VerifiedSigners and DeveloperRootID are the signer identities used by the
+	// central Catalog for definition ownership and GRANT_MODE_SIGNATURE. A role
+	// string alone never proves that two packages share a signer.
+	VerifiedSigners []VerifiedSigner
+	DeveloperRootID string
+
+	// provider is the verified descriptor/schema pair loaded from the exact
+	// bytes covered by Manifest.Digests. It is private so Lookup/List callers
+	// cannot mutate Catalog input.
+	provider *loadedProviderArtifacts
 
 	// DisabledComponents 是被停用的 Component ID 集合。
 	// 停用按 Component；服务生命周期与 IPC 握手据此拒绝该组件
@@ -101,7 +114,7 @@ func (r *Registry) Replace(entries []Entry) error {
 		if _, dup := next[e.Manifest.PackageID]; dup {
 			return fmt.Errorf("%w: %q", ErrDuplicatePackageID, e.Manifest.PackageID)
 		}
-		next[e.Manifest.PackageID] = e
+		next[e.Manifest.PackageID] = cloneEntry(e)
 	}
 	r.snap.Store(&snapshot{byID: next})
 	return nil
@@ -121,7 +134,10 @@ func (r *Registry) Lookup(id string) (Entry, bool) {
 		return Entry{}, false
 	}
 	e, ok := snap.byID[id]
-	return e, ok
+	if !ok {
+		return Entry{}, false
+	}
+	return cloneEntry(e), true
 }
 
 // List 返回当前全部 Entry 的快照副本
@@ -138,7 +154,52 @@ func (r *Registry) List() []Entry {
 	}
 	out := make([]Entry, 0, len(snap.byID))
 	for _, e := range snap.byID {
-		out = append(out, e)
+		out = append(out, cloneEntry(e))
+	}
+	return out
+}
+
+func cloneEntry(in Entry) Entry {
+	out := in
+	out.Manifest = cloneManifest(in.Manifest)
+	out.GrantedPermissions = append([]string(nil), in.GrantedPermissions...)
+	out.SignerRoles = append([]string(nil), in.SignerRoles...)
+	out.VerifiedSigners = append([]VerifiedSigner(nil), in.VerifiedSigners...)
+	out.DisabledComponents = append([]string(nil), in.DisabledComponents...)
+	// provider is an immutable, package-private value. Sharing it does not expose
+	// mutation through Registry Lookup/List.
+	return out
+}
+
+func cloneManifest(in Manifest) Manifest {
+	out := in
+	if in.Labels != nil {
+		out.Labels = make(map[string]string, len(in.Labels))
+		for key, value := range in.Labels {
+			out.Labels[key] = value
+		}
+	}
+	out.SupportedABIs = append([]string(nil), in.SupportedABIs...)
+	out.Permissions = append([]string(nil), in.Permissions...)
+	out.UsesFeatures = append([]Feature(nil), in.UsesFeatures...)
+	out.Components = make([]Component, len(in.Components))
+	for i, component := range in.Components {
+		copyComponent := component
+		copyComponent.Exports = append([]Export(nil), component.Exports...)
+		copyComponent.Interfaces = append([]string(nil), component.Interfaces...)
+		copyComponent.Capabilities = append([]string(nil), component.Capabilities...)
+		copyComponent.AddressFamilies = append([]string(nil), component.AddressFamilies...)
+		out.Components[i] = copyComponent
+	}
+	if in.Provider != nil {
+		copyProvider := *in.Provider
+		out.Provider = &copyProvider
+	}
+	if in.Digests != nil {
+		out.Digests = make(map[string]string, len(in.Digests))
+		for path, digest := range in.Digests {
+			out.Digests[path] = digest
+		}
 	}
 	return out
 }

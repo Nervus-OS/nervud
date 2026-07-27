@@ -37,7 +37,7 @@ const (
 	// 组件沙箱把它设 InaccessiblePaths，任何组件都读不到
 	registryDir = "/var/lib/nervus/registry"
 	// permStorageUser 是访问共享用户文档区（Invariants.UserDataRoot）所需的权限。
-	// 与 permission.DefaultCatalog 里的条目【必须同名】——那边是定义，这边是执法点
+	// 与中央 catalog bootstrap 里的条目【必须同名】——那边是定义，这边是执法点
 	permStorageUser = "perm.storage.user"
 
 	// x11SocketDir 是 X11 显示服务器的 unix socket 目录。
@@ -103,6 +103,9 @@ func effectiveCriticality(e pkgregistry.Entry, c pkgregistry.Component) pkgregis
 // 一个此前跑过又停止/熔断的 on-demand 组件重新拉起时必须支持的路径（见
 // internal/endpoint 的 Resolve on-demand 拉起分支）
 func (m *Manager) startLocked(e pkgregistry.Entry, c pkgregistry.Component) {
+	if m.stopped {
+		return
+	}
 	key := componentKey{e.Manifest.PackageID, c.ID}
 	if inst, ok := m.byKey[key]; ok && (inst.State == StateRunning || inst.State == StateStarting) {
 		return // 已在跑，幂等
@@ -111,7 +114,9 @@ func (m *Manager) startLocked(e pkgregistry.Entry, c pkgregistry.Component) {
 		PackageID:   e.Manifest.PackageID,
 		ComponentID: c.ID,
 		UID:         e.UID,
+		Generation:  e.RuntimeGeneration,
 		Unit:        unitName(e.Manifest.PackageID, c.ID),
+		Type:        c.Type,
 		Runtime:     c.Runtime,
 		Crit:        effectiveCriticality(e, c),
 		LaunchMode:  c.LaunchMode,
@@ -336,14 +341,17 @@ func (m *Manager) readWritePaths(e pkgregistry.Entry, dataDir string) []string {
 	// 共享用户文档区：声明了 perm.storage.user 的包才拿得到。文件管理器、
 	// 文件选择器和任何要打开用户文档的 app 靠它看到同一批文件。
 	//
-	// 判据用 GrantedPermissions（裁决结果）而不是 manifest.Permissions（申请）：
-	// 前者是内核裁决过的事实，后者只是包自己的声明。当前 permission.V1GrantAll
-	// 打开时两者内容一致，但执法恢复后就会分叉——那时这里必须继续跟着裁决走，
-	// 否则一个被拒的权限仍然能拿到目录。
+	// 判据同时用 GrantedPermissions（安装资格）和 permission.Registry.Allowed
+	// （当前运行期决策），而不是 manifest.Permissions（申请）。USER_CONSENT
+	// 权限只进入 GrantedPermissions 并不代表用户已同意；只看这一层会在拒绝状态
+	// 下仍把共享目录绑定进 mount namespace。
 	//
 	// 系统镜像包的 GrantedPermissions 由 pkgregistry.arbitrateSystemGrants 在
 	// 启动扫描时算出，动态安装包由 Install 的 Intersect 算出，两条路都已填好。
-	if m.inv.UserDataRoot != "" && hasPermission(e, permStorageUser) {
+	if m.inv.UserDataRoot != "" &&
+		hasPermission(e, permStorageUser) &&
+		m.perms != nil &&
+		m.perms.Allowed(e.Manifest.PackageID, permStorageUser) {
 		paths = append(paths, m.inv.UserDataRoot)
 	}
 	return paths

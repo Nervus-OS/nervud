@@ -1,48 +1,84 @@
-// 本文件把 resource 接入 kernel.Module 生命周期
 package resource
 
-import "context"
+import (
+	"context"
 
-// Module 把 resource 接入 kernel.Module 生命周期，并把 *Registry 的
-// Resolve/Valid 转发出去，使 *Module 本身即可满足 internal/endpoint 定义的
-// ResourceResolver 窄接口
-//
-// v1 的 Registry 内容在构造时就完全确定（编译期常量，见 DefaultRegistry），
-// 没有需要启动的后台循环，也没有需要停机时收尾的状态 - Start/Stop 都是空
-// 操作。做成 Module 而不是像 identity 现在这样的裸库，是为了不让"库 ->
-// Module 外壳"这个技术债在 resource 身上重演一次
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+
+	"github.com/nervus-os/nervud/internal/catalog"
+)
+
+// Module exposes resource lookups from the shared, atomically published
+// definition catalog. It owns no independent resource table.
 type Module struct {
-	registry *Registry
+	definitions *catalog.Registry
 }
 
-// New 构造 resource 的 Module
-//
-// registry 由调用方在装配阶段构造后传入（通常是 DefaultRegistry），
-// 与 permission.New(registry) 的既有范式一致
-func New(registry *Registry) *Module {
-	return &Module{registry: registry}
+func New(definitions *catalog.Registry) *Module {
+	return &Module{definitions: definitions}
 }
 
 func (m *Module) Name() string { return "resource" }
 
-// Start 无需要执行的初始化逻辑：Registry 从构造起就是可用状态
 func (m *Module) Start(_ context.Context) error { return nil }
 
-// Stop 纯内存态，没有需要释放的资源
 func (m *Module) Stop(_ context.Context) error { return nil }
 
-// Resolve 转发给底层 *Registry，对 nil Module fail-safe 返回未命中
+// Resolve reads one current catalog revision and resolves against that
+// immutable snapshot.
 func (m *Module) Resolve(resourceType, role string) (handle string, ok bool) {
-	if m == nil {
+	if m == nil || m.definitions == nil {
 		return "", false
 	}
-	return m.registry.Resolve(resourceType, role)
+	return m.ResolveAt(m.definitions.Current(), resourceType, role)
 }
 
-// Valid 转发给底层 *Registry，对 nil Module fail-safe 返回 false
+// ResolveAt lets a caller pin multiple decisions to one catalog revision.
+func (m *Module) ResolveAt(
+	snapshot *catalog.Snapshot,
+	resourceType string,
+	role string,
+) (handle string, ok bool) {
+	if m == nil || snapshot == nil {
+		return "", false
+	}
+	definition, ok := snapshot.ResolveResource(resourceType, role)
+	if !ok || definition.Handle == "" {
+		return "", false
+	}
+	return definition.Handle, true
+}
+
+// ResolveControl resolves only resources whose catalog-owned access mode
+// permits an exclusive ControlLease. Sensors declared SHARED_OBSERVE remain
+// resolvable for endpoint routing, but can never acquire control authority.
+func (m *Module) ResolveControl(
+	resourceType, role string,
+) (handle string, generation uint64, ok bool) {
+	if m == nil || m.definitions == nil {
+		return "", 0, false
+	}
+	definition, ok := m.definitions.Current().ResolveResource(resourceType, role)
+	if !ok || definition.Handle == "" ||
+		definition.AccessMode != ipcv1.ResourceAccessMode_RESOURCE_ACCESS_MODE_EXCLUSIVE_CONTROL {
+		return "", 0, false
+	}
+	return definition.Handle, definition.DefinitionGeneration, true
+}
+
+// Valid reads one current catalog revision and checks the exact handle.
 func (m *Module) Valid(handle string) bool {
-	if m == nil {
+	if m == nil || m.definitions == nil {
 		return false
 	}
-	return m.registry.Valid(handle)
+	return m.ValidAt(m.definitions.Current(), handle)
+}
+
+// ValidAt lets a caller pin handle validation to one catalog revision.
+func (m *Module) ValidAt(snapshot *catalog.Snapshot, handle string) bool {
+	if m == nil || snapshot == nil || handle == "" {
+		return false
+	}
+	_, ok := snapshot.ResourceByHandle(handle)
+	return ok
 }

@@ -34,9 +34,10 @@ nervud -dev-skip-preflight -dev-allow-sched-degrade -log-level debug
 scripts/sync-ipc.sh [commit|tag]
 ```
 
-`nervus-ipc` 是协议真源。**它与 `nervus-system-server` 必须指向同一个 commit**，
-否则内核与服务对同一份 Envelope 的理解会悄悄分叉——而两边都能编译、都能跑，
-只在某个字段的行为上不一致。
+`nervus-ipc` 是协议真源。nervud 直接依赖仓库根 module
+`github.com/nervus-os/nervus-ipc`，不再混用旧的 `/go` 子模块。**nervud 与
+`nervus-system-server` 必须指向同一个 IPC commit**，否则内核与服务对同一份
+Envelope 的理解会悄悄分叉。
 
 ## 测试
 
@@ -47,21 +48,20 @@ scripts/sync-ipc.sh [commit|tag]
 go build ./... && go vet ./... && go test ./... && go test ./... -race
 ```
 
+## 通用能力模型
+
+接口、method schema、权限和 Resource 统一进入一份不可变 Catalog。系统包与动态
+Provider 的签名 `ProviderArtifacts` 经过校验后发布；Endpoint 解析、method gate、
+权限裁决和 Resource 查询都读同一 revision。添加摄像头、麦克风或 OEM 私有能力时，
+Provider 提交描述与 schema，不为每种能力增加一套内核 IPC 消息。
+
+大数据不塞进控制面 Envelope。通用 Transfer manager 使用独立 Unix socket，控制面
+只签发绑定 route、连接、权限、Resource 和过期时间的传输句柄。Catalog 删除定义或
+改变 generation 时，旧 Dispatch、ControlLease 和 Transfer authority 会一起撤销。
+
 ## 已知缺口
 
-按严重度排。每一条都在代码里有对应注释，grep 括号里的标记能找到位置。
-
-### 1. 权限执法整体短路（`V1GrantAll`）
-
-`permission.V1GrantAll = true` 让安装时「申请即授予」、运行期跳过用户确认。
-恢复执法要改回 `false` 并补齐 `DefaultCatalog`——权限 ID 的正式命名空间与取值表
-尚未冻结。
-
-连带影响：`ipc/lease.go` 直接采信客户端自报的 `controller_class`，
-与 `control/class.go` 的「不能接受客户端自报值」暂时不一致。
-`grep CONTROL_CLASS_SELF_REPORTED` 找全部位置。
-
-### 2. Safety 停机信号发不出去
+### 1. Safety 停机信号发不出去
 
 `safety.NopPath{}.SendHalt()` 直接 `return nil`，`NopReports{}.Reports()` 返回
 nil channel。判定、锁存、epoch 递增、Supervisor 三级超时全都在跑，
@@ -70,16 +70,23 @@ nil channel。判定、锁存、epoch 递增、Supervisor 三级超时全都在�
 `safety.proto` 的五条消息已冻结，缺的是承载方式的决定：走专用高优先级通道
 还是 Dispatch（该文件注释里标着「留待冻结」）。
 
-### 3. 三张硬编码常量表
+### 2. Provider 收不到可信 ExecutionContext
 
-| 表 | 位置 |
-|---|---|
-| 接口→权限 | `endpoint.DefaultInterfaceCatalog()` |
-| 权限定义 | `permission.DefaultCatalog()` |
-| Resource | `resource.DefaultRegistry()` |
+IPC 文档要求运动类 Dispatch 附带 `lease_id/controller_class/motion_epoch/deadline`，
+但当前 `Dispatch` schema 实际只有 `CallerContext`。nervud 可以在派发前验证租约并
+在撤权时取消 route，却无法把可信 epoch 交给 Provider 做最后一道陈旧命令检查。
+这个缺口必须先在 `nervus-ipc` 增加通用 `ExecutionContext` 字段，再由内核接线；
+不能靠某个摄像头或运动 Provider 自定义 IPC 绕过。
 
-`provider_descriptor.proto` 是替换它们的解药（从签名 Descriptor 数据驱动注册），
-但内核侧尚未接线。接线之前，加一款硬件仍然要改内核。
+### 3. 用户确认入口尚未闭合
+
+`USER_CONSENT` 权限已经区分安装资格与运行期状态，默认拒绝，授撤会持久化并联动
+路由、传输、控制租约和进程沙箱。但目前只有 root 管理通道能写运行期状态，尚无
+系统持有的确认 UI/broker capability。
+
+`controller_class` 当前策略允许调用方自报，AI 也可申请 `HUMAN`，并以
+`ipc.AcquireControl.classSelfReported` 记审计。这是明确的临时策略，不是可信的人在场
+证明；以后决定会话和用户控制权模型时，应在同一通用策略点收紧，不改 Provider IPC。
 
 ### 4. operation 没有调用方
 
@@ -99,24 +106,11 @@ typed detail。`safety/builtin.go` 已经算出了 `WRONG_STATE`（别试了）�
 `audit` 仍是往 slog 写。`internal/audit/audit.go` 的 TODO 写着要换
 append-only 文件 + 轮转 + 完整性保护。
 
-### 7. 所有接口默认绑在运动基座资源上
-
-`endpoint/resolve.go` 的 `resolveSelector`：selector 留空时无条件解析
-`nervus.resource.motion.base / main`。
-
-后果有两层：
-
-- **语义不对**：端到端里 `nervus.interface.pkg.manager` 解析出来的
-  `resource_handle` 是 `base.main` —— 包管理器不是运动资源
-- **耦合**：Resource Registry 里没有运动基座时，**每一个不填 selector 的
-  Resolve 都会 RESOURCE_NOT_FOUND**。一台没有运动底盘的设备因此装不了软件
-
-治本是让「这个接口需不需要绑资源」由接口自己声明（`provider_descriptor.proto`
-数据驱动，见缺口 3），而不是在 Resolve 里兜一个运动专用的默认值。
-
-### 8. 其它接缝
+### 7. 其它接缝
 
 - `health.New(safetyMod, ctl, nil)` —— 第三个观察者是 nil，因为
   `*service.Manager` 没实现 `Instances()`。补个方法就能接上
 - `identity.Registry` 裸 New，没有 Module 外壳，与其它 10 个模块不一致
 - `endpoint/route.go` 的 `req.Drain` 未接线，`drain=true` 退化成立即撤
+- 安装流程的 Catalog、Registry、Identity、Permission 发布有回滚与 fail-closed，
+  但文件提交、记账和多份投影还不是一个可恢复的完整事务

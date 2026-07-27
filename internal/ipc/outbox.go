@@ -10,7 +10,7 @@ package ipc
 import (
 	"sync"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -15,6 +15,7 @@ import (
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/authority/systemd"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/health"
@@ -32,6 +33,7 @@ import (
 	"github.com/nervus-os/nervud/internal/safety"
 	"github.com/nervus-os/nervud/internal/scheduler"
 	"github.com/nervus-os/nervud/internal/service"
+	"github.com/nervus-os/nervud/internal/transfer"
 )
 
 // safetyTripAdapter 把 service.SafetyEscalator 接到 safety.Module：Vital 组件熔断
@@ -43,11 +45,23 @@ type safetyTripAdapter struct{ s *safety.Module }
 
 func (a safetyTripAdapter) Trip() { a.s.Trip(safety.ReasonSupervisorEscalation) }
 
+type transferControlRevoker interface {
+	RevokeControl(transfer.ConnID, string)
+}
+
+type transferLeaseObserver struct{ revoker transferControlRevoker }
+
+func (a transferLeaseObserver) ControlLeaseEnded(conn control.ConnID, resource string) {
+	a.revoker.RevokeControl(transfer.ConnID(conn), resource)
+}
+
 func main() {
 	// 启动参数部分（生产环境无）
 	// 控制面 IPC 入口。生产镜像固定为 /run/nervus/nervud.sock
 	// flag 仅用于开发阶段
 	sockPath := flag.String("sock", "/run/nervus/nervud.sock", "IPC socket path")
+	transferSockPath := flag.String("transfer-sock", transfer.DefaultSockPath,
+		"high-throughput transfer socket path")
 	// 管理通道 UDS（root-only），供 nervusctl 触发装包/卸载/权限授撤。它必须与
 	// App 控制面分开，因为 App 控制面只接受 App 段 UID，root 运维工具无法连接
 	adminSockPath := flag.String("admin-sock", adminwire.DefaultSockPath, "privileged admin channel socket path")
@@ -79,7 +93,8 @@ func main() {
 	}()
 
 	// 把逻辑放进 run 是为了能用 return error - main 里一旦 os.Exit，defer 不会执行
-	err := run(ctx, *sockPath, *adminSockPath, *allowSchedDegrade, *skipPreflight, logger)
+	err := run(ctx, *sockPath, *transferSockPath, *adminSockPath,
+		*allowSchedDegrade, *skipPreflight, logger)
 	if err != nil {
 		logger.Error("nervud exited", "err", err)
 	} else {
@@ -157,7 +172,12 @@ const pkgManagerPackageID = "nervus.pkgmanagerd"
 // 否则 Lane 与 Kernel 会被同一个信号并行唤醒，谁先退出不确定，Lane 的收尾
 // 逻辑（撤权、刹停确认、审计落盘）可能在进程结束时被截断
 // Lane 是最底层基建，因此在所有模块停完之后才回收
-func run(ctx context.Context, sockPath, adminSockPath string, allowSchedDegrade, skipPreflight bool, logger *slog.Logger) (err error) {
+func run(
+	ctx context.Context,
+	sockPath, transferSockPath, adminSockPath string,
+	allowSchedDegrade, skipPreflight bool,
+	logger *slog.Logger,
+) (err error) {
 	sched := scheduler.New(logger, allowSchedDegrade)
 
 	// defer 保证无论装配失败还是正常停机，Lane 都会被取消并等待回收。
@@ -174,7 +194,8 @@ func run(ctx context.Context, sockPath, adminSockPath string, allowSchedDegrade,
 		}
 	}()
 
-	k, cleanup, aerr := assemble(ctx, sched, sockPath, adminSockPath, skipPreflight, logger)
+	k, cleanup, aerr := assemble(
+		ctx, sched, sockPath, transferSockPath, adminSockPath, skipPreflight, logger)
 	if aerr != nil {
 		return aerr
 	}
@@ -192,7 +213,13 @@ func run(ctx context.Context, sockPath, adminSockPath string, allowSchedDegrade,
 // 新模块加在这
 // k.Register(...)，Kernel 和其它模块都不用改
 // 返回 error 表示装配阶段就已失败，内核启动将会终止
-func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSockPath string, skipPreflight bool, logger *slog.Logger) (*kernel.Kernel, func(), error) {
+func assemble(
+	ctx context.Context,
+	sched *scheduler.Scheduler,
+	sockPath, transferSockPath, adminSockPath string,
+	skipPreflight bool,
+	logger *slog.Logger,
+) (*kernel.Kernel, func(), error) {
 	// cleanup 汇集设施级需要在停机时释放的资源（当前只有 systemd D-Bus 连接）。
 	// 始终非 nil，装配任一步失败时也安全可调用
 	var closers []func()
@@ -287,18 +314,29 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// 不与 Module 分开持有，否则两个实例会产生不可见的状态分叉
 	pkgReg := pkgregistry.NewRegistry()
 
-	// permission.Registry 同时是 pkgregistry.PermissionArbiter（安装时 Intersect
-	// 裁决）与运行期 Allowed 查询的权威状态，二者共享同一份实例（见
-	// internal/permission/registry.go 顶部说明）。DefaultCatalog 是编译期
-	// 硬编码的最小权限表，避免文件写权限变成修改安全策略的入口
-	permReg := permission.NewRegistry(permission.DefaultCatalog())
+	// One immutable catalog snapshot is shared by package loading, endpoint
+	// resolution, permissions, resources, and the IPC method gate. New Provider
+	// interfaces and methods enter through signed artifacts; none of these
+	// consumers keeps a capability-specific fallback table.
+	definitions, err := catalog.NewDefaultRegistry()
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("create definition catalog: %w", err)
+	}
+	permReg := permission.NewRegistry(definitions)
+
+	transferMgr, err := transfer.New(transfer.Config{
+		SockPath: transferSockPath,
+		Log:      logger,
+	})
+	if err != nil {
+		return nil, cleanup, err
+	}
 	// 运行期授予状态需要持久化并与 GrantUser 危险权限的撤销联动
 	// 需要 control 作为 LeaseRevoker，而 ctl 在下面才构造 - SetGrantStore 因此下移到
 	// ctl 构造之后调用（见该处），这里先不接线，避免用 nil revoker 载入一次又要重设
 
-	// TODO(rewrite): 按 sec 2 逐个接入，从最基础往上叠。IPC 放最后：对外开门之前
-	// Identity/Permission/Safety 须先就绪，避免出现 未受权限访问 的窗口期
-	//  k.Register(identity.New(...))    // SO_PEERCRED、UID -> Package 映射
+	// IPC 最后注册：对外开门之前 Identity/Permission/Safety 必须先就绪，
+	// 避免出现未受权限访问的窗口期。
 	// 信任根：内嵌平台根验证 /usr/share/nervus/trust 下的 bundle。
 	// 加载失败（开发构建缺内嵌根、bundle 缺失或验不过）不阻断启动，而是 fail-closed：
 	// 传入零值 TrustStore - developer 自签仍可验证，platform/oem 一律拒绝，动态安装
@@ -307,17 +345,15 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	if terr != nil {
 		logger.Warn("pkgregistry: trust store unavailable; non-Ordinary trust disabled", "err", terr)
 	}
-	pkgMod := pkgregistry.New(auth, idReg, permReg, pkgReg, trustStore, aud, logger,
+	pkgMod := pkgregistry.New(auth, idReg, permReg, pkgReg, definitions, trustStore, aud, logger,
 		pkgregistry.DefaultRegistryStateDir, pkgregistry.DefaultSystemPackagesDir,
 		authority.DefaultInvariants().PackageRoot, authority.DefaultInvariants().DataRoot,
 	)
 	k.Register(pkgMod)                  // Package Registry + 安装裁决
 	k.Register(permission.New(permReg)) // capability 执法：Grant 投影由 pkgregistry 推送
 
-	// Resource Registry：v1 使用编译期常量表，唯一执行器为 base.main。它不依赖
-	// 其它模块，但 endpoint.New 需要它解析 Selector 并校验 resource_handle，
-	// 因此必须先构造并注册
-	resMod := resource.New(resource.DefaultRegistry())
+	// Resource lookup reads the same catalog revision used by endpoint routing.
+	resMod := resource.New(definitions)
 	k.Register(resMod)
 
 	// HUMAN/AI ControlLease + deadman + Control Lane(RR 40)。读/递增与 safety 同一个 gate。
@@ -332,8 +368,8 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// permission 经该 revoker 调 ctl.RevokeByPackage 撤该包的执行器租约（control 侧递增
 	// motion epoch。SetGrantStore 之所以放在这里而不是 permReg 构造处，是因为它
 	// 需要 ctl - permReg 先构造（pkgregistry 装配裁决要它）、ctl 后构造，故两段式接线。
-	// lease-wire 未落地前 App 拿不到 motion lease、无 lease 可撤，此接线是闭合撤权链的接缝，
-	// 在 lease-wire 落地后即自动生效
+	// AcquireControl/ReleaseControl 已由 IPC 接到同一个 ctl，因此撤权会立即使现有
+	// wire lease 失效，而不是只影响下一次申请。
 	permReg.SetGrantStore(pkgregistry.DefaultRegistryStateDir, ctl, aud)
 
 	// Safety Gate + Stop Lane(FIFO 95) + Supervisor(FIFO 90)：模块自持两条 RT Lane。
@@ -351,7 +387,7 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	// ipc.verifyComponent。注册在 safety 之后、ipc 之前：启动方向
 	// Safety 先武装、外部进程才允许跑；关闭反序 ipc -> service -> safety，先停接客、再停
 	// 外部进程（不再有运动指令源）、最后停 safety
-	svcMgr := service.New(auth, pkgReg, safetyTripAdapter{safetyMod}, aud, logger,
+	svcMgr := service.New(auth, pkgReg, permReg, safetyTripAdapter{safetyMod}, aud, logger,
 		authority.DefaultInvariants())
 	// 装包服务额外可写 staging 根：nervud 在那底下给它建 stage-* 目录让它解包，
 	// 而沙箱的 ProtectSystem=strict 让整个文件系统只读。这是唯一一条这类例外，
@@ -373,13 +409,12 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 
 	// 把卸载/停用需要的外部协作者注入 pkgregistry：service 停组件；control 撤租。
 	// 卸载 Package 时经 ctl.RevokeByPackage 撤销该包名下的执行器租约（含 motion 则由
-	// control 递增 motion epoch）。lease-wire 未落地前无 lease 可撤 - 此接线闭合撤租链，
-	// 落地后即生效
+	// control 递增 motion epoch）。IPC lease 已接线，现有租约会在卸载流程中同步撤销。
 	pkgMod.SetLifecycleHooks(svcMgr, ctl)
 
 	// Endpoint 注册/解析/路由必须在 service 之后、IPC 之前注册，
 	// 因为 Resolve 拉起 on-demand 组件时依赖 svcMgr.EnsureStarted
-	epMod := endpoint.New(pkgReg, permReg, svcMgr, resMod, aud, logger)
+	epMod := endpoint.New(definitions, pkgReg, permReg, svcMgr, aud, logger)
 
 	// 注册内建 endpoint：由 nervud 自己实现、不经外部 Service 的 Interface。
 	//
@@ -436,6 +471,11 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	opMod := operation.New(resMod, nil, aud, logger)
 	k.Register(opMod)
 
+	// The transfer manager owns the separate high-throughput Unix socket. It
+	// starts before IPC accepts control calls and stops after IPC, so no control
+	// route can issue a handle without a live data plane.
+	k.Register(transferMgr)
+
 	// IPC 控制面 UDS：最后开门。依赖上面全部就绪（Identity/Permission/Safety/Service/
 	// Endpoint）。Components 接 svcMgr 解锁 verifyComponent；Endpoints 接 epMod 解锁
 	// ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 与 Request 的 Route 查表
@@ -455,6 +495,7 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 		// Resources 让 AcquireControl 的 selector 能解析成 resource_handle，
 		// 与 ResolveEndpoint 用同一张表、同一套隐式默认。
 		Resources: resMod,
+		Transfer:  transferMgr,
 		// Launcher 接通 LaunchComponent（envelope 80/81）：Launcher 点开一个 App、
 		// 会话服务开机唤起桌面，都走它。在此之前唯一能拉起组件的路径是
 		// endpoint.Resolve 拉起 on-demand 提供者，于是"启动应用"只能伪装成
@@ -464,6 +505,27 @@ func assemble(ctx context.Context, sched *scheduler.Scheduler, sockPath, adminSo
 	if err != nil {
 		return nil, cleanup, err
 	}
+	// Runtime revocation must close matching Dispatch route tokens before it
+	// scans Transfer records. IPC owns that coordination boundary; wiring the
+	// raw Transfer manager here would leave a revoke-then-Begin race.
+	permReg.SetPermissionRevoker(ipcSrv)
+	// Install-grant removal may run inside a package transaction. Service only
+	// records a supervisor stop intent on this hook; it never waits on systemd or
+	// looks the package up while the transaction lock is held.
+	permReg.SetInstallGrantRevoker(svcMgr)
+	// USER_CONSENT changes also alter process sandbox mounts. This separate hook
+	// is never called by permission.Replace, so a package transaction cannot wait
+	// on systemd or accidentally restart a package while rolling back.
+	permReg.SetRuntimePermissionProjector(svcMgr)
+	ctl.SetLeaseObserver(transferLeaseObserver{revoker: ipcSrv})
+	pkgMod.SetTransferRevoker(ipcSrv)
+	if err := epMod.RegisterBuiltin(
+		catalog.InterfaceTransferControl, 1, 0, ipcSrv.TransferBuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf(
+			"register builtin %s: %w", catalog.InterfaceTransferControl, err)
+	}
+	logger.Info("endpoint: builtin registered", "interface", catalog.InterfaceTransferControl)
 	k.Register(ipcSrv)
 
 	// 特权管理通道（root-only UDS）：供 nervusctl 触发装包/卸载/停用启用/权限授撤。

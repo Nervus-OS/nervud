@@ -13,6 +13,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
 )
@@ -68,7 +69,13 @@ type IdentityUpdater interface {
 // Intersect 做安装时的权限裁决，Replace 把 GrantedPermissions 全量投影推送出去。
 // 运行时两个方法都由同一个 *permission.Registry 实例满足
 type PermissionArbiter interface {
-	Intersect(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string)
+	IntersectAt(
+		definitions *catalog.Snapshot,
+		requested []string,
+		source catalog.SourceKind,
+		trust identity.TrustProfile,
+		signers catalog.SignerEvidence,
+	) (granted, denied []string)
 	Replace(grants []permission.Grant) error
 	// ClearPackage 删除某 Package 的运行期授予状态（卸载用）
 	ClearPackage(packageID string) error
@@ -93,6 +100,7 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	// 分配器与 List -> Replace 丢更新
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previousEntries := m.registry.List()
 
 	// Install 是动态安装专用入口，只接受 SourceDynamicInstall（ 修复）。
 	// 系统镜像包绝不走这里 - 它们由 scanSystemImage 直接构造 Entry。若允许调用方
@@ -186,10 +194,21 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		return Entry{}, err
 	}
 
+	provider, err := loadRequiredProviderArtifacts(tx.StagingDir, manifest, false)
+	if err != nil {
+		m.auditInstall(ctx, tx, false, err)
+		return Entry{}, err
+	}
+
 	// ---- 升级裁决（必须在任何写状态之前读到 prev）----
 	prev, hadPrev := m.readPrevState(manifest.PackageID)
 	var carriedDisabled []string
 	if hadPrev {
+		if prev.RemovalPending {
+			err := fmt.Errorf("%w: %q", ErrPackageRemovalPending, manifest.PackageID)
+			m.auditInstall(ctx, tx, false, err)
+			return Entry{}, err
+		}
 		if err := checkUpgrade(prev, manifest, signers, dev); err != nil {
 			m.auditInstall(ctx, tx, false, err)
 			return Entry{}, err
@@ -197,19 +216,46 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		carriedDisabled = prev.DisabledComponents // 停用状态跨升级保留
 	}
 
-	// 权限裁决只保留请求、注册、trust 门槛与 RequireSignerRole 的交集
-	granted, denied := m.perm.Intersect(manifest.Permissions, trust, signers.RoleStrings())
-	if len(denied) > 0 {
-		m.aud.Record(ctx, audit.Event{
-			Action: "pkgregistry.Intersect", Subject: manifest.PackageID,
-			Denied: true, Detail: fmt.Sprintf("%v", denied),
-		})
+	entry := Entry{
+		Manifest:           manifest,
+		ActiveVersion:      manifest.Version,
+		VersionCode:        manifest.VersionCode,
+		Trust:              trust,
+		Source:             tx.Source,
+		DisabledComponents: append([]string(nil), carriedDisabled...),
+		SignerRoles:        signers.RoleStrings(),
+		VerifiedSigners:    append([]VerifiedSigner(nil), signers.VerifiedSigners...),
+		provider:           provider,
+	}
+	if signers.Dev != nil {
+		entry.DeveloperRootID = signers.Dev.RootKeyID
+	}
+
+	// Validate the complete new catalog and recompute every package grant before
+	// allocating a UID, writing the package tree, or updating the ledger.
+	prepared, err := m.prepareEntries(ctx, upsertEntry(previousEntries, entry))
+	if err != nil {
+		m.auditInstall(ctx, tx, false, err)
+		return Entry{}, err
+	}
+	entry, ok := findEntry(prepared.entries, manifest.PackageID)
+	if !ok {
+		err := fmt.Errorf("pkgregistry: prepared entry %q disappeared", manifest.PackageID)
+		m.auditInstall(ctx, tx, false, err)
+		return Entry{}, err
 	}
 
 	uid, err := stableUID(m.stateDir, manifest.PackageID, manifest.Version, trust, tx.Source)
 	if err != nil {
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err
+	}
+	entry.UID = uid
+	for i := range prepared.entries {
+		if prepared.entries[i].Manifest.PackageID == manifest.PackageID {
+			prepared.entries[i].UID = uid
+			break
+		}
 	}
 	subj := authority.Subject{PackageID: manifest.PackageID, UID: uid}
 
@@ -297,7 +343,7 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	st := registryState{
 		PackageID: manifest.PackageID, ActiveVersion: manifest.Version, VersionCode: manifest.VersionCode,
 		UID: uid, Trust: trust.String(), Source: tx.Source.String(),
-		GrantedPermissions: granted, DisabledComponents: carriedDisabled,
+		GrantedPermissions: entry.GrantedPermissions, DisabledComponents: carriedDisabled,
 	}
 	if signers.Dev != nil {
 		st.LineageRootKeyID = signers.Dev.RootKeyID
@@ -308,16 +354,18 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		return Entry{}, err
 	}
 
-	entry := Entry{
-		Manifest: manifest, ActiveVersion: manifest.Version, VersionCode: manifest.VersionCode,
-		UID: uid, Trust: trust, Source: tx.Source,
-		GrantedPermissions: granted, DisabledComponents: carriedDisabled,
-	}
-	if err := m.commit(entry); err != nil {
+	if err := m.publishCatalogLast(ctx, previousEntries, prepared); err != nil {
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err
 	}
 	committed = true // commit 成功：不再补偿删除
+	// A successful upgrade or same-version replacement invalidates every route
+	// and stream authorized by the old package generation. Revoke after the
+	// catalog commit (a failed pre-commit install must not disturb the live
+	// version) and before asking service.Manager to reload the processes.
+	if hadPrev && m.transferRevoker != nil {
+		m.transferRevoker.RevokePackage(manifest.PackageID)
+	}
 
 	// 升级：把运行中的旧版本组件切到新版本。否则旧版本继续运行、崩溃后还被按旧
 	// Entry 重启（ 升级修复）。ReloadPackage 会先停旧实例再起新版本，共享 unit
@@ -345,28 +393,6 @@ func (m *Module) readPrevState(packageID string) (registryState, bool) {
 		return registryState{}, false
 	}
 	return st, true
-}
-
-// commit 把新 Entry 并入内存 Registry（同 Package ID 的旧版本被覆盖，即升级场景），
-// 再把全量投影推给 identity.Registry 与 permission.Registry
-func (m *Module) commit(e Entry) error {
-	existing := m.registry.List()
-	entries := make([]Entry, 0, len(existing)+1)
-	for _, cur := range existing {
-		if cur.Manifest.PackageID == e.Manifest.PackageID {
-			continue
-		}
-		entries = append(entries, cur)
-	}
-	entries = append(entries, e)
-
-	if err := m.registry.Replace(entries); err != nil {
-		return err
-	}
-	if err := m.idReg.Replace(projectIdentity(entries)); err != nil {
-		return err
-	}
-	return m.perm.Replace(projectGrants(entries))
 }
 
 func (m *Module) auditInstall(ctx context.Context, tx InstallTransaction, ok bool, err error) {

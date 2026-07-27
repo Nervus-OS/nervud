@@ -4,16 +4,29 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nervus-os/nervud/internal/endpoint"
 )
 
 func fakeConn() *conn { return &conn{} }
+
+func createTestRoute(
+	tbl *dispatchTable,
+	source *conn,
+	requestID uint64,
+	target *conn,
+	deadline time.Time,
+) uint64 {
+	return tbl.create(
+		source, requestID, target, deadline, endpoint.RouteInfo{}, 1)
+}
 
 func TestDispatchTable_CreateAssignsMonotonicNonZeroIDs(t *testing.T) {
 	tbl := newDispatchTable()
 	src, tgt := fakeConn(), fakeConn()
 
-	id1 := tbl.create(src, 1, tgt, time.Now().Add(time.Second))
-	id2 := tbl.create(src, 2, tgt, time.Now().Add(time.Second))
+	id1 := createTestRoute(tbl, src, 1, tgt, time.Now().Add(time.Second))
+	id2 := createTestRoute(tbl, src, 2, tgt, time.Now().Add(time.Second))
 
 	if id1 == 0 || id2 == 0 {
 		t.Fatalf("route_id must not be 0: id1=%d id2=%d", id1, id2)
@@ -23,10 +36,28 @@ func TestDispatchTable_CreateAssignsMonotonicNonZeroIDs(t *testing.T) {
 	}
 }
 
+func TestDispatchTable_CreateAtEpochRejectsRevocationRace(t *testing.T) {
+	tbl := newDispatchTable()
+	src, tgt := fakeConn(), fakeConn()
+	epoch := tbl.snapshotEpoch()
+
+	// A revocation with no currently published matches still invalidates a
+	// route lookup that began before it.
+	tbl.revoke(func(*routeEntry) bool { return false })
+	if id, ok := tbl.createAtEpoch(
+		epoch, src, 1, tgt, time.Now().Add(time.Second), endpoint.RouteInfo{}, 1,
+	); ok || id != 0 {
+		t.Fatalf("stale create = (%d, %v), want (0, false)", id, ok)
+	}
+	if len(tbl.entries) != 0 {
+		t.Fatalf("stale create published %d entries", len(tbl.entries))
+	}
+}
+
 func TestDispatchTable_CompleteSuccess(t *testing.T) {
 	tbl := newDispatchTable()
 	src, tgt := fakeConn(), fakeConn()
-	id := tbl.create(src, 42, tgt, time.Now().Add(time.Second))
+	id := createTestRoute(tbl, src, 42, tgt, time.Now().Add(time.Second))
 
 	e, status := tbl.complete(id, tgt)
 	if status != completeOK {
@@ -51,7 +82,7 @@ func TestDispatchTable_CompleteUnknownRouteID(t *testing.T) {
 func TestDispatchTable_CompleteTargetMismatch(t *testing.T) {
 	tbl := newDispatchTable()
 	src, tgt, other := fakeConn(), fakeConn(), fakeConn()
-	id := tbl.create(src, 1, tgt, time.Now().Add(time.Second))
+	id := createTestRoute(tbl, src, 1, tgt, time.Now().Add(time.Second))
 
 	if _, status := tbl.complete(id, other); status != completeMismatch {
 		t.Fatalf("status = %v, want completeMismatch", status)
@@ -61,10 +92,28 @@ func TestDispatchTable_CompleteTargetMismatch(t *testing.T) {
 	}
 }
 
+func TestDispatchTable_CompleteAfterDeadlineIsExpired(t *testing.T) {
+	tbl := newDispatchTable()
+	src, tgt := fakeConn(), fakeConn()
+	deadline := time.Now()
+	id := createTestRoute(tbl, src, 1, tgt, deadline)
+
+	entry, status := tbl.complete(id, tgt, deadline.Add(time.Nanosecond))
+	if status != completeExpired {
+		t.Fatalf("status = %v, want completeExpired", status)
+	}
+	if entry == nil || entry.routeID != id {
+		t.Fatalf("entry = %+v, want route %d", entry, id)
+	}
+	if _, ok := tbl.completeAny(id); ok {
+		t.Fatal("expired completion must remove the route")
+	}
+}
+
 func TestDispatchTable_CompleteAny(t *testing.T) {
 	tbl := newDispatchTable()
 	src, tgt := fakeConn(), fakeConn()
-	id := tbl.create(src, 1, tgt, time.Now().Add(time.Second))
+	id := createTestRoute(tbl, src, 1, tgt, time.Now().Add(time.Second))
 
 	e, ok := tbl.completeAny(id)
 	if !ok || e.routeID != id {
@@ -79,9 +128,9 @@ func TestDispatchTable_ConnClosedPartitionsByRole(t *testing.T) {
 	tbl := newDispatchTable()
 	a, b, c := fakeConn(), fakeConn(), fakeConn()
 
-	id1 := tbl.create(a, 1, b, time.Now().Add(time.Second))
-	id2 := tbl.create(c, 2, a, time.Now().Add(time.Second))
-	idUnrelated := tbl.create(b, 3, c, time.Now().Add(time.Second))
+	id1 := createTestRoute(tbl, a, 1, b, time.Now().Add(time.Second))
+	id2 := createTestRoute(tbl, c, 2, a, time.Now().Add(time.Second))
+	idUnrelated := createTestRoute(tbl, b, 3, c, time.Now().Add(time.Second))
 
 	asTarget, asSource := tbl.connClosed(a)
 	if len(asTarget) != 1 || asTarget[0].routeID != id2 {
@@ -108,8 +157,8 @@ func TestDispatchTable_Reap(t *testing.T) {
 
 	past := time.Now().Add(-time.Second)
 	future := time.Now().Add(time.Hour)
-	expiredID := tbl.create(src, 1, tgt, past)
-	liveID := tbl.create(src, 2, tgt, future)
+	expiredID := createTestRoute(tbl, src, 1, tgt, past)
+	liveID := createTestRoute(tbl, src, 2, tgt, future)
 
 	expired := tbl.reap(time.Now())
 	if len(expired) != 1 || expired[0].routeID != expiredID {
@@ -130,7 +179,7 @@ func TestDispatchTable_ConcurrentCompleteIsExactlyOnce(t *testing.T) {
 	const n = 200
 	ids := make([]uint64, n)
 	for i := range ids {
-		ids[i] = tbl.create(src, uint64(i), tgt, time.Now().Add(time.Minute))
+		ids[i] = createTestRoute(tbl, src, uint64(i), tgt, time.Now().Add(time.Minute))
 	}
 
 	var wg sync.WaitGroup
@@ -179,7 +228,7 @@ func TestDispatchTable_ConnClosedConcurrentWithCreate(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ids <- tbl.create(src, uint64(i), tgt, time.Now().Add(time.Minute))
+			ids <- createTestRoute(tbl, src, uint64(i), tgt, time.Now().Add(time.Minute))
 		}(i)
 	}
 	wg.Wait()

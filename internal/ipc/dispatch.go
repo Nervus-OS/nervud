@@ -1,29 +1,29 @@
-// 本文件实现的 route 表:nervud 转发一个 Request 给某个 Service
-// 连接时,用 route_id 记录 (源连接、源 request_id、目标连接、deadline),
-// 供 DispatchResult 到达、超时清道夫、连接断开三条路径共同消费
+// 本文件实现 route 表：nervud 转发一个 Request 给某个 Service 连接时，用
+// route_id 记录源/目标连接、请求与方法的权威快照、deadline、registration
+// generation 以及 Transfer RouteToken，供正常结果、撤权、超时和断线共同消费。
 //
 // 设计核心:谁在表锁下成功删除了这条 entry,谁就是这次调用唯一的终结
 // Response 生产者 - 三条路径统一走查表并删除语义,天然保证每个 Request
 // 最多一个终结 Response，因此不需要额外的原子完成标记
 //
-// 已知简化:架构设想的 route 表项还应记录endpoint binding generation用于
-// 校验 DispatchResult 是否针对同一次绑定,但 endpoint.RouteInfo 没有暴露这个
-// 字段(且 internal/endpoint 不属于本次改动范围)。这里退化为route_id 唯一 +
-// DispatchResult 必须来自登记的目标连接本身(指针身份比较)。弱化场景:同一条
-// 仍然打开的 Service 连接上,若 Provider 在旧 route 还在途时对同一 interface
-// 做了 unregister+重新 register,这里抓不住这次错位 - 范围小,不假装解决
+// 撤权与发布共用表锁和 epoch：请求在查 endpoint/catalog 前采样 epoch，只有在
+// 发布 route 时 epoch 仍相同才成功。撤权先递增 epoch，再摘表并关闭 RouteToken，
+// 因而查表与发布之间发生的撤权不会留下一个可在事后 BeginTransfer 的旧 route。
 package ipc
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/endpoint"
+	"github.com/nervus-os/nervud/internal/transfer"
 )
 
 // routeEntry 是一条在途 Dispatch 的相关状态
@@ -33,6 +33,9 @@ type routeEntry struct {
 	sourceRequestID uint64
 	target          *conn
 	deadline        time.Time
+	methodID        uint32
+	route           endpoint.RouteInfo
+	token           *transfer.RouteToken
 }
 
 // completeStatus 是 dispatchTable.complete 的结果分类
@@ -47,39 +50,224 @@ const (
 	// completeMismatch: route_id 存在,但送回结果的连接不是登记的目标连接。
 	// 没有合法解释 - 没有 Service 会被告知一个指向别的连接的 route_id
 	completeMismatch
+	// completeExpired: target matched, but the result arrived after the exact
+	// route deadline. The entry is removed and must resolve as DEADLINE_EXCEEDED.
+	completeExpired
 )
 
 // dispatchTable 是 route_id -> 在途 Dispatch 的唯一权威
 type dispatchTable struct {
 	mu      sync.Mutex
 	entries map[uint64]*routeEntry
+	// epoch changes at every authorization revocation. Request routing samples
+	// it before consulting endpoint/catalog state and must present the same
+	// value when publishing a route, closing the lookup-to-publish race.
+	epoch uint64
+
+	// beforePublishEnqueue is only populated by package tests to pause the
+	// publish critical section at the former revoke-before-Dispatch race.
+	beforePublishEnqueue func()
 
 	// nextID 从 1 开始,0 视为从未分配,呼应 request_id 的既有约定
 	// (route_id 本身的 proto 注释没有明文保留 0,这是本实现引入的惯例)
 	nextID atomic.Uint64
 }
 
+type dispatchPublishStatus uint8
+
+const (
+	dispatchPublishOK dispatchPublishStatus = iota
+	dispatchPublishEpochChanged
+	dispatchPublishTargetUnavailable
+)
+
 func newDispatchTable() *dispatchTable {
 	return &dispatchTable{entries: make(map[uint64]*routeEntry)}
 }
 
 // create 分配一个新 route_id 并登记表项
-func (t *dispatchTable) create(source *conn, sourceReqID uint64, target *conn, deadline time.Time) uint64 {
-	id := t.nextID.Add(1)
+func (t *dispatchTable) create(
+	source *conn,
+	sourceReqID uint64,
+	target *conn,
+	deadline time.Time,
+	route endpoint.RouteInfo,
+	methodID uint32,
+) uint64 {
+	epoch := t.snapshotEpoch()
+	id, _ := t.createAtEpoch(
+		epoch, source, sourceReqID, target, deadline, route, methodID)
+	return id
+}
+
+// createAtEpoch publishes a route only if no authorization revocation raced
+// with the endpoint/catalog checks that preceded it.
+func (t *dispatchTable) createAtEpoch(
+	expectedEpoch uint64,
+	source *conn,
+	sourceReqID uint64,
+	target *conn,
+	deadline time.Time,
+	route endpoint.RouteInfo,
+	methodID uint32,
+) (uint64, bool) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.epoch != expectedEpoch {
+		return 0, false
+	}
+	id := t.nextID.Add(1)
 	t.entries[id] = &routeEntry{
 		routeID:         id,
 		source:          source,
 		sourceRequestID: sourceReqID,
 		target:          target,
 		deadline:        deadline,
+		methodID:        methodID,
+		route:           route,
+		token:           transfer.NewRouteToken(),
+	}
+	return id, true
+}
+
+// publishDispatchAtEpoch atomically publishes route authority and appends the
+// corresponding Dispatch to the Provider's in-memory outbox. revoke uses the
+// same table lock, so the Provider can observe only one of these orderings:
+//
+//   - Dispatch is queued first, then a matching CancelDispatch; or
+//   - revocation advances epoch first and no Dispatch is queued.
+//
+// target.outbox.push is non-blocking and performs no socket I/O. Slow-consumer
+// teardown is deliberately left to the caller after this lock is released.
+func (t *dispatchTable) publishDispatchAtEpoch(
+	expectedEpoch uint64,
+	source *conn,
+	sourceReqID uint64,
+	target *conn,
+	deadline time.Time,
+	route endpoint.RouteInfo,
+	methodID uint32,
+	remainingMS uint32,
+	payload []byte,
+	caller *ipcv1.CallerContext,
+) (uint64, dispatchPublishStatus) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.epoch != expectedEpoch {
+		return 0, dispatchPublishEpochChanged
+	}
+
+	id := t.nextID.Add(1)
+	entry := &routeEntry{
+		routeID:         id,
+		source:          source,
+		sourceRequestID: sourceReqID,
+		target:          target,
+		deadline:        deadline,
+		methodID:        methodID,
+		route:           route,
+		token:           transfer.NewRouteToken(),
+	}
+	t.entries[id] = entry
+	if t.beforePublishEnqueue != nil {
+		t.beforePublishEnqueue()
+	}
+	if target == nil || target.outbox == nil || !target.outbox.push(&ipcv1.Envelope{
+		Body: &ipcv1.Envelope_Dispatch{Dispatch: &ipcv1.Dispatch{
+			RouteId:     id,
+			EndpointId:  route.ServiceEndpointID,
+			MethodId:    methodID,
+			RemainingMs: remainingMS,
+			Payload:     payload,
+			Caller:      caller,
+		}},
+	}) {
+		delete(t.entries, id)
+		entry.token.Close()
+		return id, dispatchPublishTargetUnavailable
+	}
+	return id, dispatchPublishOK
+}
+
+func (t *dispatchTable) snapshotEpoch() uint64 {
+	t.mu.Lock()
+	epoch := t.epoch
+	t.mu.Unlock()
+	return epoch
+}
+
+// revoke closes matching route tokens under the same lock that publishes
+// routes. Incrementing epoch even when no entry matches rejects a Route lookup
+// that started before this revocation but has not published yet.
+func (t *dispatchTable) revoke(match func(*routeEntry) bool) []*routeEntry {
+	t.mu.Lock()
+	t.epoch++
+	var revoked []*routeEntry
+	for id, entry := range t.entries {
+		if !match(entry) {
+			continue
+		}
+		delete(t.entries, id)
+		entry.token.Close()
+		revoked = append(revoked, entry)
 	}
 	t.mu.Unlock()
-	return id
+	return revoked
+}
+
+func (t *dispatchTable) revokeEndpoint(
+	provider *conn,
+	endpointID, generation uint64,
+) []*routeEntry {
+	return t.revoke(func(entry *routeEntry) bool {
+		return entry.target == provider &&
+			entry.route.ServiceEndpointID == endpointID &&
+			(generation == 0 || entry.route.RegistrationGeneration == generation)
+	})
+}
+
+func (t *dispatchTable) revokePackage(packageID string) []*routeEntry {
+	return t.revoke(func(entry *routeEntry) bool {
+		return entry.source.caller.PackageID == packageID ||
+			entry.target.caller.PackageID == packageID
+	})
+}
+
+func (t *dispatchTable) revokePermission(packageID, permission string) []*routeEntry {
+	return t.revoke(func(entry *routeEntry) bool {
+		return entry.source.caller.PackageID == packageID &&
+			slices.Contains(entry.route.RequiredPermissions, permission)
+	})
+}
+
+func (t *dispatchTable) revokeResource(resource string, generation uint64) []*routeEntry {
+	return t.revoke(func(entry *routeEntry) bool {
+		return entry.route.ResourceHandle == resource &&
+			entry.route.ResourceGeneration == generation
+	})
+}
+
+func (t *dispatchTable) revokeControl(
+	caller transfer.ConnID,
+	resource string,
+) []*routeEntry {
+	return t.revoke(func(entry *routeEntry) bool {
+		return transfer.ConnID(entry.source.connID) == caller &&
+			entry.route.ResourceHandle == resource &&
+			entry.route.Method.Meta.GetRequiresControlLease()
+	})
 }
 
 // complete 尝试完成一个 route,要求结果来自登记的目标连接本身
-func (t *dispatchTable) complete(routeID uint64, target *conn) (*routeEntry, completeStatus) {
+func (t *dispatchTable) complete(
+	routeID uint64,
+	target *conn,
+	nowValues ...time.Time,
+) (*routeEntry, completeStatus) {
+	now := time.Now()
+	if len(nowValues) != 0 {
+		now = nowValues[0]
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -91,6 +279,10 @@ func (t *dispatchTable) complete(routeID uint64, target *conn) (*routeEntry, com
 		return nil, completeMismatch
 	}
 	delete(t.entries, routeID)
+	e.token.Close()
+	if !now.Before(e.deadline) {
+		return e, completeExpired
+	}
 	return e, completeOK
 }
 
@@ -104,8 +296,23 @@ func (t *dispatchTable) completeAny(routeID uint64) (*routeEntry, bool) {
 	e, ok := t.entries[routeID]
 	if ok {
 		delete(t.entries, routeID)
+		e.token.Close()
 	}
 	return e, ok
+}
+
+// origin returns the immutable authorization snapshot for a live route only
+// when the querying connection is that route's Provider target. The route
+// token closes the race with completion immediately after this lookup.
+func (t *dispatchTable) origin(routeID uint64, target *conn) (*routeEntry, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	e, ok := t.entries[routeID]
+	if !ok || e.target != target || !e.token.Open() {
+		return nil, false
+	}
+	return e, true
 }
 
 // connClosed 摘除全部以 c 为 target 或 source 的表项,分类返回供调用方在释放
@@ -120,9 +327,11 @@ func (t *dispatchTable) connClosed(c *conn) (asTarget, asSource []*routeEntry) {
 		case e.target:
 			asTarget = append(asTarget, e)
 			delete(t.entries, id)
+			e.token.Close()
 		case e.source:
 			asSource = append(asSource, e)
 			delete(t.entries, id)
+			e.token.Close()
 		}
 	}
 	return asTarget, asSource
@@ -137,6 +346,7 @@ func (t *dispatchTable) reap(now time.Time) []*routeEntry {
 		if now.After(e.deadline) {
 			expired = append(expired, e)
 			delete(t.entries, id)
+			e.token.Close()
 		}
 	}
 	t.mu.Unlock()
@@ -148,7 +358,7 @@ func (t *dispatchTable) reap(now time.Time) []*routeEntry {
 // 计数,并把最终 Response 送进 source 的 outbox。返回值转发自 enqueue,只有
 // handleRequest 的同步路径关心它(用于决定是否继续读源连接)
 func resolveRoute(e *routeEntry, resp *ipcv1.Response) bool {
-	e.source.inFlight.Add(-1)
+	e.source.releaseRequest(e.sourceRequestID)
 	return e.source.enqueue(responseEnvelope(resp))
 }
 
@@ -162,9 +372,12 @@ func (s *Server) dispatchConnClosed(c *conn) {
 	asTarget, asSource := s.dispatch.connClosed(c)
 
 	for _, e := range asTarget {
+		s.transfer.CloseRoute(e.routeID)
 		resolveRoute(e, failureResponse(e.sourceRequestID, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE))
 	}
 	for _, e := range asSource {
+		s.transfer.CloseRoute(e.routeID)
+		e.source.releaseRequest(e.sourceRequestID)
 		if e.target != nil {
 			e.target.enqueue(&ipcv1.Envelope{Body: &ipcv1.Envelope_CancelDispatch{
 				CancelDispatch: &ipcv1.CancelDispatch{
@@ -197,6 +410,7 @@ func (s *Server) runDispatchReaper() {
 			return
 		case now := <-ticker.C:
 			for _, e := range s.dispatch.reap(now) {
+				s.transfer.CloseRoute(e.routeID)
 				resolveRoute(e, failureResponse(e.sourceRequestID, ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED))
 				if e.target != nil {
 					e.target.enqueue(&ipcv1.Envelope{Body: &ipcv1.Envelope_CancelDispatch{

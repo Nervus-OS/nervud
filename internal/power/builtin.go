@@ -28,9 +28,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
@@ -65,21 +66,21 @@ func New(gate Gate, log *slog.Logger) *Module {
 }
 
 // BuiltinHandler 返回可直接交给 endpoint.RegisterBuiltin 的处理函数。
-//
-// 签名写成具体类型而不是 import endpoint 的别名：power 不该依赖 endpoint。
-// 装配方 main.go 负责把它塞进 RegisterBuiltin，两个签名一致，Go 在装配期检查
-func (m *Module) BuiltinHandler() func(context.Context, identity.Caller, uint32, []byte) ([]byte, ipcv1.StatusCode) {
-	return func(ctx context.Context, caller identity.Caller, methodID uint32, _ []byte) ([]byte, ipcv1.StatusCode) {
-		switch methodID {
+func (m *Module) BuiltinHandler() endpoint.BuiltinHandler {
+	return func(call endpoint.BuiltinCall) endpoint.BuiltinResult {
+		var payload []byte
+		var code ipcv1.StatusCode
+		switch call.MethodID {
 		case MethodReboot:
-			return m.act(ctx, caller, authority.PowerActionReboot)
+			payload, code = m.act(call.Context, call.Caller, authority.PowerActionReboot)
 		case MethodPowerOff:
-			return m.act(ctx, caller, authority.PowerActionPowerOff)
+			payload, code = m.act(call.Context, call.Caller, authority.PowerActionPowerOff)
 		default:
 			// fail closed：没实现的方法就是不存在。静默成功会让调用方以为
 			// 机器要关了，然后一直等一个永远不会发生的关机
-			return nil, ipcv1.StatusCode_STATUS_CODE_NOT_FOUND
+			code = ipcv1.StatusCode_STATUS_CODE_NOT_FOUND
 		}
+		return endpoint.BuiltinResult{Payload: payload, Code: code}
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/permission"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 )
 
 func helloEnv() *ipcv1.Envelope {
@@ -60,6 +60,20 @@ func handshake(t *testing.T, c net.Conn) *ipcv1.HelloAckSuccess {
 		t.Fatal("HelloAck contains neither success nor failure")
 	}
 	return s
+}
+
+func handshakeService(t *testing.T, c net.Conn) *ipcv1.HelloAckSuccess {
+	t.Helper()
+	hello := helloEnv()
+	hello.GetHello().DeclaredComponentId = "test-service"
+	if err := WriteFrame(c, mustMarshal(t, hello)); err != nil {
+		t.Fatalf("write service Hello: %v", err)
+	}
+	ack := readEnv(t, c).GetHelloAck()
+	if ack == nil || ack.GetSuccess() == nil {
+		t.Fatalf("service handshake failed: %+v", ack)
+	}
+	return ack.GetSuccess()
 }
 
 func expectClosed(t *testing.T, c net.Conn) {
@@ -205,7 +219,8 @@ func TestHandshake_FailsClosedWhenComponentUnverifiable(t *testing.T) {
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: inv, Identity: selfRegistry(t),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +374,7 @@ func TestReady_UnmatchedDispatchResultIsDiscardedNotClosed(t *testing.T) {
 	s, sock, rec := newTestServer(t, inv, DefaultLimits())
 
 	c := dial(t, sock)
-	handshake(t, c)
+	handshakeService(t, c)
 
 	dr := &ipcv1.Envelope{Body: &ipcv1.Envelope_DispatchResult{DispatchResult: &ipcv1.DispatchResult{RouteId: 999}}}
 	if err := WriteFrame(c, mustMarshal(t, dr)); err != nil {
@@ -423,5 +438,36 @@ func TestNegotiateVersion(t *testing.T) {
 					major, minor, ok, tc.wantMajor, tc.wantMinor, tc.wantOK)
 			}
 		})
+	}
+}
+
+func TestRequestTrackerRejectsDuplicateAndPayloadOverflow(t *testing.T) {
+	co := &conn{requests: make(map[uint64]int)}
+	if code := co.reserveRequest(7, 10); code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("first reserve code=%s", code)
+	}
+	if code := co.reserveRequest(7, 10); code != ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT {
+		t.Fatalf("duplicate reserve code=%s, want INVALID_ARGUMENT", code)
+	}
+	if code := co.reserveRequest(8, maxInflightPayloadBytes); code != ipcv1.StatusCode_STATUS_CODE_RESOURCE_EXHAUSTED {
+		t.Fatalf("overflow reserve code=%s, want RESOURCE_EXHAUSTED", code)
+	}
+
+	co.releaseRequest(7)
+	if code := co.reserveRequest(8, maxInflightPayloadBytes); code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("reserve after release code=%s", code)
+	}
+	co.releaseRequest(8)
+	if co.requestBytes != 0 || len(co.requests) != 0 {
+		t.Fatalf("tracker not empty: bytes=%d requests=%d", co.requestBytes, len(co.requests))
+	}
+}
+
+func TestRemainingMillisRoundsUp(t *testing.T) {
+	if got := remainingMillis(time.Nanosecond); got != 1 {
+		t.Fatalf("remainingMillis(1ns)=%d, want 1", got)
+	}
+	if got := remainingMillis(time.Millisecond + time.Nanosecond); got != 2 {
+		t.Fatalf("remainingMillis(1ms+1ns)=%d, want 2", got)
 	}
 }

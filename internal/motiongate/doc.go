@@ -16,7 +16,9 @@
 //
 // 本包是叶子，禁止 import 任何 nervud 兄弟模块。safety 与 control 共用同一个
 // *Gate 实例（由 main.go 装配时 New 一次并注入两者） - 它属于可信计算基（TCB）。
-// 因此不能有归属之争：谁都不拥有epoch，它是二者共享的撤销世代号。
+// 因此不能有归属之争：谁都不拥有 epoch。Normal 状态下它是 control 为各 Resource
+// 分配单调 token 的来源；Safety Trip 产生的 token 才是跨 Resource 的全局撤销下界。
+// 多资源调用方不能用“lease token 必须等于当前 Gate token”做普通有效性判断。
 //
 // # 生命周期与 fail-closed
 //

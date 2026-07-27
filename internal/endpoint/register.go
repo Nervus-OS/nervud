@@ -2,12 +2,21 @@
 package endpoint
 
 import (
+	"bytes"
 	"errors"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
+)
+
+const (
+	legacyPackageManagerPackage   = "nervus.pkgmanagerd"
+	legacyPackageManagerComponent = "main"
+	legacyPackageManagerMajor     = uint32(1)
+	platformReleaseSignerRole     = "platform-release"
 )
 
 // RegisterEndpoint 处理一次 Service 报到
@@ -28,8 +37,17 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	if caller.ComponentID == "" {
 		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION, "handshake not complete: no component id")
 	}
+	snapshot := m.snapshot()
+	if snapshot == nil {
+		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+			"authoritative catalog is unavailable")
+	}
 
 	// 步骤 2：Service 只能注册 manifest 已声明的 endpoint
+	if m.pkgs == nil {
+		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+			"package registry is unavailable")
+	}
 	entry, ok := m.pkgs.Lookup(caller.PackageID)
 	if !ok {
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "unknown package")
@@ -40,6 +58,9 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	}
 	if entry.ComponentDisabled(caller.ComponentID) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "component disabled")
+	}
+	if comp.Type != pkgregistry.ComponentService {
+		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "only service components may register endpoints")
 	}
 
 	var (
@@ -57,27 +78,43 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "interface not declared in manifest exports")
 	}
 
+	// The signed catalog, not the wire request or manifest alone, decides which
+	// package/component implements this exact interface major.
+	provider, ok := snapshot.ProviderInterface(
+		caller.PackageID, interfaceID, req.GetInterfaceMajor())
+	if !ok ||
+		provider.PackageID != caller.PackageID ||
+		provider.ComponentID != caller.ComponentID ||
+		provider.Definition.InterfaceID != interfaceID ||
+		provider.Definition.Major != req.GetInterfaceMajor() {
+		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+			"component is not a catalog-approved provider for the interface major")
+	}
+
 	// 步骤 3：按 Export 的 Visibility 选权限 ID 并裁决
 	permID := permServiceRegister
 	if visibility == pkgregistry.VisibilityPackage {
 		permID = permServiceRegisterPrivate
 	}
-	if !m.perm.Allowed(caller.PackageID, permID) {
+	if !m.allowedAt(snapshot, caller.PackageID, permID) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "missing permission "+permID)
 	}
 
-	// 步骤 4：resource_handle 校验。空字符串表示未指定，非空值必须
-	// 是 Resource Registry 里的已知句柄，避免注册悬空路由
 	resourceHandle := req.GetResourceHandle()
-	if resourceHandle != "" && !m.resources.Valid(resourceHandle) {
-		return fail(ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT, "unsupported resource_handle")
+	resourceGeneration, resourceOK := registrationResource(
+		snapshot, provider.Definition, resourceHandle)
+	if !resourceOK {
+		return fail(ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT,
+			"resource_handle is absent, unknown, or incompatible with the interface")
 	}
 
-	// 步骤 5：schema_hash 只记录、不比对，因为 v1 尚无权威 schema Registry
-	var schemaHash []byte
-	if h := req.GetInterfaceSchemaHash(); len(h) > 0 {
-		schemaHash = append([]byte(nil), h...)
+	reportedSchema := req.GetInterfaceSchemaHash()
+	if !bytes.Equal(reportedSchema, provider.Definition.SchemaHash) &&
+		!allowLegacyPackageManagerEmptySchema(caller, req, provider) {
+		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+			"interface schema hash does not match the catalog")
 	}
+	schemaHash := append([]byte(nil), provider.Definition.SchemaHash...)
 
 	m.mu.Lock()
 
@@ -88,18 +125,21 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	cs := m.connStateLocked(conn)
 	cs.nextRegID++
 	reg := &serviceRegistration{
-		id:             cs.nextRegID,
-		conn:           conn,
-		packageID:      caller.PackageID,
-		componentID:    caller.ComponentID,
-		interfaceID:    interfaceID,
-		ifaceMajor:     req.GetInterfaceMajor(),
-		ifaceMinor:     req.GetInterfaceMinor(),
-		schemaHash:     schemaHash,
-		resourceHandle: resourceHandle,
-		visibility:     visibility,
-		generation:     m.generations[regKey],
-		live:           true,
+		id:                   cs.nextRegID,
+		conn:                 conn,
+		packageID:            caller.PackageID,
+		componentID:          caller.ComponentID,
+		interfaceID:          interfaceID,
+		ifaceMajor:           req.GetInterfaceMajor(),
+		ifaceMinor:           req.GetInterfaceMinor(),
+		schemaHash:           schemaHash,
+		resourceHandle:       resourceHandle,
+		visibility:           visibility,
+		generation:           m.generations[regKey],
+		definitionGeneration: provider.Definition.DefinitionGeneration,
+		providerGeneration:   provider.DefinitionGeneration,
+		resourceGeneration:   resourceGeneration,
+		live:                 true,
 	}
 	cs.registrations[reg.id] = reg
 	m.byInterface[interfaceID] = append(m.byInterface[interfaceID], reg)
@@ -119,6 +159,50 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	return &ipcv1.RegisterEndpointResult{RequestId: reqID, Outcome: &ipcv1.RegisterEndpointResult_Success{
 		Success: &ipcv1.RegisterEndpointSuccess{EndpointId: reg.id},
 	}}
+}
+
+func allowLegacyPackageManagerEmptySchema(
+	caller identity.Caller,
+	req *ipcv1.RegisterEndpoint,
+	provider catalog.ProviderInterface,
+) bool {
+	return len(req.GetInterfaceSchemaHash()) == 0 &&
+		caller.PackageID == legacyPackageManagerPackage &&
+		caller.ComponentID == legacyPackageManagerComponent &&
+		req.GetInterfaceId() == catalog.InterfacePackageManager &&
+		req.GetInterfaceMajor() == legacyPackageManagerMajor &&
+		provider.PackageID == legacyPackageManagerPackage &&
+		provider.ComponentID == legacyPackageManagerComponent &&
+		provider.ProviderOwner.Kind == catalog.SourceKindSystemImage &&
+		provider.ProviderOwner.Trust == identity.TrustPlatform &&
+		provider.ProviderOwner.Signers.HasRole(platformReleaseSignerRole)
+}
+
+func registrationResource(
+	snapshot *catalog.Snapshot,
+	def catalog.InterfaceDefinition,
+	handle string,
+) (uint64, bool) {
+	if len(def.CompatibleResourceTypes) == 0 {
+		return 0, handle == ""
+	}
+	if handle == "" {
+		return 0, false
+	}
+	resource, ok := snapshot.ResourceByHandle(handle)
+	if !ok || !compatibleResource(def, resource.ResourceType) {
+		return 0, false
+	}
+	return resource.DefinitionGeneration, true
+}
+
+func compatibleResource(def catalog.InterfaceDefinition, resourceType string) bool {
+	for _, compatible := range def.CompatibleResourceTypes {
+		if compatible == resourceType {
+			return true
+		}
+	}
+	return false
 }
 
 func registerFailure(reqID uint64, code ipcv1.StatusCode) *ipcv1.RegisterEndpointResult {

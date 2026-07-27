@@ -12,11 +12,8 @@ import (
 	"github.com/nervus-os/nervud/internal/motiongate"
 )
 
-// ResourceBaseMain 是 v1 唯一合法的执行器 Resource
-//
-// 申请里的 Resource 不等于它即拒绝，不做静默降级：静默把未知 Resource 当成
-// base.main，会在 v2 放开多 Resource 时变成静默错配 - 申请方以为拿到了手臂的控制权，
-// 实际拿到的是底盘的
+// ResourceBaseMain 是协议隐式默认与 legacy ControlSnapshot 的底盘句柄。
+// 其它已由 catalog 解析的非空 handle 无需在 control 中新增常量或分支。
 const ResourceBaseMain = "base.main"
 
 // ID 是系统签发的不透明租约句柄（ 的 lease_id）
@@ -53,9 +50,12 @@ type Lease struct {
 	Conn  ConnID
 	Class Class
 
-	// Resource v1 恒为 ResourceBaseMain。保留字段而不是省掉，是因为
-	// 语义上租约从第一天就是 Resource-scoped，v2 放开时不必改结构与调用方
+	// Resource 是 catalog 已解析的稳定公开 handle；每个 handle 有独立租约槽。
 	Resource string
+	// ResourceGeneration pins the exact catalog definition that authorized this
+	// lease. A stable handle may be reused after an upgrade, but old authority
+	// must never carry into the replacement definition.
+	ResourceGeneration uint64
 
 	// Owner 是签发时的可信调用者身份，仅用于审计归因；权限复核不读它
 	// （权限是动态的，每次调用要重新查，见 permission.Registry.Allowed 的说明）
@@ -68,9 +68,8 @@ type Lease struct {
 	// 可以要一个比 Policy 上限更短的 TTL，续租必须沿用它，否则续着续着就自己变长了
 	TTL time.Duration
 
-	// Epoch 是签发时的 motion epoch。任何撤销边界都会递增 Gate 的 epoch，因此
-	// lease.Epoch != gate.Epoch本身就是一条 fail-closed 的失效判据 - 即便撤销
-	// 动作因故没跑完，陈旧租约也授权不了运动
+	// Epoch 是签发时从全局 motion epoch 分配器取得的单调 token。普通边界只撤同一
+	// Resource；Safety Trip 的 token 是跨 Resource floor，旧 token 全部失效。
 	Epoch uint64
 
 	// Deadman 是命令新鲜度窗口，0 表示本租约不要求 deadman。
@@ -85,6 +84,7 @@ type Snapshot struct {
 	Source Source
 
 	State motiongate.State
+	// Epoch 是采样时的全局 motion token 分配器值；多资源下可以大于 Lease.Epoch。
 	Epoch uint64
 
 	// Held 为 false 时 Lease 是零值（当前为 NONE）

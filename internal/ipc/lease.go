@@ -20,11 +20,12 @@ package ipc
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/control"
 )
@@ -32,6 +33,11 @@ import (
 // handleAcquireControl 处理一次租约申请。
 func (co *conn) handleAcquireControl(req *ipcv1.AcquireControl) bool {
 	reqID := req.GetRequestId()
+	if reqID == 0 {
+		co.log.Warn("ipc: AcquireControl with reserved request_id 0, closing")
+		co.s.auditViolation(co.caller, errZeroRequestID)
+		return false
+	}
 
 	if co.s.leases == nil {
 		// control 未接线（测试/裁剪构建）。回 UNAVAILABLE 而不是关连接：
@@ -53,41 +59,40 @@ func (co *conn) handleAcquireControl(req *ipcv1.AcquireControl) bool {
 	// Resource 解析：空 selector 按协议取隐式默认（BaseMotion 的 base.main）。
 	// 与 ResolveEndpoint 的 selector 语义保持一致，否则同一个「留空」在两条
 	// 路径上含义不同，是最容易写出 bug 的那类不一致。
-	resource, ok := co.s.resolveLeaseResource(req.GetResource())
+	resource, resourceGeneration, ok := co.s.resolveLeaseResource(req.GetResource())
 	if !ok {
 		return co.enqueue(acquireFailure(reqID,
 			ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 			ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_RESOURCE_UNAVAILABLE))
 	}
 
-	// ⚠ v1：直接采信客户端声明的 controller_class，只记审计。
-	//
-	// 这与 control/class.go 的「Class 必须由可信调用方根据身份与权限裁决后传入，
-	// 不能接受客户端自报值」【暂时不一致】，是一个有意识的 v1 取舍：
-	// permission.V1GrantAll 当前把权限执法整体短路了（申请即授予），此刻加一道
-	// class 门槛只是做样子——它会无条件放行，却让人以为有防护。
-	//
-	// 执法恢复（V1GrantAll = false）时必须一并补上：在 permission.DefaultCatalog
-	// 里登记 class 对应的权限，并在这里查。grep CONTROL_CLASS_SELF_REPORTED
-	// 能找到全部相关位置。
+	// 当前策略明确允许调用方选择 controller_class，并把选择记入审计。Package、
+	// Component 和连接身份均已由内核核实，但 HUMAN/AI 这个值本身仍是自报值；
+	// 它会影响抢占优先级，不能把这段代码描述成可信 class 裁决。未来若引入会话/
+	// 人在场证明，应在这里把 wire 值与可信策略结果交叉核对。
 	co.s.auditLeaseClass(co.caller, class, resource)
 
 	lease, err := co.s.leases.Acquire(control.Request{
-		Conn:     co.leaseConnID(),
-		Class:    class,
-		Resource: resource,
-		Owner:    co.caller,
-		// TTL/Deadman 留 0 = 沿用 Policy 默认。
-		//
-		// 刻意【不】透传 requested_deadline_nanos：协议说那是「期望值不是承诺」，
-		// 而 control.Request 的约定是「非 0 时只能比 Policy 更严，超限即拒绝」。
-		// 把一个客户端期望值直接塞进去，会让一个想要更长租约的请求变成硬失败，
-		// 而不是被 Policy 收紧——那不是协议要的语义。
-		// 真要支持缩短，应当先判断它是否小于 Policy 默认再传，留待 v2。
+		Conn:               co.leaseConnID(),
+		Class:              class,
+		Resource:           resource,
+		ResourceGeneration: resourceGeneration,
+		Owner:              co.caller,
+		RequestedTTL:       time.Duration(req.GetRequestedDeadlineNanos()),
 	})
 	if err != nil {
 		code, reason := leaseErrToWire(err)
 		return co.enqueue(acquireFailure(reqID, code, reason))
+	}
+	deadlineNanos, err := co.s.leaseDeadlineNanos(lease.Deadline)
+	if err != nil {
+		// Do not leave a lease active when its required wire representation could
+		// not be produced. The caller never received a handle for this lease.
+		_ = co.s.leases.Release(lease.ID, co.leaseConnID())
+		co.s.auditViolation(co.caller, err)
+		return co.enqueue(acquireFailure(reqID,
+			ipcv1.StatusCode_STATUS_CODE_INTERNAL,
+			ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_UNSPECIFIED))
 	}
 
 	return co.enqueue(&ipcv1.Envelope{Body: &ipcv1.Envelope_AcquireControlResult{
@@ -99,16 +104,42 @@ func (co *conn) handleAcquireControl(req *ipcv1.AcquireControl) bool {
 				// 与 endpoint_id 同一原则：查找键是 (连接, 句柄)。
 				LeaseId:        co.registerLease(lease),
 				MotionEpoch:    lease.Epoch,
-				DeadlineNanos:  lease.Deadline.UnixNano(),
+				DeadlineNanos:  deadlineNanos,
 				ResourceHandle: lease.Resource,
 			}},
 		},
 	}})
 }
 
+// leaseDeadlineNanos converts a Go monotonic deadline into the absolute Linux
+// CLOCK_MONOTONIC domain required by AcquireControlSuccess.deadline_nanos.
+func (s *Server) leaseDeadlineNanos(deadline time.Time) (int64, error) {
+	if s == nil || s.monotonicNow == nil {
+		return 0, errors.New("ipc: monotonic clock unavailable")
+	}
+	now, err := s.monotonicNow()
+	if err != nil {
+		return 0, err
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, errors.New("ipc: control lease expired before response")
+	}
+	delta := uint64(remaining)
+	if now > math.MaxInt64 || delta > math.MaxInt64-now {
+		return 0, errors.New("ipc: monotonic lease deadline overflow")
+	}
+	return int64(now + delta), nil
+}
+
 // handleReleaseControl 处理一次主动释放。
 func (co *conn) handleReleaseControl(req *ipcv1.ReleaseControl) bool {
 	reqID := req.GetRequestId()
+	if reqID == 0 {
+		co.log.Warn("ipc: ReleaseControl with reserved request_id 0, closing")
+		co.s.auditViolation(co.caller, errZeroRequestID)
+		return false
+	}
 
 	if co.s.leases == nil {
 		return co.enqueue(releaseFailure(reqID, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE))
@@ -177,6 +208,9 @@ func leaseErrToWire(err error) (ipcv1.StatusCode, ipcv1.ControlLeaseErrorReason)
 	case errors.Is(err, control.ErrShuttingDown):
 		return ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE,
 			ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_RESOURCE_UNAVAILABLE
+	case errors.Is(err, control.ErrResourceCapacity):
+		return ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE,
+			ipcv1.ControlLeaseErrorReason_CONTROL_LEASE_ERROR_REASON_RESOURCE_UNAVAILABLE
 	default:
 		// 认不出来的错误归一化为 INTERNAL + UNSPECIFIED reason。
 		// 不猜一个具体原因：猜错会让客户端按错误的策略退避或抢占。
@@ -210,7 +244,3 @@ func releaseFailure(reqID uint64, code ipcv1.StatusCode) *ipcv1.Envelope {
 		},
 	}}
 }
-
-// leaseDeadlineFallback 仅用于 Deadline 零值时给一个可解释的 wire 值。
-// 正常路径上 control 一定填了 Deadline，这里只是防御性兜底。
-var leaseDeadlineFallback = time.Time{}

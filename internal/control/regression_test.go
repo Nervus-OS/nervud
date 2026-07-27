@@ -20,7 +20,7 @@ func TestAcquire_RejectedAfterStop(t *testing.T) {
 	if !errors.Is(err, ErrShuttingDown) {
 		t.Fatalf("Acquire after Stop = %v, want ErrShuttingDown", err)
 	}
-	if l != (Lease{}) || m.cur.Load() != nil {
+	if l != (Lease{}) || m.current(ResourceBaseMain) != nil {
 		t.Fatal("no lease may be published after Stop")
 	}
 	if _, err := m.Check(l.ID, l.Conn); !errors.Is(err, ErrControlNotHeld) {
@@ -34,10 +34,11 @@ func TestMarkFresh_Monotonic(t *testing.T) {
 	early := m.base.Add(20 * time.Millisecond)
 	late := m.base.Add(100 * time.Millisecond)
 
-	m.markFresh(late)
-	m.markFresh(early)
+	slot := m.slot(ResourceBaseMain)
+	m.markFresh(slot, late)
+	m.markFresh(slot, early)
 
-	if got := time.Duration(m.fresh.Load()); got != 100*time.Millisecond {
+	if got := time.Duration(slot.fresh.Load()); got != 100*time.Millisecond {
 		t.Fatalf("fresh = %s after a stale write, want 100ms (monotonic)", got)
 	}
 }
@@ -84,7 +85,7 @@ func TestRevokeAll_NoBumpAndZeroAlloc(t *testing.T) {
 	if g.Epoch() != ep {
 		t.Fatalf("RevokeAll bumped epoch: %d, want unchanged %d", g.Epoch(), ep)
 	}
-	if m.cur.Load() != nil {
+	if m.current(ResourceBaseMain) != nil {
 		t.Fatal("RevokeAll should have cleared the slot")
 	}
 
@@ -96,13 +97,14 @@ func TestRevokeAll_NoBumpAndZeroAlloc(t *testing.T) {
 func TestDropLocked_NoBumpWhenLatched(t *testing.T) {
 	m, g, _ := newTestModule(t)
 	mustAcquire(t, m, humanReq(1))
-	lp := m.cur.Load()
+	slot := m.slot(ResourceBaseMain)
+	lp := slot.cur.Load()
 
 	g.Trip()
 	latchedEpoch := g.Epoch()
 
 	m.mu.Lock()
-	m.dropLocked(lp, actionRevoked, errSafetyRevoked)
+	m.dropLocked(slot, lp, actionRevoked, errSafetyRevoked)
 	m.mu.Unlock()
 
 	if g.Epoch() != latchedEpoch {

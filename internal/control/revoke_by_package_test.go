@@ -18,7 +18,7 @@ func TestRevokeByPackage_RevokesMatchingPackage(t *testing.T) {
 		t.Fatalf("RevokeByPackage: %v", err)
 	}
 
-	if cur := m.cur.Load(); cur != nil {
+	if cur := m.current(ResourceBaseMain); cur != nil {
 		t.Fatalf("cur still set after RevokeByPackage: %+v", cur)
 	}
 
@@ -40,7 +40,7 @@ func TestRevokeByPackage_DoesNotRevokeOtherPackage(t *testing.T) {
 		t.Fatalf("RevokeByPackage(other): %v", err)
 	}
 
-	if cur := m.cur.Load(); cur == nil || cur.ID != l.ID {
+	if cur := m.current(ResourceBaseMain); cur == nil || cur.ID != l.ID {
 		t.Fatalf("lease was wrongly revoked by unrelated package")
 	}
 }
@@ -60,7 +60,7 @@ func TestRevokeByPackage_IdempotentEmptyPkgID(t *testing.T) {
 	if err := m.RevokeByPackage(""); err != nil {
 		t.Fatalf("RevokeByPackage(\"\") should be nil, got %v", err)
 	}
-	if m.cur.Load() == nil {
+	if m.current(ResourceBaseMain) == nil {
 		t.Fatal("lease was wrongly revoked by empty pkgID")
 	}
 }

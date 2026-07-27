@@ -51,6 +51,19 @@ func TestCreate_Validation(t *testing.T) {
 		}
 	})
 
+	t.Run("motion with several resources requires repeated lease bindings", func(t *testing.T) {
+		aud := &fakeAuditor{}
+		m := New(
+			fakeResource{valid: map[string]bool{testResource: true, "gripper.main": true}},
+			fakeLease{ok: true}, aud, discardLog(),
+		)
+		_, code := m.Create(nil, testCaller(), testOrigin(),
+			[]string{testResource, "gripper.main"}, 42, 1, time.Now().Add(time.Minute))
+		if code != invalidCode {
+			t.Fatalf("multi-resource motion: code=%v, want INVALID_ARGUMENT", code)
+		}
+	})
+
 	t.Run("expired deadline", func(t *testing.T) {
 		m, _, _ := newTestManager(t, true)
 		_, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(-time.Second))

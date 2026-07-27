@@ -76,9 +76,10 @@ func (g *Gate) Trip() bool {
 	}
 }
 
-// BumpEpoch 只递增 epoch、保留当前 State：供 control 的 lease 生命周期事件
-// （从 NONE 签发、HUMAN 抢占 AI、释放、超时、连接断开或 deadman 失效等）
-// 使用，让已进入 Provider 队列的旧命令整体作废。lock-free、零堆分配。
+// BumpEpoch 只递增 epoch、保留当前 State。Normal 状态下 control 用递增值为某个
+// Resource 的 lease 边界分配新 token；其它 Resource 的有效 token 无需等于这里的
+// 最新值。只有 Trip 产生的 token 才构成跨 Resource 的全局撤销下界。
+// lock-free、零堆分配。
 func (g *Gate) BumpEpoch() {
 	for {
 		old := g.word.Load()

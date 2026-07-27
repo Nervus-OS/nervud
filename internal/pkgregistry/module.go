@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
 )
@@ -20,13 +21,14 @@ import (
 // pkgmanagerd 的装包事务处理循环留给下一步，因此不实现 kernel.FatalReporter；
 // 等那条循环落地后再评估是否需要
 type Module struct {
-	auth     PackageInstaller
-	idReg    IdentityUpdater
-	perm     PermissionArbiter
-	registry *Registry
-	trust    TrustStore
-	aud      audit.Recorder
-	log      *slog.Logger
+	auth        PackageInstaller
+	idReg       IdentityUpdater
+	perm        PermissionArbiter
+	registry    *Registry
+	definitions *catalog.Registry
+	trust       TrustStore
+	aud         audit.Recorder
+	log         *slog.Logger
 
 	stateDir          string // /var/lib/nervus/registry
 	systemPackagesDir string // /usr/lib/nervus/system-packages
@@ -40,8 +42,9 @@ type Module struct {
 
 	// stopper/revoker 是卸载/停用时的外部协作者（service 停组件、control 撤租），
 	// 经 SetLifecycleHooks 注入；可为 nil（对应阶段未接线时留接缝）。读写受 mu 保护
-	stopper ComponentStopper
-	revoker LeaseRevoker
+	stopper         ComponentStopper
+	revoker         LeaseRevoker
+	transferRevoker PackageTransferRevoker
 }
 
 // New 构造 pkgregistry 的 Module
@@ -58,11 +61,13 @@ type Module struct {
 // fail-closed
 func New(
 	auth PackageInstaller, idReg IdentityUpdater, perm PermissionArbiter, registry *Registry,
+	definitions *catalog.Registry,
 	trust TrustStore, aud audit.Recorder, log *slog.Logger,
 	stateDir, systemPackagesDir, packageRoot, dataRoot string,
 ) *Module {
 	return &Module{
-		auth: auth, idReg: idReg, perm: perm, registry: registry, trust: trust, aud: aud, log: log,
+		auth: auth, idReg: idReg, perm: perm, registry: registry, definitions: definitions,
+		trust: trust, aud: aud, log: log,
 		stateDir: stateDir, systemPackagesDir: systemPackagesDir,
 		packageRoot: packageRoot, dataRoot: dataRoot,
 	}
@@ -76,16 +81,22 @@ func (m *Module) Name() string { return "pkgregistry" }
 // 因为一个坏包不该拖垮整条内核启动序列。Start 只在 Registry/
 // identity 的 Replace 本身失败时才返回错误，那意味着扫描结果自相矛盾
 // （如重复 Package ID），属于装配级别的问题
-func (m *Module) Start(_ context.Context) error {
+func (m *Module) Start(ctx context.Context) error {
+	previous := m.registry.List()
 	result := Scan(m.stateDir, m.systemPackagesDir, m.packageRoot, m.trust, m.log)
 
 	for _, s := range result.Skipped {
-		m.aud.Record(context.Background(), audit.Event{
+		m.aud.Record(ctx, audit.Event{
 			Action: "pkgregistry.Scan", Subject: s.Path, Denied: true, Err: s.Err,
 		})
 		if m.log != nil {
 			m.log.Warn("pkgregistry: skipped package during scan", "path", s.Path, "err", s.Err)
 		}
+	}
+
+	prepared, err := m.prepareEntries(ctx, result.Entries)
+	if err != nil {
+		return err
 	}
 
 	// 补齐运行前置：系统用户 + 私有数据目录。
@@ -96,27 +107,11 @@ func (m *Module) Start(_ context.Context) error {
 	//
 	// 放在 Replace 之前：投影推出去之后 service 模块随时可能拿它去拉进程，
 	// 那时前置必须已经就位。
-	if n := m.provisionAll(context.Background(), result.Entries); m.log != nil {
+	if n := m.provisionAll(ctx, prepared.entries); m.log != nil {
 		m.log.Info("pkgregistry: provisioned package runtime prerequisites",
-			"ok", n, "total", len(result.Entries))
+			"ok", n, "total", len(prepared.entries))
 	}
-
-	// 系统镜像包的权限裁决。同样【必须在这里】：它们不走 Install，那条路径才是
-	// 调 Intersect 的地方。少了这一步，每个系统服务的 GrantedPermissions 都是
-	// nil，注册/解析 endpoint 一律被拒。见 sysgrants.go。
-	//
-	// 放在 Replace 之前：下面三条投影要把裁决结果一起推出去。
-	if n := m.arbitrateSystemGrants(context.Background(), result.Entries); m.log != nil && n > 0 {
-		m.log.Info("pkgregistry: arbitrated system package permissions", "packages", n)
-	}
-
-	if err := m.registry.Replace(result.Entries); err != nil {
-		return err
-	}
-	if err := m.idReg.Replace(projectIdentity(result.Entries)); err != nil {
-		return err
-	}
-	return m.perm.Replace(projectGrants(result.Entries))
+	return m.publishCatalogLast(ctx, previous, prepared)
 }
 
 // Stop 纯内存态，没有需要释放的资源 - 记账文件在装包/卸载时已经原子落盘
@@ -130,18 +125,17 @@ func (m *Module) Stop(_ context.Context) error {
 func projectIdentity(entries []Entry) []identity.Package {
 	out := make([]identity.Package, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, identity.Package{ID: e.Manifest.PackageID, UID: e.UID, Trust: e.Trust})
+		out = append(out, identity.Package{
+			ID: e.Manifest.PackageID, UID: e.UID, Trust: e.Trust,
+			Generation: e.RuntimeGeneration,
+		})
 	}
 	return out
 }
 
 // projectGrants 把 Registry 的全量状态投影成 permission.Registry 需要的
-// 瘦视图：只留 ID 与已授予权限集合。与 projectIdentity 同一原则，这里只把已经
-// 算好的结果投影出去，不重新调用 Intersect
-//
-// 裁决发生在两处，各自只跑一次：动态安装在 Install 当时（install.go，结果随
-// 记账文件持久化）；系统镜像在每次启动扫描（sysgrants.go，不持久化，因为签名
-// 每次都重验）
+// 瘦视图：只留 ID 与已授予权限集合。与 projectIdentity 同一原则，这里只把
+// prepareEntries 已经基于同一候选 Catalog 重算好的结果投影出去。
 func projectGrants(entries []Entry) []permission.Grant {
 	out := make([]permission.Grant, 0, len(entries))
 	for _, e := range entries {

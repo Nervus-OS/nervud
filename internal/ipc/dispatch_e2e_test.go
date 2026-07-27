@@ -7,12 +7,16 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
@@ -26,6 +30,7 @@ type routingEndpoints struct {
 
 	registerResult *ipcv1.RegisterEndpointResult
 	routeErr       endpoint.RouteError
+	required       []string
 }
 
 func (r *routingEndpoints) ResolveEndpoint(endpoint.ConnHandle, identity.Caller, *ipcv1.ResolveEndpoint) *ipcv1.ResolveEndpointResult {
@@ -48,13 +53,39 @@ func (r *routingEndpoints) UnregisterEndpoint(_ endpoint.ConnHandle, req *ipcv1.
 	}}
 }
 
-func (r *routingEndpoints) Route(endpoint.ConnHandle, uint64) (endpoint.RouteInfo, endpoint.RouteError) {
+func (r *routingEndpoints) Route(
+	_ endpoint.ConnHandle,
+	_ uint64,
+	methodID uint32,
+) (endpoint.RouteInfo, endpoint.RouteError) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.routeErr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		return endpoint.RouteInfo{}, r.routeErr
 	}
-	return endpoint.RouteInfo{TargetConn: r.serviceConn, ServiceEndpointID: r.serviceEPID}, endpoint.RouteError{}
+	descriptor := (&wrapperspb.StringValue{}).ProtoReflect().Descriptor()
+	return endpoint.RouteInfo{
+		TargetConn:          r.serviceConn,
+		ServiceEndpointID:   r.serviceEPID,
+		InterfaceID:         "com.example.test.echo",
+		InterfaceMajor:      1,
+		RequiredPermissions: append([]string(nil), r.required...),
+		Method: catalog.MethodDefinition{
+			InterfaceID: "com.example.test.echo",
+			Major:       1,
+			MethodID:    methodID,
+			Meta: &ipcv1.MethodMeta{
+				MethodId:         methodID,
+				RiskClass:        ipcv1.RiskClass_RISK_CLASS_NORMAL,
+				RequestType:      string(descriptor.FullName()),
+				ResponseType:     string(descriptor.FullName()),
+				DefaultTimeoutMs: defaultMethodTimeoutMs,
+				MaxTimeoutMs:     maxMethodTimeoutMs,
+			},
+			Request:  descriptor,
+			Response: descriptor,
+		},
+	}, endpoint.RouteError{}
 }
 
 func (r *routingEndpoints) ConnClosed(endpoint.ConnHandle) {}
@@ -70,18 +101,19 @@ func newRoutingTestServer(t *testing.T, re *routingEndpoints) (*Server, string) 
 
 	sock := filepath.Join(t.TempDir(), "nervud.sock")
 	s, err := New(Config{
-		SockPath:                 sock,
-		Log:                      discardLog(),
-		Auditor:                  &fakeRecorder{},
-		Invariants:               selfUIDInvariants(t),
-		Identity:                 selfRegistry(t),
-		Permission:               permission.NewRegistry(permission.DefaultCatalog()),
-		Endpoints:                re,
-		AllowUnverifiedComponent: true,
+		SockPath:   sock,
+		Log:        discardLog(),
+		Auditor:    &fakeRecorder{},
+		Invariants: selfUIDInvariants(t),
+		Identity:   selfRegistry(t),
+		Permission: permission.NewDefaultRegistry(),
+		Endpoints:  re,
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	installTestComponentVerifier(s)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -108,18 +140,25 @@ func registerService(t *testing.T, c net.Conn, epID uint64) {
 }
 
 func TestDispatch_FullRoundTrip(t *testing.T) {
-	re := &routingEndpoints{registerResult: registerSuccessResult(55)}
+	re := &routingEndpoints{
+		registerResult: registerSuccessResult(55),
+		required:       []string{"perm.test.echo", "perm.test.audit"},
+	}
 	_, sock := newRoutingTestServer(t, re)
 
 	svc := dial(t, sock)
-	handshake(t, svc)
+	handshakeService(t, svc)
 	registerService(t, svc, 55)
 
 	caller := dial(t, sock)
 	handshake(t, caller)
 
+	hello, err := proto.Marshal(&wrapperspb.StringValue{Value: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := &ipcv1.Envelope{Body: &ipcv1.Envelope_Request{Request: &ipcv1.Request{
-		RequestId: 7, EndpointId: 1, MethodId: 3, Payload: []byte("hello"),
+		RequestId: 7, EndpointId: 1, MethodId: 3, Payload: hello,
 	}}}
 	if err := WriteFrame(caller, mustMarshal(t, req)); err != nil {
 		t.Fatal(err)
@@ -135,20 +174,28 @@ func TestDispatch_FullRoundTrip(t *testing.T) {
 	if d.GetMethodId() != 3 {
 		t.Fatalf("dispatch method_id = %d, want 3", d.GetMethodId())
 	}
-	if string(d.GetPayload()) != "hello" {
-		t.Fatalf("dispatch payload = %q, want hello", d.GetPayload())
+	var dispatched wrapperspb.StringValue
+	if err := proto.Unmarshal(d.GetPayload(), &dispatched); err != nil || dispatched.GetValue() != "hello" {
+		t.Fatalf("dispatch payload = %q, err=%v", dispatched.GetValue(), err)
 	}
 	if d.GetCaller().GetPackageId() == "" {
 		t.Fatal("dispatch caller context did not include package_id")
+	}
+	if got := d.GetCaller().GetGrantedPermissions(); !reflect.DeepEqual(got, re.required) {
+		t.Fatalf("dispatch granted_permissions = %v, want %v", got, re.required)
 	}
 	if d.GetRemainingMs() == 0 || d.GetRemainingMs() > defaultMethodTimeoutMs {
 		t.Fatalf("remaining_ms = %d, want a value in (0, %d]", d.GetRemainingMs(), defaultMethodTimeoutMs)
 	}
 
+	world, err := proto.Marshal(&wrapperspb.StringValue{Value: "world"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	dr := &ipcv1.Envelope{Body: &ipcv1.Envelope_DispatchResult{DispatchResult: &ipcv1.DispatchResult{
 		RouteId: d.GetRouteId(),
 		Outcome: &ipcv1.DispatchResult_Success{Success: &ipcv1.Success{
-			Code: ipcv1.StatusCode_STATUS_CODE_OK, Payload: []byte("world"),
+			Code: ipcv1.StatusCode_STATUS_CODE_OK, Payload: world,
 		}},
 	}}}
 	if err := WriteFrame(svc, mustMarshal(t, dr)); err != nil {
@@ -162,17 +209,18 @@ func TestDispatch_FullRoundTrip(t *testing.T) {
 	if resp.GetRequestId() != 7 {
 		t.Fatalf("response request_id = %d, want 7", resp.GetRequestId())
 	}
-	if string(resp.GetSuccess().GetPayload()) != "world" {
-		t.Fatalf("response payload = %q, want world", resp.GetSuccess().GetPayload())
+	var returned wrapperspb.StringValue
+	if err := proto.Unmarshal(resp.GetSuccess().GetPayload(), &returned); err != nil || returned.GetValue() != "world" {
+		t.Fatalf("response payload = %q, err=%v", returned.GetValue(), err)
 	}
 }
 
-func TestDispatch_FailureDetailNotForwarded(t *testing.T) {
+func TestDispatch_ProviderPublicMessageNotForwarded(t *testing.T) {
 	re := &routingEndpoints{registerResult: registerSuccessResult(1)}
 	_, sock := newRoutingTestServer(t, re)
 
 	svc := dial(t, sock)
-	handshake(t, svc)
+	handshakeService(t, svc)
 	registerService(t, svc, 1)
 
 	caller := dial(t, sock)
@@ -191,7 +239,6 @@ func TestDispatch_FailureDetailNotForwarded(t *testing.T) {
 		Outcome: &ipcv1.DispatchResult_Failure{Failure: &ipcv1.Failure{
 			Code:          ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 			PublicMessage: "untrusted free-form text that must not be forwarded",
-			ErrorDetail:   []byte("untrusted detail bytes that must not be forwarded"),
 		}},
 	}}}
 	if err := WriteFrame(svc, mustMarshal(t, dr)); err != nil {
@@ -211,16 +258,52 @@ func TestDispatch_FailureDetailNotForwarded(t *testing.T) {
 	}
 }
 
+func TestDispatch_UnmappedProviderErrorDetailIsContractViolation(t *testing.T) {
+	re := &routingEndpoints{registerResult: registerSuccessResult(1)}
+	_, sock := newRoutingTestServer(t, re)
+
+	svc := dial(t, sock)
+	handshakeService(t, svc)
+	registerService(t, svc, 1)
+
+	caller := dial(t, sock)
+	handshake(t, caller)
+	request := &ipcv1.Envelope{Body: &ipcv1.Envelope_Request{Request: &ipcv1.Request{
+		RequestId: 2, EndpointId: 1, MethodId: 1,
+	}}}
+	if err := WriteFrame(caller, mustMarshal(t, request)); err != nil {
+		t.Fatal(err)
+	}
+	dispatch := readEnv(t, svc).GetDispatch()
+
+	result := &ipcv1.Envelope{Body: &ipcv1.Envelope_DispatchResult{DispatchResult: &ipcv1.DispatchResult{
+		RouteId: dispatch.GetRouteId(),
+		Outcome: &ipcv1.DispatchResult_Failure{Failure: &ipcv1.Failure{
+			Code:        ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+			ErrorDetail: []byte{1, 2, 3},
+		}},
+	}}}
+	if err := WriteFrame(svc, mustMarshal(t, result)); err != nil {
+		t.Fatal(err)
+	}
+
+	response := readEnv(t, caller).GetResponse()
+	if code := response.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_INTERNAL {
+		t.Fatalf("response code = %v, want INTERNAL", code)
+	}
+	expectClosed(t, svc)
+}
+
 func TestDispatch_ResultFromWrongConnectionIsViolation(t *testing.T) {
 	re := &routingEndpoints{registerResult: registerSuccessResult(1)}
 	_, sock := newRoutingTestServer(t, re)
 
 	svcA := dial(t, sock)
-	handshake(t, svcA)
+	handshakeService(t, svcA)
 	registerService(t, svcA, 1)
 
 	svcB := dial(t, sock)
-	handshake(t, svcB)
+	handshakeService(t, svcB)
 
 	caller := dial(t, sock)
 	handshake(t, caller)
@@ -250,7 +333,7 @@ func TestDispatch_TimeoutProducesDeadlineExceeded(t *testing.T) {
 	_, sock := newRoutingTestServer(t, re)
 
 	svc := dial(t, sock)
-	handshake(t, svc)
+	handshakeService(t, svc)
 	registerService(t, svc, 1)
 
 	caller := dial(t, sock)
@@ -280,7 +363,7 @@ func TestDispatch_TargetDisconnectProducesUnavailablePromptly(t *testing.T) {
 	_, sock := newRoutingTestServer(t, re)
 
 	svc := dial(t, sock)
-	handshake(t, svc)
+	handshakeService(t, svc)
 	registerService(t, svc, 1)
 
 	caller := dial(t, sock)
@@ -313,7 +396,7 @@ func TestDispatch_AdmissionCapRejectsExcessInFlight(t *testing.T) {
 	_, sock := newRoutingTestServer(t, re)
 
 	svc := dial(t, sock)
-	handshake(t, svc)
+	handshakeService(t, svc)
 	registerService(t, svc, 1)
 
 	caller := dial(t, sock)

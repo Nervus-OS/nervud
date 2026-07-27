@@ -19,10 +19,11 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	safetyv1 "github.com/nervus-os/nervus-ipc/go/protocol/interface/safetyv1"
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	safetyv1 "github.com/nervus-os/nervus-ipc/protocol/interface/safetyv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/motiongate"
 )
@@ -41,23 +42,25 @@ var (
 
 // BuiltinHandler 返回可直接交给 endpoint.RegisterBuiltin 的处理函数。
 //
-// 签名刻意写成具体类型而不是 import endpoint 的类型别名：safety 不该依赖
-// endpoint（那会让安全模块跟着路由层的改动走）。装配方 main.go 负责把它
-// 塞进 RegisterBuiltin——两个签名一致，Go 会在装配期检查。
-func (m *Module) BuiltinHandler() func(context.Context, identity.Caller, uint32, []byte) ([]byte, ipcv1.StatusCode) {
-	return func(_ context.Context, caller identity.Caller, methodID uint32, payload []byte) ([]byte, ipcv1.StatusCode) {
-		switch methodID {
+// The structured call/result shape keeps builtins on the same method gate as
+// external Providers and leaves room for connection-scoped kernel services.
+func (m *Module) BuiltinHandler() endpoint.BuiltinHandler {
+	return func(call endpoint.BuiltinCall) endpoint.BuiltinResult {
+		var payload []byte
+		var code ipcv1.StatusCode
+		switch call.MethodID {
 		case methodGetState:
-			return m.handleGetState()
+			payload, code = m.handleGetState()
 		case methodRearm:
-			return m.handleRearm(caller)
+			payload, code = m.handleRearm(call.Caller)
 		case methodRequestRecovery:
-			return m.handleRequestRecovery(caller)
+			payload, code = m.handleRequestRecovery(call.Caller)
 		default:
 			// fail closed：没实现的方法就是不存在，绝不静默成功——
 			// 静默成功会让调用方以为 re-arm 生效了。
-			return nil, ipcv1.StatusCode_STATUS_CODE_NOT_FOUND
+			code = ipcv1.StatusCode_STATUS_CODE_NOT_FOUND
 		}
+		return endpoint.BuiltinResult{Payload: payload, Code: code}
 	}
 }
 

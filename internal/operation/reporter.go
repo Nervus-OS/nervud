@@ -5,7 +5,7 @@
 package operation
 
 import (
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 )
 
 // ProviderReporter 是 operation 定义、供 dispatch/provider 回路持有的窄接口

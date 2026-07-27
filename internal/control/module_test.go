@@ -92,7 +92,7 @@ func TestStop_RevokesResidualLease(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	if m.cur.Load() != nil {
+	if m.current(ResourceBaseMain) != nil {
 		t.Fatal("Stop must not leave a lease behind")
 	}
 	if g.Epoch() != before+1 {

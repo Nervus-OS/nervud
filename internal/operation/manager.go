@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/identity"
@@ -246,6 +246,14 @@ func (m *Manager) validateCreate(caller identity.Caller, resources []string,
 			return ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION
 		}
 	}
+	// The current contract carries one lease binding. A ControlLease is scoped
+	// to exactly one Resource, so accepting several resources here would either
+	// reuse one lease outside its scope or make validation depend on a fake
+	// validator. Multi-resource motion requires repeated (resource, lease,
+	// epoch) bindings in the future wire contract.
+	if leaseID != 0 && len(resources) != 1 {
+		return ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT
+	}
 
 	// deadline 合理性：必须在未来，且不荒谬地远。
 	now := m.now()
@@ -254,15 +262,13 @@ func (m *Manager) validateCreate(caller identity.Caller, resources []string,
 	}
 
 	// 运动类由 leaseID != 0 数据驱动，必须有有效 lease 和新鲜 epoch，
-	// 且绑定到本 operation 的 resource（v1 单 resource）。
+	// 且绑定到本 operation 的唯一 resource（v1 单 resource）。
 	if leaseID != 0 {
 		if m.lease == nil {
 			return ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION
 		}
-		for _, h := range resources {
-			if !m.lease.ValidLease(leaseID, epoch, h) {
-				return ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION
-			}
+		if !m.lease.ValidLease(leaseID, epoch, resources[0]) {
+			return ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION
 		}
 	}
 	_ = caller // caller 已由 dispatch 鉴权；本包仅存它用于可见性与审计

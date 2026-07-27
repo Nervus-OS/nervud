@@ -2,7 +2,7 @@
 package endpoint
 
 import (
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 )
 
 // Route 供 ipc 的 handleRequest 使用：拿到 endpoint_id 后查一次"转给谁、
@@ -12,9 +12,17 @@ import (
 // "解析 endpoint 时检查一次权限，每次调用时仍做快速权限与存活
 // 复核，以支持动态撤权"的字面要求，也是纯被动检查也能保证"权限撤销后下一次
 // 调用必然失败"的原因
-func (m *Module) Route(conn ConnHandle, endpointID uint64) (RouteInfo, RouteError) {
+func (m *Module) Route(
+	conn ConnHandle,
+	endpointID uint64,
+	methodID uint32,
+) (RouteInfo, RouteError) {
 	if m == nil {
 		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+	}
+	snapshot := m.snapshot()
+	if snapshot == nil {
+		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION}
 	}
 
 	m.mu.Lock()
@@ -25,19 +33,78 @@ func (m *Module) Route(conn ConnHandle, endpointID uint64) (RouteInfo, RouteErro
 		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
 	}
 	b, ok := cs.bindings[endpointID]
-	if !ok || !b.target.live {
+	if !ok || b.target == nil || !b.target.live ||
+		b.targetGeneration != b.target.generation {
 		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
 	}
-	if b.requiredPermission != "" && !m.perm.Allowed(b.callerPackageID, b.requiredPermission) {
+	def, provider, valid := registrationInSnapshot(snapshot, b.target)
+	if !valid ||
+		def.DefinitionGeneration != b.definitionGeneration ||
+		provider.DefinitionGeneration != b.providerGeneration ||
+		b.interfaceID != b.target.interfaceID ||
+		b.interfaceMajor != b.target.ifaceMajor {
+		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+	}
+	if b.resourceHandle == "" {
+		if b.resourceGeneration != 0 || len(def.CompatibleResourceTypes) != 0 {
+			return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+		}
+	} else {
+		resource, exists := snapshot.ResourceByHandle(b.resourceHandle)
+		if !exists ||
+			resource.DefinitionGeneration != b.resourceGeneration ||
+			!compatibleResource(def, resource.ResourceType) ||
+			b.target.resourceHandle != b.resourceHandle {
+			return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+		}
+	}
+
+	if !m.allowedAt(snapshot, b.callerPackageID, def.RequiredPermission) {
 		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED}
 	}
 
+	method, ok := snapshot.ProviderMethod(
+		b.target.packageID, b.interfaceID, b.interfaceMajor, methodID)
+	if !ok || method.Meta == nil ||
+		method.DefinitionGeneration != b.definitionGeneration ||
+		method.ProviderGeneration != b.providerGeneration {
+		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+	}
+	methodPermission := method.Meta.GetRequiredPermission()
+	if !m.allowedAt(snapshot, b.callerPackageID, methodPermission) {
+		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED}
+	}
+	requiredPermissions := uniquePermissions(def.RequiredPermission, methodPermission)
+
 	return RouteInfo{
-		TargetConn:        b.target.conn,
-		ServiceEndpointID: b.target.id,
-		ResourceHandle:    b.resourceHandle,
-		Builtin:           b.target.builtin,
+		TargetConn:             b.target.conn,
+		ServiceEndpointID:      b.target.id,
+		ProviderPackageID:      b.target.packageID,
+		ProviderComponentID:    b.target.componentID,
+		InterfaceID:            b.interfaceID,
+		InterfaceMajor:         b.interfaceMajor,
+		ResourceHandle:         b.resourceHandle,
+		Method:                 method,
+		RegistrationGeneration: b.targetGeneration,
+		DefinitionGeneration:   b.definitionGeneration,
+		ProviderGeneration:     b.providerGeneration,
+		ResourceGeneration:     b.resourceGeneration,
+		RequiredPermissions:    requiredPermissions,
+		Builtin:                b.target.builtin,
 	}, RouteError{}
+}
+
+func uniquePermissions(interfacePermission, methodPermission string) []string {
+	switch {
+	case interfacePermission == "" && methodPermission == "":
+		return nil
+	case interfacePermission == "":
+		return []string{methodPermission}
+	case methodPermission == "" || methodPermission == interfacePermission:
+		return []string{interfacePermission}
+	default:
+		return []string{interfacePermission, methodPermission}
+	}
 }
 
 // UnregisterEndpoint 撤下一个 Service 侧的 registration

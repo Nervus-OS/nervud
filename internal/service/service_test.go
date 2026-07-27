@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,18 +18,21 @@ import (
 )
 
 type ctrlSpawner struct {
-	mu        sync.Mutex
-	startN    map[string]int
-	stopN     map[string]int
-	exit      map[string]chan systemd.ExitInfo
-	startErr  error
-	startGate chan struct{}
+	mu         sync.Mutex
+	startN     map[string]int
+	stopN      map[string]int
+	exit       map[string]chan systemd.ExitInfo
+	specs      map[string][]systemd.UnitSpec
+	startErr   error
+	startGate  chan struct{}
+	stopGate   chan struct{}
+	noStopExit bool
 }
 
 func newCtrlSpawner() *ctrlSpawner {
 	return &ctrlSpawner{
 		startN: map[string]int{}, stopN: map[string]int{},
-		exit: map[string]chan systemd.ExitInfo{},
+		exit: map[string]chan systemd.ExitInfo{}, specs: map[string][]systemd.UnitSpec{},
 	}
 }
 
@@ -49,6 +54,7 @@ func (s *ctrlSpawner) StartTransientUnit(_ context.Context, spec systemd.UnitSpe
 	}
 	s.mu.Lock()
 	s.startN[spec.Name]++
+	s.specs[spec.Name] = append(s.specs[spec.Name], spec)
 	err := s.startErr
 	s.mu.Unlock()
 	s.exitCh(spec.Name)
@@ -61,15 +67,39 @@ func (s *ctrlSpawner) stops(name string) int {
 	return s.stopN[name]
 }
 
-func (s *ctrlSpawner) StopUnit(_ context.Context, name string) error {
+func (s *ctrlSpawner) StopUnit(ctx context.Context, name string) error {
 	s.mu.Lock()
 	s.stopN[name]++
+	gate := s.stopGate
+	noExit := s.noStopExit
 	s.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if noExit {
+		return nil
+	}
 	select {
 	case s.exitCh(name) <- systemd.ExitInfo{ActiveState: "inactive"}:
 	default:
 	}
 	return nil
+}
+
+func (s *ctrlSpawner) setStopGate(gate chan struct{}) {
+	s.mu.Lock()
+	s.stopGate = gate
+	s.mu.Unlock()
+}
+
+func (s *ctrlSpawner) suppressStopExit(suppress bool) {
+	s.mu.Lock()
+	s.noStopExit = suppress
+	s.mu.Unlock()
 }
 
 func (s *ctrlSpawner) WaitUnit(ctx context.Context, name string) (systemd.ExitInfo, error) {
@@ -91,6 +121,16 @@ func (s *ctrlSpawner) starts(name string) int {
 	return s.startN[name]
 }
 
+func (s *ctrlSpawner) lastSpec(name string) (systemd.UnitSpec, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	specs := s.specs[name]
+	if len(specs) == 0 {
+		return systemd.UnitSpec{}, false
+	}
+	return specs[len(specs)-1], true
+}
+
 type fakePkgs struct{ entries []pkgregistry.Entry }
 
 func (f *fakePkgs) List() []pkgregistry.Entry { return f.entries }
@@ -101,6 +141,26 @@ func (f *fakePkgs) Lookup(id string) (pkgregistry.Entry, bool) {
 		}
 	}
 	return pkgregistry.Entry{}, false
+}
+
+type fakePermissions struct {
+	mu      sync.RWMutex
+	allowed map[string]bool
+}
+
+func (f *fakePermissions) Allowed(packageID, permission string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.allowed[packageID+"/"+permission]
+}
+
+func (f *fakePermissions) set(packageID, permission string, allowed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.allowed == nil {
+		f.allowed = make(map[string]bool)
+	}
+	f.allowed[packageID+"/"+permission] = allowed
 }
 
 type fakeSafety struct {
@@ -152,6 +212,16 @@ func onDemandService(id string, crit pkgregistry.Criticality) pkgregistry.Compon
 }
 
 func newTestManager(t *testing.T, sp authority.UnitManager, pkgs PackageLookup, safety SafetyEscalator) *Manager {
+	return newTestManagerWithPermissions(t, sp, pkgs, &fakePermissions{}, safety)
+}
+
+func newTestManagerWithPermissions(
+	t *testing.T,
+	sp authority.UnitManager,
+	pkgs PackageLookup,
+	perms PermissionLookup,
+	safety SafetyEscalator,
+) *Manager {
 	t.Helper()
 	rec := &fakeRecorderDiscard{}
 	gate, err := authority.New(authority.Config{
@@ -161,7 +231,7 @@ func newTestManager(t *testing.T, sp authority.UnitManager, pkgs PackageLookup, 
 		t.Fatalf("authority.New: %v", err)
 	}
 	aud := &fakeAud{}
-	m := New(gate, pkgs, safety, aud, slog.New(slog.NewTextHandler(io.Discard, nil)), testInvariants())
+	m := New(gate, pkgs, perms, safety, aud, slog.New(slog.NewTextHandler(io.Discard, nil)), testInvariants())
 	m.backoffMin = time.Millisecond
 	m.backoffMax = 2 * time.Millisecond
 	return m
@@ -304,6 +374,11 @@ func TestStopDuringStarting_StillStopsUnit(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = m.StopComponent(context.Background(), "com.example.app", "worker"); close(done) }()
 	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("StopComponent returned before the starting unit was stopped")
+	default:
+	}
 
 	close(sp.startGate)
 	<-done
@@ -337,6 +412,224 @@ func TestReloadPackage_RestartsFromCurrentRegistry(t *testing.T) {
 		inst, ok := m.LookupByUnit(unit)
 		return ok && inst.State == StateRunning
 	})
+}
+
+func TestReloadPackage_TimeoutRetainsOldInstanceForRetry(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.app", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+
+	stopGate := make(chan struct{})
+	releaseStop := sync.OnceFunc(func() { close(stopGate) })
+	defer releaseStop()
+	sp.setStopGate(stopGate)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := m.ReloadPackage(ctx, "com.example.app"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ReloadPackage error = %v, want deadline exceeded", err)
+	}
+	if _, ok := m.LookupByUnit(unit); !ok {
+		t.Fatal("timed-out reload removed the old unit mapping")
+	}
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); err != nil {
+		t.Fatalf("EnsureStarted while old unit is stopping: %v", err)
+	}
+	if got := sp.starts(unit); got != 1 {
+		t.Fatalf("EnsureStarted raced a replacement onto the old unit: starts=%d", got)
+	}
+
+	releaseStop()
+	sp.setStopGate(nil)
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateStopped
+	})
+	if err := m.ReloadPackage(context.Background(), "com.example.app"); err != nil {
+		t.Fatalf("retry ReloadPackage: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 2 })
+}
+
+func TestRuntimePermissionRestart_TimeoutIsRetryable(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.app", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+
+	stopGate := make(chan struct{})
+	releaseStop := sync.OnceFunc(func() { close(stopGate) })
+	defer releaseStop()
+	sp.setStopGate(stopGate)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := m.restartActivePackage(ctx, "com.example.app"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("restartActivePackage error = %v, want deadline exceeded", err)
+	}
+	if _, ok := m.LookupByUnit(unit); !ok {
+		t.Fatal("timed-out sandbox restart removed the old unit mapping")
+	}
+
+	releaseStop()
+	sp.setStopGate(nil)
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateStopped
+	})
+	if err := m.restartActivePackage(context.Background(), "com.example.app"); err != nil {
+		t.Fatalf("retry restartActivePackage: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 2 })
+}
+
+func TestManagerDoesNotStartAfterStop(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			onDemandService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := m.Start(context.Background()); !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("Start after Stop error = %v, want ErrManagerStopped", err)
+	}
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "worker"); !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("EnsureStarted after Stop error = %v, want ErrManagerStopped", err)
+	}
+	if got := sp.starts(unitName("com.example.app", "worker")); got != 0 {
+		t.Fatalf("stopped manager launched a component: starts=%d", got)
+	}
+}
+
+func TestStopCancelsReloadWaitingForSupervisor(t *testing.T) {
+	sp := newCtrlSpawner()
+	sp.suppressStopExit(true)
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
+			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.app", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- m.ReloadPackage(context.Background(), "com.example.app")
+	}()
+	waitFor(t, time.Second, func() bool { return sp.stops(unit) >= 1 })
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- m.Stop(context.Background()) }()
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop remained blocked behind ReloadPackage")
+	}
+	select {
+	case err := <-reloadDone:
+		if !errors.Is(err, ErrManagerStopped) {
+			t.Fatalf("ReloadPackage error = %v, want ErrManagerStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReloadPackage did not observe manager shutdown")
+	}
+	if got := sp.starts(unit); got != 1 {
+		t.Fatalf("reload started a replacement during shutdown: starts=%d", got)
+	}
+}
+
+func TestProjectRuntimePermission_RebuildsActiveSandbox(t *testing.T) {
+	sp := newCtrlSpawner()
+	entry := makeEntry("com.example.files", 20001, identity.TrustOrdinary,
+		alwaysOnService("worker", pkgregistry.CriticalityOptional))
+	entry.GrantedPermissions = []string{permStorageUser}
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{entry}}
+	perms := &fakePermissions{}
+	perms.set("com.example.files", permStorageUser, true)
+	m := newTestManagerWithPermissions(t, sp, pkgs, perms, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.files", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+	first, ok := sp.lastSpec(unit)
+	if !ok || !slices.Contains(first.Sandbox.ReadWritePaths, m.inv.UserDataRoot) {
+		t.Fatalf("initial ReadWritePaths = %v, want %q", first.Sandbox.ReadWritePaths, m.inv.UserDataRoot)
+	}
+
+	// permission.Registry commits the denied state before invoking this hook.
+	perms.set("com.example.files", permStorageUser, false)
+	if err := m.ProjectRuntimePermission("com.example.files", permStorageUser, false); err != nil {
+		t.Fatalf("ProjectRuntimePermission: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 2 })
+	if sp.stops(unit) == 0 {
+		t.Fatal("old unit was not stopped before sandbox projection returned")
+	}
+	second, ok := sp.lastSpec(unit)
+	if !ok {
+		t.Fatal("replacement unit spec not recorded")
+	}
+	if slices.Contains(second.Sandbox.ReadWritePaths, m.inv.UserDataRoot) {
+		t.Fatalf("revoked UserDataRoot remained writable: %v", second.Sandbox.ReadWritePaths)
+	}
+}
+
+func TestRevokeInstallGrant_StopsActiveSandboxWithoutRestart(t *testing.T) {
+	sp := newCtrlSpawner()
+	entry := makeEntry("com.example.files", 20001, identity.TrustOrdinary,
+		alwaysOnService("worker", pkgregistry.CriticalityOptional))
+	entry.GrantedPermissions = []string{permStorageUser}
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{entry}}
+	perms := &fakePermissions{}
+	perms.set("com.example.files", permStorageUser, true)
+	m := newTestManagerWithPermissions(t, sp, pkgs, perms, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	unit := unitName("com.example.files", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+	first, ok := sp.lastSpec(unit)
+	if !ok || !slices.Contains(first.Sandbox.ReadWritePaths, m.inv.UserDataRoot) {
+		t.Fatalf("initial sandbox did not contain UserDataRoot: %v", first.Sandbox.ReadWritePaths)
+	}
+
+	m.RevokeInstallGrant("com.example.files", permStorageUser)
+	waitFor(t, time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateStopped
+	})
+	if got := sp.starts(unit); got != 1 {
+		t.Fatalf("install-grant revoke restarted component: starts=%d", got)
+	}
 }
 
 func TestEnsureStarted_RestartsAfterStop(t *testing.T) {

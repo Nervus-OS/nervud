@@ -98,6 +98,13 @@ type DevIdentity struct {
 	KeyIDs       []string // 血统全部节点 key_id，按序；升级时"前 lineage_len 个逐一相等"要用
 }
 
+// VerifiedSigner is one cryptographically verified signer identity. Roles are
+// policy labels; KeyID is the identity needed for same-signer permission rules.
+type VerifiedSigner struct {
+	Role  SignerRole
+	KeyID string
+}
+
 // SignerSet 是一次多角色验签的结论
 type SignerSet struct {
 	// Trust 是这些签名单独能证明的最高信任。Arbitrate 还会与安装来源
@@ -117,6 +124,9 @@ type SignerSet struct {
 	// Roles 是本次验签里出现的全部签名角色（去重前，按签名顺序）。供权限裁决的
 	// RequireSignerRole 用 - 某些最危险权限只给特定角色签的包
 	Roles []SignerRole
+	// VerifiedSigners preserves the verified key identity beside its role.
+	// Comparing role strings is not a same-signature check.
+	VerifiedSigners []VerifiedSigner
 	// Dev 仅当存在 developer 角色签名时非 nil
 	Dev *DevIdentity
 }
@@ -356,6 +366,7 @@ func (ts TrustStore) VerifySignature(manifestBytes, sigBlock []byte) (SignerSet,
 		}
 
 		set.Roles = append(set.Roles, s.Role)
+		set.VerifiedSigners = append(set.VerifiedSigners, VerifiedSigner{Role: s.Role, KeyID: s.KeyID})
 		switch s.Role {
 		case RoleDeveloper:
 			set.HasDeveloper = true

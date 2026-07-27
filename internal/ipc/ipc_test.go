@@ -16,8 +16,11 @@ import (
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
+	"github.com/nervus-os/nervud/internal/pkgregistry"
+	"github.com/nervus-os/nervud/internal/service"
+	"github.com/nervus-os/nervud/internal/transfer"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 )
 
 type fakeRecorder struct {
@@ -41,6 +44,35 @@ func discardLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func newTestTransfer(t *testing.T) *transfer.Manager {
+	t.Helper()
+	manager, err := transfer.New(transfer.Config{Log: discardLog()})
+	if err != nil {
+		t.Fatalf("transfer.New: %v", err)
+	}
+	return manager
+}
+
+func installTestComponentVerifier(server *Server) {
+	server.verifyComponentForTest = func(
+		_ *net.UnixConn,
+		caller identity.Caller,
+		declared string,
+	) (service.ComponentIdentity, error) {
+		componentType := pkgregistry.ComponentApp
+		if declared == "test-service" {
+			componentType = pkgregistry.ComponentService
+		}
+		return service.ComponentIdentity{
+			PackageID:   caller.PackageID,
+			ComponentID: declared,
+			UID:         caller.UID,
+			Generation:  caller.Generation,
+			Type:        componentType,
+		}, nil
+	}
+}
+
 func selfUIDInvariants(t *testing.T) *authority.Invariants {
 	t.Helper()
 	uid := uint32(os.Getuid())
@@ -60,6 +92,7 @@ func selfRegistry(t *testing.T) *identity.Registry {
 	r := identity.NewRegistry()
 	err := r.Replace([]identity.Package{{
 		ID: "com.nervus.test", UID: uint32(os.Getuid()), Trust: identity.TrustOrdinary,
+		Generation: 1,
 	}})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
@@ -80,18 +113,19 @@ func newTestServerWith(
 	sock := filepath.Join(t.TempDir(), "nervud.sock")
 	rec := &fakeRecorder{}
 	s, err := New(Config{
-		SockPath:                 sock,
-		Log:                      discardLog(),
-		Auditor:                  rec,
-		Invariants:               inv,
-		Identity:                 id,
-		Permission:               permission.NewRegistry(permission.DefaultCatalog()),
-		Limits:                   lim,
-		AllowUnverifiedComponent: true,
+		SockPath:   sock,
+		Log:        discardLog(),
+		Auditor:    rec,
+		Invariants: inv,
+		Identity:   id,
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
+		Limits:     lim,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	installTestComponentVerifier(s)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -108,7 +142,8 @@ func newUnstartedServer(t *testing.T, sock string, inv *authority.Invariants) *S
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: inv, Identity: identity.NewRegistry(),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -155,7 +190,8 @@ func TestNew_Validation(t *testing.T) {
 		Auditor:    &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(),
 		Identity:   identity.NewRegistry(),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 	}
 	for _, tc := range []struct {
 		name   string
@@ -168,6 +204,7 @@ func TestNew_Validation(t *testing.T) {
 		{"missing Invariants", func(c *Config) { c.Invariants = nil }},
 		{"missing Identity", func(c *Config) { c.Identity = nil }},
 		{"missing Permission", func(c *Config) { c.Permission = nil }},
+		{"missing Transfer", func(c *Config) { c.Transfer = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base
@@ -184,7 +221,8 @@ func TestNew_PartialLimitsGetPerFieldDefaults(t *testing.T) {
 		SockPath: "/run/nervus/nervud.sock", Log: discardLog(),
 		Auditor: &fakeRecorder{}, Invariants: authority.DefaultInvariants(),
 		Identity:   identity.NewRegistry(),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 		Limits:     Limits{MaxConns: 10},
 	})
 	if err != nil {
@@ -210,7 +248,8 @@ func TestNew_ZeroLimitsGetsDefaults(t *testing.T) {
 		Auditor:    &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(),
 		Identity:   identity.NewRegistry(),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +293,8 @@ func TestStart_RemovesStaleSocket(t *testing.T) {
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(), Identity: identity.NewRegistry(),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +374,8 @@ func TestStart_RefusesNonSocketFile(t *testing.T) {
 	s, err := New(Config{
 		SockPath: sock, Log: discardLog(), Auditor: &fakeRecorder{},
 		Invariants: authority.DefaultInvariants(), Identity: identity.NewRegistry(),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatal(err)

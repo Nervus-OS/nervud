@@ -96,14 +96,14 @@ func testCaller(pkg string, uid uint32) identity.Caller {
 
 func humanReq(conn ConnID) Request {
 	return Request{
-		Conn: conn, Class: ClassHuman, Resource: ResourceBaseMain,
+		Conn: conn, Class: ClassHuman, Resource: ResourceBaseMain, ResourceGeneration: 1,
 		Owner: testCaller("com.example.teleop", 20001),
 	}
 }
 
 func aiReq(conn ConnID) Request {
 	return Request{
-		Conn: conn, Class: ClassAI, Resource: ResourceBaseMain,
+		Conn: conn, Class: ClassAI, Resource: ResourceBaseMain, ResourceGeneration: 1,
 		Owner: testCaller("os.nervus.agent", 20002),
 	}
 }

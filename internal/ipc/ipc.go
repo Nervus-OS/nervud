@@ -20,7 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	transferv1 "github.com/nervus-os/nervus-ipc/protocol/interface/transferv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
@@ -29,6 +30,7 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/service"
 	"github.com/nervus-os/nervud/internal/sysprobe"
+	"github.com/nervus-os/nervud/internal/transfer"
 )
 
 // socketMode 是控制面 socket 的文件权限
@@ -149,7 +151,7 @@ type Config struct {
 
 	// Components 把 systemd unit 反查回它承载的组件（由 service.Manager 提供）。
 	// 接口由本包（消费者）定义，*service.Manager 隐式满足。为 nil 时 verifyComponent
-	// 走 fail-closed（除非 AllowUnverifiedComponent）
+	// 走 fail-closed。
 	Components ComponentResolver
 
 	// Endpoints 把 ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给
@@ -172,10 +174,10 @@ type Config struct {
 	// 为 nil 时只认协议规定的隐式默认（BaseMotion 的 base.main）。
 	Resources ResourceResolver
 
-	// AllowUnverifiedComponent 显式放行Component 核对基础设施未接线（Components 为
-	// nil）时的握手，仅供开发/测试。默认 false = fail closed：核对不可用即拒绝握手。
-	// 注意它只放行基础设施缺失，绝不放行核对到不一致 - 后者永远拒绝
-	AllowUnverifiedComponent bool
+	// Transfer owns the generic high-throughput data plane. Method metadata,
+	// rather than capability-specific kernel code, decides which calls may
+	// create a stream.
+	Transfer TransferManager
 }
 
 // ComponentResolver 把 systemd unit 名反查回它承载的组件实例
@@ -185,7 +187,7 @@ type Config struct {
 // Component、什么 UID、是否停用的内核事实，与客户端自报的 declared_component_id
 // 交叉核对
 type ComponentResolver interface {
-	LookupByUnit(unit string) (service.Instance, bool)
+	LookupComponentByUnit(unit string) (service.ComponentIdentity, bool)
 }
 
 // EndpointResolver 把 ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给
@@ -202,7 +204,7 @@ type EndpointResolver interface {
 
 	// Route 供 handleRequest 用：拿到 endpoint_id 后查一次"转给谁、需要什么
 	// 权限、这次调用是否仍然合法"。ipc 自己不缓存任何路由状态，每次都查
-	Route(conn endpoint.ConnHandle, endpointID uint64) (endpoint.RouteInfo, endpoint.RouteError)
+	Route(conn endpoint.ConnHandle, endpointID uint64, methodID uint32) (endpoint.RouteInfo, endpoint.RouteError)
 
 	// ConnClosed 由 ipc 在连接的 serve 循环退出时调用一次，让 endpoint 清理
 	// 该连接名下的全部 registration/binding，并使仍存活的关联 binding 失效
@@ -232,6 +234,22 @@ type PermissionChecker interface {
 	Allowed(packageID, permission string) bool
 }
 
+// TransferManager is the route-bound control surface consumed by IPC. Its
+// listener lifecycle remains a separate kernel module.
+type TransferManager interface {
+	Begin(transfer.Origin, *transferv1.BeginTransferRequest) (*transferv1.BeginTransferResponse, error)
+	Commit(transfer.ConnID, []byte) error
+	Abort(transfer.ConnID, []byte) error
+	FinishRoute(uint64, bool, []*ipcv1.TransferHandle) error
+	CloseRoute(uint64)
+	ConnClosed(transfer.ConnID)
+	EndpointRevoked(transfer.ConnID, uint64, uint64)
+	RevokePackage(string)
+	RevokePermission(string, string)
+	RevokeResource(string, uint64)
+	RevokeControl(transfer.ConnID, string)
+}
+
 // Server 是控制面 UDS 的所有者
 //
 // 生命周期契约：Start 必须快速返回，后台循环的退出只听 Stop，不听 Start(ctx)
@@ -245,18 +263,23 @@ type Server struct {
 	identity   PeerResolver
 	permission PermissionChecker
 	components ComponentResolver
-	endpoints  EndpointResolver
-	leases     ControlLeases
-	launcher   ComponentLauncher
-	resources  ResourceResolver
-	limits     Limits
+	// verifyComponentForTest is deliberately unexported. Linux socket tests in
+	// this package can replace cgroup discovery without creating a production
+	// configuration knob that bypasses kernel-backed component identity.
+	verifyComponentForTest func(*net.UnixConn, identity.Caller, string) (service.ComponentIdentity, error)
+	endpoints              EndpointResolver
+	leases                 ControlLeases
+	launcher               ComponentLauncher
+	resources              ResourceResolver
+	transfer               TransferManager
+	limits                 Limits
+	// monotonicNow is the Linux CLOCK_MONOTONIC source used for wire deadlines.
+	// Tests replace it because production sysprobe support is Linux-only.
+	monotonicNow func() (uint64, error)
 
 	// nextConnID 给每条连接分配 control 模块用的标识。从 1 开始（0 留作
 	// "未指定"哨兵，与协议里 request_id 0 保留同一习惯）。
 	nextConnID atomic.Uint64
-
-	// allowUnverifiedComponent 见 Config.AllowUnverifiedComponent
-	allowUnverifiedComponent bool
 
 	ln *net.UnixListener
 
@@ -325,29 +348,33 @@ func New(cfg Config) (*Server, error) {
 		// 装配阶段就暴露出来，而不是留到运行期才发现权限查询从未真正生效
 		return nil, errors.New("ipc: Permission is required")
 	}
+	if cfg.Transfer == nil {
+		return nil, errors.New("ipc: Transfer is required")
+	}
 
 	return &Server{
-		sockPath:                 cfg.SockPath,
-		log:                      cfg.Log,
-		auditor:                  cfg.Auditor,
-		inv:                      cfg.Invariants,
-		identity:                 cfg.Identity,
-		permission:               cfg.Permission,
-		components:               cfg.Components,
-		endpoints:                cfg.Endpoints,
-		leases:                   cfg.Leases,
-		launcher:                 cfg.Launcher,
-		resources:                cfg.Resources,
-		limits:                   normalizeLimits(cfg.Limits),
-		allowUnverifiedComponent: cfg.AllowUnverifiedComponent,
-		quit:                     make(chan struct{}),
-		fatal:                    make(chan error, 1),
-		conns:                    make(map[*net.UnixConn]struct{}),
-		perUID:                   make(map[uint32]int),
-		dispatch:                 newDispatchTable(),
-		rejectLog:                newRateLimiter(10, time.Second),
-		violationLog:             newRateLimiter(10, time.Second),
-		dispatchRaceLog:          newRateLimiter(10, time.Second),
+		sockPath:        cfg.SockPath,
+		log:             cfg.Log,
+		auditor:         cfg.Auditor,
+		inv:             cfg.Invariants,
+		identity:        cfg.Identity,
+		permission:      cfg.Permission,
+		components:      cfg.Components,
+		endpoints:       cfg.Endpoints,
+		leases:          cfg.Leases,
+		launcher:        cfg.Launcher,
+		resources:       cfg.Resources,
+		transfer:        cfg.Transfer,
+		limits:          normalizeLimits(cfg.Limits),
+		monotonicNow:    sysprobe.MonotonicNanos,
+		quit:            make(chan struct{}),
+		fatal:           make(chan error, 1),
+		conns:           make(map[*net.UnixConn]struct{}),
+		perUID:          make(map[uint32]int),
+		dispatch:        newDispatchTable(),
+		rejectLog:       newRateLimiter(10, time.Second),
+		violationLog:    newRateLimiter(10, time.Second),
+		dispatchRaceLog: newRateLimiter(10, time.Second),
 	}, nil
 }
 
@@ -422,11 +449,6 @@ func (s *Server) Start(context.Context) error {
 	ok = true
 	s.log.Info("ipc: listening", "sock", s.sockPath, "mode", socketMode.String(),
 		"max_conns", s.limits.MaxConns, "max_conns_per_uid", s.limits.MaxConnsPerUID)
-	if s.allowUnverifiedComponent {
-		// 降级模式必须显眼：未核对 Component 就放行握手只允许在开发/测试出现，
-		// 生产镜像绝不置此开关
-		s.log.Warn("ipc: component verification DISABLED (AllowUnverifiedComponent) - dev/test only, never production")
-	}
 	return nil
 }
 
@@ -735,6 +757,10 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		// 期间本连接的 lease 仍然有效而路由已经没了。
 		defer s.leases.RevokeConn(co.leaseConnID())
 	}
+	// The transfer data plane is also connection-scoped. Register this before
+	// dispatch cleanup so LIFO order first closes route authority/tokens and
+	// then tears down every retained stream owned by this connection.
+	defer s.transfer.ConnClosed(transfer.ConnID(co.connID))
 	defer s.dispatchConnClosed(co)
 
 	for {
@@ -821,42 +847,57 @@ var (
 //
 // 两类失败严格区分：
 //   - errComponentUnverifiable（能力缺口）：Components 未接线、对端不在受管 cgroup、
-//     内核无 SO_PEERPIDFD 且回退也失败。fail closed，但不审计为违规。开发/测试可用
-//     AllowUnverifiedComponent 放行Components 未接线这一种。
-//   - errComponentMismatch（潜在伪装）：核对到不一致。永远拒绝并审计，AllowUnverifiedComponent
-//     也不放行 - 信任自报等于把身份决策权交给对端，正是 禁止的
-func (s *Server) verifyComponent(uc *net.UnixConn, caller identity.Caller, declared string) (string, error) {
-	if s.components == nil {
-		if s.allowUnverifiedComponent {
-			return "", nil // 仅开发/测试：基础设施未接线时放行，返回空 Component（未确认）
+//     内核无 SO_PEERPIDFD 且回退也失败。fail closed，但不审计为违规。
+//   - errComponentMismatch（潜在伪装）：核对到不一致。永远拒绝并审计；信任自报
+//     等于把身份决策权交给对端，正是禁止的。
+func (s *Server) verifyComponent(
+	uc *net.UnixConn,
+	caller identity.Caller,
+	declared string,
+) (service.ComponentIdentity, error) {
+	var inst service.ComponentIdentity
+	if s.verifyComponentForTest != nil {
+		var err error
+		inst, err = s.verifyComponentForTest(uc, caller, declared)
+		if err != nil {
+			return service.ComponentIdentity{}, err
 		}
-		return "", errComponentUnverifiable
-	}
+	} else {
+		if s.components == nil {
+			return service.ComponentIdentity{}, errComponentUnverifiable
+		}
 
-	unit, err := s.resolvePeerUnit(uc, caller)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", errComponentUnverifiable, err)
-	}
+		unit, err := s.resolvePeerUnit(uc, caller)
+		if err != nil {
+			return service.ComponentIdentity{}, fmt.Errorf("%w: %v", errComponentUnverifiable, err)
+		}
 
-	inst, ok := s.components.LookupByUnit(unit)
-	if !ok {
-		// 对端所在 unit 不是 nervud 起的受管组件 - 可能是伪装，或非受管进程连了上来
-		return "", fmt.Errorf("%w: unit %q is not a managed component", errComponentMismatch, unit)
+		var ok bool
+		inst, ok = s.components.LookupComponentByUnit(unit)
+		if !ok {
+			// 对端所在 unit 不是 nervud 起的受管组件 - 可能是伪装，或非受管进程连了上来
+			return service.ComponentIdentity{}, fmt.Errorf("%w: unit %q is not a managed component", errComponentMismatch, unit)
+		}
 	}
 	// 内核事实交叉核对（任一不符即潜在伪装）
 	if inst.UID != caller.UID {
-		return "", fmt.Errorf("%w: unit uid %d != peer uid %d", errComponentMismatch, inst.UID, caller.UID)
+		return service.ComponentIdentity{}, fmt.Errorf("%w: unit uid %d != peer uid %d", errComponentMismatch, inst.UID, caller.UID)
 	}
 	if inst.PackageID != caller.PackageID {
-		return "", fmt.Errorf("%w: unit package %q != caller package %q", errComponentMismatch, inst.PackageID, caller.PackageID)
+		return service.ComponentIdentity{}, fmt.Errorf("%w: unit package %q != caller package %q", errComponentMismatch, inst.PackageID, caller.PackageID)
+	}
+	if inst.Generation == 0 || inst.Generation != caller.Generation {
+		return service.ComponentIdentity{}, fmt.Errorf(
+			"%w: unit runtime generation %d != caller generation %d",
+			errComponentMismatch, inst.Generation, caller.Generation)
 	}
 	if declared != "" && declared != inst.ComponentID {
-		return "", fmt.Errorf("%w: declared %q != actual %q", errComponentMismatch, declared, inst.ComponentID)
+		return service.ComponentIdentity{}, fmt.Errorf("%w: declared %q != actual %q", errComponentMismatch, declared, inst.ComponentID)
 	}
 	if inst.State == service.StateDisabled {
-		return "", fmt.Errorf("%w: component %q is disabled", errComponentMismatch, inst.ComponentID)
+		return service.ComponentIdentity{}, fmt.Errorf("%w: component %q is disabled", errComponentMismatch, inst.ComponentID)
 	}
-	return inst.ComponentID, nil
+	return inst, nil
 }
 
 // resolvePeerUnit 解析对端进程当前所属的 systemd unit
@@ -946,8 +987,11 @@ func (s *Server) identityStillValid(caller identity.Caller) bool {
 	if err != nil {
 		return false // Package 已被卸载
 	}
-	// Package ID 或 Trust 变化，都视为身份已变，旧连接不再可信
-	return fresh.PackageID == caller.PackageID && fresh.Trust == caller.Trust
+	// Package ID、Trust 或安装运行代次变化，都视为身份已变。代次检查是升级
+	// 边界：旧进程与新进程共用 UID，但旧连接不能继承新版本刚发布的权限。
+	return fresh.PackageID == caller.PackageID &&
+		fresh.Trust == caller.Trust &&
+		fresh.Generation == caller.Generation
 }
 
 // 违规审计用的哨兵错误，让审计记录能被离线规则精确归类
@@ -1046,6 +1090,9 @@ func (r *rateLimiter) allow() bool {
 type ControlLeases interface {
 	Acquire(req control.Request) (control.Lease, error)
 	Release(id control.ID, conn control.ConnID) error
+	// CheckResource is the method-gate proof that this exact connection still
+	// owns the lease for the resolved resource.
+	CheckResource(conn control.ConnID, resource string, generation uint64) (uint64, error)
 	// RevokeConn 撤销某连接名下的全部租约。
 	//
 	// 【连接收尾时必须调用】。租约绑本连接、不可转让、断开即失效
@@ -1053,6 +1100,9 @@ type ControlLeases interface {
 	// App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL 自然到期——对机器人
 	// 来说那意味着一段谁都动不了的时间。
 	RevokeConn(conn control.ConnID)
+	// RevokeResource invalidates leases issued against an obsolete catalog
+	// generation before the same public handle can be reused.
+	RevokeResource(resource string, generation uint64)
 }
 
 // ComponentLauncher 是 ipc 对 internal/service 的窄接口依赖：拉起一个组件，
@@ -1068,8 +1118,10 @@ type ComponentLauncher interface {
 
 // ResourceResolver 是 ipc 对 internal/resource 的窄接口依赖：把 (type, role)
 // 解析成 resource_handle。
+// AcquireControl uses the narrower exclusive-control lookup so catalog entries
+// declared SHARED_OBSERVE can be routed but never leased.
 type ResourceResolver interface {
-	Resolve(resourceType, role string) (handle string, ok bool)
+	ResolveControl(resourceType, role string) (handle string, generation uint64, ok bool)
 }
 
 // 协议规定的隐式默认 Resource（envelope.proto: ResolveEndpoint.selector
@@ -1084,28 +1136,19 @@ const (
 )
 
 // resolveLeaseResource 把 AcquireControl 的 selector 解析成 resource_handle。
-func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, bool) {
+func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, uint64, bool) {
 	typ, role := sel.GetType(), sel.GetRole()
 	if typ == "" && role == "" {
 		typ, role = defaultResourceType, defaultResourceRole
 	}
 	if s.resources == nil {
-		// resource 未接线：只认隐式默认，其余一律拒绝。
-		// fail closed —— 不认识的资源不该被签发租约。
-		if typ == defaultResourceType && role == defaultResourceRole {
-			return "base.main", true
-		}
-		return "", false
+		// No resource directory means no lease authority, including the legacy
+		// default. Production assembly injects the catalog-backed module.
+		return "", 0, false
 	}
-	return s.resources.Resolve(typ, role)
+	return s.resources.ResolveControl(typ, role)
 }
 
-// auditLeaseClass 记录一次「客户端自报 controller_class 被直接采信」。
-//
-// CONTROL_CLASS_SELF_REPORTED —— 这个标记是给执法恢复时 grep 用的。
-// 见 lease.go 里同名说明：v1 因为 permission.V1GrantAll 已经把权限执法整体
-// 短路了，此刻加 class 门槛只是做样子。审计留痕，让这段时间里「谁声称自己是
-// HUMAN」这件事至少是可追溯的。
 // auditLaunch 记一条成功的组件启动。
 //
 // 启动别的组件是一个跨 Package 的动作，审计里必须能回答「谁把它拉起来的」——
@@ -1125,6 +1168,9 @@ func (s *Server) auditLaunch(caller identity.Caller, pkg, comp string, alreadyRu
 	})
 }
 
+// auditLeaseClass records the currently accepted self-reported HUMAN/AI
+// choice. Caller identity is kernel-verified, but controller_class is not yet
+// backed by a trusted session or human-presence policy.
 func (s *Server) auditLeaseClass(caller identity.Caller, class control.Class, resource string) {
 	if s.auditor == nil {
 		return

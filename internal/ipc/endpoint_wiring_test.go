@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
@@ -39,7 +41,11 @@ func (f *fakeEndpoints) UnregisterEndpoint(conn endpoint.ConnHandle, req *ipcv1.
 	return f.unregResult
 }
 
-func (f *fakeEndpoints) Route(conn endpoint.ConnHandle, endpointID uint64) (endpoint.RouteInfo, endpoint.RouteError) {
+func (f *fakeEndpoints) Route(
+	conn endpoint.ConnHandle,
+	endpointID uint64,
+	methodID uint32,
+) (endpoint.RouteInfo, endpoint.RouteError) {
 	return f.routeInfo, f.routeErr
 }
 
@@ -60,18 +66,19 @@ func newTestServerWithEndpoints(t *testing.T, inv *authority.Invariants, fe *fak
 
 	sock := filepath.Join(t.TempDir(), "nervud.sock")
 	s, err := New(Config{
-		SockPath:                 sock,
-		Log:                      discardLog(),
-		Auditor:                  &fakeRecorder{},
-		Invariants:               inv,
-		Identity:                 selfRegistry(t),
-		Permission:               permission.NewRegistry(permission.DefaultCatalog()),
-		Endpoints:                fe,
-		AllowUnverifiedComponent: true,
+		SockPath:   sock,
+		Log:        discardLog(),
+		Auditor:    &fakeRecorder{},
+		Invariants: inv,
+		Identity:   selfRegistry(t),
+		Permission: permission.NewDefaultRegistry(),
+		Endpoints:  fe,
+		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	installTestComponentVerifier(s)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -123,7 +130,7 @@ func TestReady_RegisterEndpointDispatchesToResolver(t *testing.T) {
 	_, sock := newTestServerWithEndpoints(t, inv, fe)
 
 	c := dial(t, sock)
-	handshake(t, c)
+	handshakeService(t, c)
 
 	req := &ipcv1.Envelope{Body: &ipcv1.Envelope_RegisterEndpoint{RegisterEndpoint: &ipcv1.RegisterEndpoint{
 		RequestId: 7, InterfaceId: "nervus.interface.motion.base",
@@ -167,7 +174,27 @@ func TestReady_RequestReflectsRouteNotFound(t *testing.T) {
 
 func TestReady_RequestAfterSuccessfulRouteStillUnavailable(t *testing.T) {
 	inv := selfUIDInvariants(t)
-	fe := &fakeEndpoints{routeErr: endpoint.RouteError{}}
+	descriptor := (&wrapperspb.StringValue{}).ProtoReflect().Descriptor()
+	fe := &fakeEndpoints{
+		routeInfo: endpoint.RouteInfo{
+			InterfaceID:    "com.example.test.unavailable",
+			InterfaceMajor: 1,
+			Method: catalog.MethodDefinition{
+				InterfaceID: "com.example.test.unavailable",
+				Major:       1,
+				MethodID:    1,
+				Meta: &ipcv1.MethodMeta{
+					MethodId:     1,
+					RiskClass:    ipcv1.RiskClass_RISK_CLASS_NORMAL,
+					RequestType:  string(descriptor.FullName()),
+					ResponseType: string(descriptor.FullName()),
+				},
+				Request:  descriptor,
+				Response: descriptor,
+			},
+		},
+		routeErr: endpoint.RouteError{},
+	}
 	_, sock := newTestServerWithEndpoints(t, inv, fe)
 
 	c := dial(t, sock)

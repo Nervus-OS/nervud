@@ -38,3 +38,24 @@ func TestRevokeAllIsAllocationFree(t *testing.T) {
 		t.Fatalf("RevokeAll allocated %v objects per run, want 0", n)
 	}
 }
+
+func TestRevokeAllAcrossResourceSlotsIsAllocationFree(t *testing.T) {
+	m, g, _ := newTestModule(t)
+	m.mu.Lock()
+	armSlot := m.slotLocked(resourceArmMain)
+	m.mu.Unlock()
+	baseSlot := m.slot(ResourceBaseMain)
+	base := Lease{Conn: 1, Resource: ResourceBaseMain, Epoch: g.Epoch()}
+	arm := Lease{Conn: 2, Resource: resourceArmMain, Epoch: g.Epoch()}
+
+	if n := testing.AllocsPerRun(200, func() {
+		baseSlot.cur.Store(&base)
+		armSlot.cur.Store(&arm)
+		baseSlot.revoked.Store(nil)
+		armSlot.revoked.Store(nil)
+		m.revPending.Store(0)
+		m.RevokeAll(g.Epoch())
+	}); n != 0 {
+		t.Fatalf("multi-resource RevokeAll allocated %v objects per run, want 0", n)
+	}
+}

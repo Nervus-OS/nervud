@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把本仓库依赖的 nervus-ipc/go 同步到指定版本（默认最新）。
+# 把本仓库依赖的完整 nervus-ipc module 同步到指定版本（默认最新）。
 #
 # 为什么需要一个脚本而不是直接 go get：
 #
@@ -18,13 +18,12 @@
 #   scripts/sync-ipc.sh              同步到 master 最新
 #   scripts/sync-ipc.sh <commit|tag> 同步到指定版本
 #
-# 注意 tag 必须带子目录前缀（go/v0.1.0），因为 go.mod 在 go/ 子目录下。
-# 写成 v0.1.0 只会得到「找不到版本」，不会提示你 tag 写错了。
+# nervus-ipc 的 go.mod 位于仓库根目录，tag 不再使用旧的 go/ 子目录前缀。
 
 set -euo pipefail
 
 REF="${1:-master}"
-MODULE="github.com/nervus-os/nervus-ipc/go"
+MODULE="github.com/nervus-os/nervus-ipc"
 
 cd "$(dirname "$0")/.."
 

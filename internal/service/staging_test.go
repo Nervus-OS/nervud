@@ -16,7 +16,7 @@ func entryFor(pkgID string) pkgregistry.Entry {
 //
 // 不能用 &Manager{}：readWritePaths 要读 m.inv.UserDataRoot，inv 为 nil 时空指针。
 func newPathsManager() *Manager {
-	return &Manager{inv: authority.DefaultInvariants()}
+	return &Manager{inv: authority.DefaultInvariants(), perms: &fakePermissions{}}
 }
 
 // 没注入例外、也没申请共享文档区时，谁都只有自己的数据目录可写。
@@ -83,6 +83,7 @@ func entryWithGrants(pkgID string, granted ...string) pkgregistry.Entry {
 // 申请了共享文档区的包拿得到它。
 func TestReadWritePaths_StorageUserGetsUserDataRoot(t *testing.T) {
 	m := newPathsManager()
+	m.perms.(*fakePermissions).set("com.example.files", permStorageUser, true)
 	got := m.readWritePaths(entryWithGrants("com.example.files", permStorageUser), "/data/x")
 
 	if !slices.Contains(got, m.inv.UserDataRoot) {
@@ -93,6 +94,7 @@ func TestReadWritePaths_StorageUserGetsUserDataRoot(t *testing.T) {
 // 没申请的包拿不到。共享文档区是公共地，但不是默认可达的公共地。
 func TestReadWritePaths_NoStorageUserNoUserDataRoot(t *testing.T) {
 	m := newPathsManager()
+	m.perms.(*fakePermissions).set("com.example.app", permStorageUser, true)
 	got := m.readWritePaths(entryFor("com.example.app"), "/data/x")
 
 	if slices.Contains(got, m.inv.UserDataRoot) {
@@ -102,11 +104,11 @@ func TestReadWritePaths_NoStorageUserNoUserDataRoot(t *testing.T) {
 
 // 判据必须是【裁决结果】而不是 manifest 里的申请。
 //
-// 现在 permission.V1GrantAll 打开，两者内容一致，这条测不出差别——但执法恢复后
-// 就会分叉。那时若还看 manifest.Permissions，一个被拒的权限仍然能换到目录，
-// 等于权限执法在这里被绕过。用一个「申请了但没被授予」的 Entry 把它钉住。
+// 若这里误看 manifest.Permissions，一个被中央 catalog/信任裁决拒绝的权限仍然
+// 能换到目录，等于权限执法被绕过。用一个「申请了但没被授予」的 Entry 把它钉住。
 func TestReadWritePaths_UsesGrantedNotRequested(t *testing.T) {
 	m := newPathsManager()
+	m.perms.(*fakePermissions).set("com.example.sneaky", permStorageUser, true)
 	e := entryFor("com.example.sneaky")
 	e.Manifest.Permissions = []string{permStorageUser} // 申请了
 	e.GrantedPermissions = nil                         // 但没被授予
@@ -117,10 +119,22 @@ func TestReadWritePaths_UsesGrantedNotRequested(t *testing.T) {
 	}
 }
 
+func TestReadWritePaths_StorageUserRequiresRuntimeConsent(t *testing.T) {
+	m := newPathsManager()
+	entry := entryWithGrants("com.example.files", permStorageUser)
+
+	got := m.readWritePaths(entry, "/data/x")
+	if slices.Contains(got, m.inv.UserDataRoot) {
+		t.Fatalf("install-eligible but runtime-denied package got UserDataRoot: %v", got)
+	}
+}
+
 // UserDataRoot 未配置（零值 Invariants）时不该往列表里塞一个空路径。
 // 空字符串进 ReadWritePaths 会让 systemd 的 unit 属性畸形。
 func TestReadWritePaths_EmptyUserDataRootIsSkipped(t *testing.T) {
-	m := &Manager{inv: &authority.Invariants{}}
+	perms := &fakePermissions{}
+	perms.set("com.example.files", permStorageUser, true)
+	m := &Manager{inv: &authority.Invariants{}, perms: perms}
 	got := m.readWritePaths(entryWithGrants("com.example.files", permStorageUser), "/data/x")
 
 	if slices.Contains(got, "") {

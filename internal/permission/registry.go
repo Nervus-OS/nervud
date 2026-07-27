@@ -4,9 +4,13 @@ package permission
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
@@ -34,22 +38,45 @@ type Grant struct {
 //
 // 零值不可用，必须经 NewRegistry 构造
 type Registry struct {
-	catalog Catalog
-	snap    atomic.Pointer[snapshot]
+	definitions *catalog.Registry
+	snap        atomic.Pointer[snapshot]
+	// stateMu serializes install-set publication with runtime grant writes. A
+	// SetRuntimeState that loses the race with uninstall must observe the removed
+	// package and fail instead of recreating persisted authority after cleanup.
+	stateMu sync.Mutex
 	// grants 是 GrantUser（危险）权限的运行期授予状态。install-set（snap）回答
 	// 安装时授予了什么，grants 回答用户运行期确认/撤销了什么，Allowed 两者都看
 	grants *grantStore
+
+	revokerMu sync.RWMutex
+	revoker   PermissionRevoker
+
+	installRevokerMu sync.RWMutex
+	installRevoker   InstallGrantRevoker
+
+	projectorMu sync.RWMutex
+	projector   RuntimePermissionProjector
 }
 
 type snapshot struct {
 	byPackage map[string]map[string]struct{}
 }
 
-// NewRegistry 用给定 Catalog 构造一个空的 Registry
-func NewRegistry(cat Catalog) *Registry {
-	r := &Registry{catalog: cat, grants: newGrantStore()}
+// NewRegistry binds runtime grants to the one central definition catalog.
+func NewRegistry(definitions *catalog.Registry) *Registry {
+	r := &Registry{definitions: definitions, grants: newGrantStore()}
 	r.snap.Store(&snapshot{byPackage: map[string]map[string]struct{}{}})
 	return r
+}
+
+// NewDefaultRegistry is primarily useful in tests and standalone tools. The
+// production assembly constructs one catalog.Registry and shares it explicitly.
+func NewDefaultRegistry() *Registry {
+	definitions, err := catalog.NewDefaultRegistry()
+	if err != nil {
+		panic(fmt.Sprintf("permission: invalid default catalog: %v", err))
+	}
+	return NewRegistry(definitions)
 }
 
 // SetGrantStore 接线运行期授予状态的持久化目录与撤销联动。
@@ -64,6 +91,59 @@ func (r *Registry) SetGrantStore(stateDir string, revoker LeaseRevoker, aud audi
 	r.grants.load()
 }
 
+// PermissionRevoker invalidates data-plane state authorized by one permission.
+// IPC owns this hook so it can close route tokens before scanning transfers.
+type PermissionRevoker interface {
+	RevokePermission(packageID, permission string)
+}
+
+// InstallGrantRevoker removes authority already projected into a running
+// process when Replace drops an install-time grant. Implementations must not
+// perform package lookups, systemd I/O, or waits: Replace may be called while
+// pkgregistry holds its transaction mutex.
+type InstallGrantRevoker interface {
+	RevokeInstallGrant(packageID, permission string)
+}
+
+// RuntimePermissionProjector applies a USER_CONSENT decision to authority
+// outside the IPC data plane, such as writable paths in an already-running
+// process sandbox. It is invoked only by SetRuntimeState, never by Replace:
+// package projection may execute while pkgregistry holds its transaction lock.
+type RuntimePermissionProjector interface {
+	ProjectRuntimePermission(packageID, permission string, allowed bool) error
+}
+
+// SetPermissionRevoker installs the runtime revocation hook.
+func (r *Registry) SetPermissionRevoker(revoker PermissionRevoker) {
+	if r == nil {
+		return
+	}
+	r.revokerMu.Lock()
+	r.revoker = revoker
+	r.revokerMu.Unlock()
+}
+
+// SetInstallGrantRevoker installs the non-blocking process-authority hook used
+// by Replace after the data-plane revoker has run.
+func (r *Registry) SetInstallGrantRevoker(revoker InstallGrantRevoker) {
+	if r == nil {
+		return
+	}
+	r.installRevokerMu.Lock()
+	r.installRevoker = revoker
+	r.installRevokerMu.Unlock()
+}
+
+// SetRuntimePermissionProjector installs the runtime sandbox projection hook.
+func (r *Registry) SetRuntimePermissionProjector(projector RuntimePermissionProjector) {
+	if r == nil {
+		return
+	}
+	r.projectorMu.Lock()
+	r.projector = projector
+	r.projectorMu.Unlock()
+}
+
 // Intersect 用 Registry 自带的 Catalog 裁决一次安装请求（见 intersect.go）
 //
 // 满足 pkgregistry.PermissionArbiter：安装流程只知道"请求权限 + trust"，
@@ -71,11 +151,54 @@ func (r *Registry) SetGrantStore(stateDir string, revoker LeaseRevoker, aud audi
 //
 // 对未初始化的 Registry fail-safe：零值 Catalog 视为"没有任何已注册权限"，
 // 全部请求都会被拒绝，而不是 panic
-func (r *Registry) Intersect(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string) {
-	if r == nil {
+func (r *Registry) IntersectAt(
+	definitions *catalog.Snapshot,
+	requested []string,
+	source catalog.SourceKind,
+	trust identity.TrustProfile,
+	signers catalog.SignerEvidence,
+) (granted, denied []string) {
+	if r == nil || definitions == nil {
 		return nil, append([]string(nil), requested...)
 	}
-	return Intersect(requested, r.catalog, trust, signerRoles)
+	for _, permissionID := range requested {
+		definition, ok := definitions.Permission(permissionID)
+		if !ok || trust < definition.MinimumTrust {
+			denied = append(denied, permissionID)
+			continue
+		}
+		if definition.RequiredSignerRole != "" && !signers.HasRole(definition.RequiredSignerRole) {
+			denied = append(denied, permissionID)
+			continue
+		}
+		switch definition.GrantMode {
+		case ipcv1.GrantMode_GRANT_MODE_NORMAL,
+			ipcv1.GrantMode_GRANT_MODE_USER_CONSENT:
+			// USER_CONSENT enters the install set here; AllowedAt additionally
+			// requires the system-owned runtime grant state.
+		case ipcv1.GrantMode_GRANT_MODE_SIGNATURE:
+			if !signers.SameIdentity(definition.Owner.Signers) {
+				denied = append(denied, permissionID)
+				continue
+			}
+		case ipcv1.GrantMode_GRANT_MODE_PRIVILEGED:
+			if source != catalog.SourceKindSystemImage ||
+				(trust != identity.TrustOEM && trust != identity.TrustPlatform) {
+				denied = append(denied, permissionID)
+				continue
+			}
+		case ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY:
+			if source != catalog.SourceKindSystemImage || trust != identity.TrustPlatform {
+				denied = append(denied, permissionID)
+				continue
+			}
+		default:
+			denied = append(denied, permissionID)
+			continue
+		}
+		granted = append(granted, permissionID)
+	}
+	return granted, denied
 }
 
 // Replace 原子替换整份已授予权限索引
@@ -102,7 +225,22 @@ func (r *Registry) Replace(grants []Grant) error {
 		}
 		next[g.PackageID] = perms
 	}
-	r.snap.Store(&snapshot{byPackage: next})
+	r.stateMu.Lock()
+	previous := r.snap.Swap(&snapshot{byPackage: next})
+	r.stateMu.Unlock()
+	if previous != nil {
+		for packageID, oldPermissions := range previous.byPackage {
+			newPermissions := next[packageID]
+			for permissionID := range oldPermissions {
+				if _, retained := newPermissions[permissionID]; !retained {
+					// Route/Transfer authority closes before any process sandbox
+					// teardown is requested.
+					r.revokePermission(packageID, permissionID)
+					r.revokeInstallGrant(packageID, permissionID)
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -118,7 +256,24 @@ func (r *Registry) Replace(grants []Grant) error {
 // 每次都读最新快照，不缓存在调用方 - 写时复制 + 原子指针天然让 Replace 后
 // 的下一次 Allowed 立刻看到新状态
 func (r *Registry) Allowed(packageID, permission string) bool {
-	if r == nil {
+	if r == nil || r.definitions == nil {
+		return false
+	}
+	return r.AllowedAt(r.definitions.Current(), packageID, permission)
+}
+
+// AllowedAt performs the grant and definition checks against one caller-owned
+// immutable Snapshot, so an endpoint Route cannot mix catalog revisions.
+func (r *Registry) AllowedAt(
+	definitions *catalog.Snapshot,
+	packageID string,
+	permission string,
+) bool {
+	if r == nil || definitions == nil {
+		return false
+	}
+	definition, defined := definitions.Permission(permission)
+	if !defined {
 		return false
 	}
 	snap := r.snap.Load()
@@ -132,15 +287,10 @@ func (r *Registry) Allowed(packageID, permission string) bool {
 	if _, ok = perms[permission]; !ok {
 		return false // 安装期就没授予（或已被卸载/降权投影出去）
 	}
-	// v1：不做运行期用户确认，install-set 命中即放行（见 V1GrantAll）。
-	// 注意上面那条 install-set 检查【不】跳过：没在 manifest 里申请过的权限
-	// 依然拿不到，v1 放宽的是「要不要确认」，不是「要不要声明」。
-	if V1GrantAll {
-		return true
-	}
-	// GrantUser（危险）权限：安装期集合只证明可请求，实际放行还要运行期状态
+	// USER_CONSENT permissions: the install set only proves eligibility; actual
+	// access requires the system-owned runtime grant state.
 	// == Granted（两者都通过才放行）
-	if entry, ok := r.catalog.Lookup(permission); ok && entry.Mode == GrantUser {
+	if definition.GrantMode == ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
 		return r.grants.state(packageID, permission) == GrantStateGranted
 	}
 	return true
@@ -158,14 +308,53 @@ func (r *Registry) SetRuntimeState(packageID, permission string, state GrantStat
 	if !state.valid() {
 		return fmt.Errorf("permission: invalid grant state %d", state)
 	}
-	entry, ok := r.catalog.Lookup(permission)
+	if r.definitions == nil {
+		return fmt.Errorf("permission: definition catalog unavailable")
+	}
+	entry, ok := r.definitions.Current().Permission(permission)
 	if !ok {
 		return fmt.Errorf("permission: unknown permission %q", permission)
 	}
-	if entry.Mode != GrantUser {
+	if entry.GrantMode != ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
 		return fmt.Errorf("permission: %q is not a user-grantable (dangerous) permission", permission)
 	}
-	return r.grants.set(packageID, permission, state, entry.Group == GroupMotion)
+	r.stateMu.Lock()
+	snap := r.snap.Load()
+	installed := false
+	if snap != nil {
+		if permissions := snap.byPackage[packageID]; permissions != nil {
+			_, installed = permissions[permission]
+		}
+	}
+	if !installed {
+		r.stateMu.Unlock()
+		return fmt.Errorf(
+			"permission: package %q has no installed grant for %q",
+			packageID, permission,
+		)
+	}
+	if err := r.grants.set(
+		packageID,
+		permission,
+		state,
+		entry.RiskClass == ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+	); err != nil {
+		r.stateMu.Unlock()
+		return err
+	}
+	r.stateMu.Unlock()
+	if state != GrantStateGranted {
+		// Close route tokens and transfers before rebuilding process sandboxes.
+		// From this point no new IPC work can be authorized by the old grant.
+		r.revokePermission(packageID, permission)
+	}
+	if err := r.projectRuntimePermission(packageID, permission); err != nil {
+		// The persisted decision remains authoritative and is deliberately not
+		// rolled back: restoring a grant because process teardown failed would
+		// reopen IPC authority while the caller believes it revoked access.
+		return fmt.Errorf("permission: project runtime state for %q/%q: %w", packageID, permission, err)
+	}
+	return nil
 }
 
 // GrantStateOf 返回一个权限当前的运行期授予状态（供权限 UI 展示/诊断）
@@ -183,6 +372,8 @@ func (r *Registry) ClearPackage(packageID string) error {
 	if r == nil {
 		return nil
 	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	return r.grants.clearPackage(packageID)
 }
 
@@ -196,4 +387,36 @@ func (r *Registry) Len() int {
 		return 0
 	}
 	return len(snap.byPackage)
+}
+
+func (r *Registry) revokePermission(packageID, permissionID string) {
+	r.revokerMu.RLock()
+	revoker := r.revoker
+	r.revokerMu.RUnlock()
+	if revoker != nil {
+		revoker.RevokePermission(packageID, permissionID)
+	}
+}
+
+func (r *Registry) revokeInstallGrant(packageID, permissionID string) {
+	r.installRevokerMu.RLock()
+	revoker := r.installRevoker
+	r.installRevokerMu.RUnlock()
+	if revoker != nil {
+		revoker.RevokeInstallGrant(packageID, permissionID)
+	}
+}
+
+func (r *Registry) projectRuntimePermission(packageID, permissionID string) error {
+	r.projectorMu.RLock()
+	projector := r.projector
+	r.projectorMu.RUnlock()
+	if projector == nil {
+		return nil
+	}
+	return projector.ProjectRuntimePermission(
+		packageID,
+		permissionID,
+		r.Allowed(packageID, permissionID),
+	)
 }

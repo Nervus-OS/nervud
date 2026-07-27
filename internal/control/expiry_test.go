@@ -36,7 +36,7 @@ func TestExpiryReasons(t *testing.T) {
 
 			m.onTick(tc.at(l))
 
-			if m.cur.Load() != nil {
+			if m.current(ResourceBaseMain) != nil {
 				t.Fatal("expired lease should have been collected by the lane")
 			}
 			if !rec.has(tc.wantAction) {
@@ -55,15 +55,15 @@ func TestRefreshKeepsDeadmanAlive(t *testing.T) {
 
 	for i := 1; i <= 9; i++ {
 		at := l.IssuedAt.Add(time.Duration(i) * 100 * time.Millisecond)
-		m.markFresh(at)
+		m.markFresh(m.slot(ResourceBaseMain), at)
 		m.onTick(at)
-		if m.cur.Load() == nil {
+		if m.current(ResourceBaseMain) == nil {
 			t.Fatalf("lease dropped at %dms despite fresh input", i*100)
 		}
 	}
 
 	m.onTick(l.IssuedAt.Add(1300 * time.Millisecond))
-	if m.cur.Load() != nil {
+	if m.current(ResourceBaseMain) != nil {
 		t.Fatal("lease survived a deadman window with no fresh input")
 	}
 }
@@ -80,7 +80,7 @@ func TestLaneIgnoresSafetyOwnedBoundaries(t *testing.T) {
 	if g.Epoch() != epochAfterTrip {
 		t.Fatalf("lane bumped epoch on a safety-owned boundary: %d -> %d", epochAfterTrip, g.Epoch())
 	}
-	if m.cur.Load() == nil {
+	if m.current(ResourceBaseMain) == nil {
 		t.Fatal("lane collected a lease that belongs to safety's revoke path")
 	}
 }

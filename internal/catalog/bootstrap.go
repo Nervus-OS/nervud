@@ -1,0 +1,421 @@
+package catalog
+
+import (
+	"fmt"
+
+	basemotionv1 "github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
+	manipulatorv1 "github.com/nervus-os/nervus-ipc/protocol/interface/manipulatorv1"
+	pkgmanagerv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
+	safetyv1 "github.com/nervus-os/nervus-ipc/protocol/interface/safetyv1"
+	transferv1 "github.com/nervus-os/nervus-ipc/protocol/interface/transferv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	ipcregistry "github.com/nervus-os/nervus-ipc/registry"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/nervus-os/nervud/internal/identity"
+)
+
+// DefaultBootstrap returns kernel-owned definitions that must exist before any
+// package can register or consume a provider. Capability-specific additions
+// belong in signed ProviderArtifacts, not in this function.
+func DefaultBootstrap() ([]Source, error) {
+	artifacts, err := buildBootstrapArtifacts()
+	if err != nil {
+		return nil, err
+	}
+	kernelSigner := SignerEvidence{
+		Roles: []string{rolePlatformRelease},
+		VerifiedSigners: []VerifiedSigner{{
+			Role: rolePlatformRelease, KeyID: "nervus-kernel-builtin-v1",
+		}},
+	}
+	return []Source{{
+		PackageID: KernelPackageID,
+		Kind:      SourceKindKernel,
+		Trust:     identity.TrustPlatform,
+		Signers:   kernelSigner,
+		Exports: []ExportBinding{
+			{ComponentID: "builtin.safety", InterfaceID: InterfaceSafetyControl},
+			{ComponentID: "builtin.transfer", InterfaceID: InterfaceTransferControl},
+		},
+		Artifacts: artifacts,
+		KernelBuiltins: []KernelBuiltin{{
+			ComponentID:        "builtin.power",
+			InterfaceID:        InterfacePower,
+			Major:              1,
+			RequiredPermission: "perm.authority.power",
+			Methods: []*ipcv1.MethodMeta{
+				{
+					MethodId:           1,
+					RequiredPermission: "perm.authority.power",
+					RiskClass:          ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+				},
+				{
+					MethodId:           2,
+					RequiredPermission: "perm.authority.power",
+					RiskClass:          ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+				},
+			},
+		}},
+	}}, nil
+}
+
+// BootstrapSources is the explicit construction entry used by main and tests.
+func BootstrapSources() ([]Source, error) {
+	return DefaultBootstrap()
+}
+
+// LegacyPackageManagerArtifacts returns the only schema bridge for a provider
+// that predates signed ProviderArtifacts. The caller must still restrict its
+// use to the platform-release-signed nervus.pkgmanagerd system-image package.
+//
+// This function deliberately carries no permission or resource definitions:
+// it only lets that legacy package bind the canonical package-manager
+// interface already defined by the kernel bootstrap.
+func LegacyPackageManagerArtifacts() (*ipcregistry.ProviderArtifacts, error) {
+	bundle, err := ipcregistry.BuildSchemaBundle(
+		InterfacePackageManager, 1, pkgmanagerv1.PackageManagerMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build legacy package-manager schema: %w", err)
+	}
+	return parseArtifacts(
+		&ipcv1.ProviderDescriptor{
+			PackageId: "nervus.pkgmanagerd",
+			Interfaces: []*ipcv1.ProvidedInterface{bootstrapInterface(
+				InterfacePackageManager,
+				bundle,
+				"perm.pkg.install",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			)},
+		},
+		&ipcv1.InterfaceSchemaBundleSet{
+			Bundles: []*ipcv1.InterfaceSchemaBundle{bundle},
+		},
+		"legacy package-manager",
+	)
+}
+
+func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
+	baseBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfaceMotionBase, 1, basemotionv1.BaseMotionMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build base-motion bootstrap schema: %w", err)
+	}
+	manipulatorBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfaceManipulatorArm, 1, manipulatorv1.ManipulatorMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build manipulator bootstrap schema: %w", err)
+	}
+	packageBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfacePackageManager, 1, pkgmanagerv1.PackageManagerMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build package-manager bootstrap schema: %w", err)
+	}
+	safetyBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfaceSafetyControl, 1, safetyv1.SafetyControlMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build safety bootstrap schema: %w", err)
+	}
+	transferBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfaceTransferControl, 1, transferv1.TransferControlMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build transfer bootstrap schema: %w", err)
+	}
+
+	descriptor := &ipcv1.ProviderDescriptor{
+		PackageId: KernelPackageID,
+		Interfaces: []*ipcv1.ProvidedInterface{
+			bootstrapInterface(
+				InterfaceMotionBase,
+				baseBundle,
+				"perm.motion.control",
+				ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+				[]string{ResourceMotionBase},
+				ResourceMotionBase,
+				"base.main",
+			),
+			bootstrapInterface(
+				InterfaceManipulatorArm,
+				manipulatorBundle,
+				"perm.manipulator.control",
+				ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+				[]string{ResourceManipulatorArm},
+				ResourceManipulatorArm,
+				"arm.main",
+			),
+			bootstrapInterface(
+				InterfacePackageManager,
+				packageBundle,
+				"perm.pkg.install",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
+			bootstrapInterface(
+				InterfaceSafetyControl,
+				safetyBundle,
+				"perm.safety.observe",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
+			bootstrapInterface(
+				InterfaceTransferControl,
+				transferBundle,
+				"",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
+		},
+		Resources: []*ipcv1.ManagedResource{
+			{
+				StableRole:   "base.main",
+				ResourceType: ResourceMotionBase,
+				AccessMode:   ipcv1.ResourceAccessMode_RESOURCE_ACCESS_MODE_EXCLUSIVE_CONTROL,
+				RiskClass:    ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+			},
+			{
+				StableRole:   "arm.main",
+				ResourceType: ResourceManipulatorArm,
+				AccessMode:   ipcv1.ResourceAccessMode_RESOURCE_ACCESS_MODE_EXCLUSIVE_CONTROL,
+				RiskClass:    ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+			},
+		},
+		Permissions: bootstrapPermissions(),
+	}
+	bundles := &ipcv1.InterfaceSchemaBundleSet{Bundles: []*ipcv1.InterfaceSchemaBundle{
+		baseBundle,
+		manipulatorBundle,
+		packageBundle,
+		safetyBundle,
+		transferBundle,
+	}}
+	return parseArtifacts(descriptor, bundles, "bootstrap")
+}
+
+func parseArtifacts(
+	descriptor *ipcv1.ProviderDescriptor,
+	bundles *ipcv1.InterfaceSchemaBundleSet,
+	label string,
+) (*ipcregistry.ProviderArtifacts, error) {
+	marshal := proto.MarshalOptions{Deterministic: true}
+	descriptorWire, err := marshal.Marshal(descriptor)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: marshal %s descriptor: %w", label, err)
+	}
+	schemaWire, err := marshal.Marshal(bundles)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: marshal %s schemas: %w", label, err)
+	}
+	artifacts, err := ipcregistry.ParseProviderArtifacts(descriptorWire, schemaWire)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: validate %s artifacts: %w", label, err)
+	}
+	return artifacts, nil
+}
+
+func bootstrapInterface(
+	interfaceID string,
+	bundle *ipcv1.InterfaceSchemaBundle,
+	requiredPermission string,
+	riskFloor ipcv1.RiskClass,
+	compatible []string,
+	defaultType string,
+	defaultRole string,
+) *ipcv1.ProvidedInterface {
+	return &ipcv1.ProvidedInterface{
+		InterfaceId: interfaceID,
+		InterfaceVersions: []*ipcv1.ProvidedInterfaceVersion{{
+			Major: 1, SchemaHash: append([]byte(nil), bundle.GetSchemaHash()...),
+		}},
+		RequiredPermission:      requiredPermission,
+		ResourceRiskFloor:       riskFloor,
+		CompatibleResourceTypes: append([]string(nil), compatible...),
+		DefaultResourceType:     defaultType,
+		DefaultResourceRole:     defaultRole,
+	}
+}
+
+func bootstrapPermissions() []*ipcv1.DefinedPermission {
+	return []*ipcv1.DefinedPermission{
+		bootstrapPermission(
+			"perm.diagnostics.read",
+			ipcv1.GrantMode_GRANT_MODE_NORMAL,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"",
+			"读取诊断信息",
+			"Read diagnostics",
+		),
+		bootstrapPermission(
+			"perm.service.register.private",
+			ipcv1.GrantMode_GRANT_MODE_NORMAL,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"",
+			"注册包内服务",
+			"Register a package-private service",
+		),
+		bootstrapPermission(
+			"perm.service.register",
+			ipcv1.GrantMode_GRANT_MODE_PRIVILEGED,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_OEM,
+			"",
+			"",
+			"注册公共系统服务",
+			"Register a public system service",
+		),
+		bootstrapPermission(
+			"perm.storage.user",
+			ipcv1.GrantMode_GRANT_MODE_USER_CONSENT,
+			ipcv1.RiskClass_RISK_CLASS_PRIVACY_SENSITIVE,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"storage",
+			"访问用户文件",
+			"Access user files",
+		),
+		bootstrapPermission(
+			"perm.system.launch",
+			ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			"",
+			"",
+			"启动系统组件",
+			"Launch system components",
+		),
+		bootstrapPermission(
+			"perm.motion.control",
+			ipcv1.GrantMode_GRANT_MODE_USER_CONSENT,
+			ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"motion",
+			"控制机器人移动",
+			"Control robot motion",
+		),
+		bootstrapPermission(
+			"perm.manipulator.control",
+			ipcv1.GrantMode_GRANT_MODE_USER_CONSENT,
+			ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"motion",
+			"控制机械臂",
+			"Control the manipulator",
+		),
+		bootstrapPermission(
+			"perm.platform.control",
+			ipcv1.GrantMode_GRANT_MODE_PRIVILEGED,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			"",
+			"",
+			"平台控制",
+			"Platform control",
+		),
+		bootstrapPermission(
+			"perm.authority.reboot",
+			ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY,
+			ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			rolePlatformRelease,
+			"",
+			"紧急重启",
+			"Emergency reboot",
+		),
+		bootstrapPermission(
+			"perm.authority.power",
+			ipcv1.GrantMode_GRANT_MODE_PRIVILEGED,
+			ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			"",
+			"",
+			"有序关机或重启",
+			"Orderly power control",
+		),
+		bootstrapPermission(
+			"perm.safety.observe",
+			ipcv1.GrantMode_GRANT_MODE_PRIVILEGED,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_OEM,
+			"",
+			"",
+			"读取安全状态",
+			"Observe safety state",
+		),
+		bootstrapPermission(
+			"perm.safety.rearm",
+			ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY,
+			ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			rolePlatformRelease,
+			"",
+			"解除安全锁存",
+			"Re-arm the safety system",
+		),
+		bootstrapPermission(
+			"perm.pkg.install",
+			ipcv1.GrantMode_GRANT_MODE_USER_CONSENT,
+			ipcv1.RiskClass_RISK_CLASS_PRIVACY_SENSITIVE,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"",
+			"安装或卸载软件",
+			"Install or uninstall packages",
+		),
+		bootstrapPermission(
+			"perm.pkg.query",
+			ipcv1.GrantMode_GRANT_MODE_NORMAL,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"",
+			"查看已安装软件",
+			"List installed packages",
+		),
+		bootstrapPermission(
+			"perm.permission.admin",
+			ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY,
+			ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			rolePlatformRelease,
+			"",
+			"管理运行期权限",
+			"Manage runtime grants",
+		),
+	}
+}
+
+func bootstrapPermission(
+	id string,
+	mode ipcv1.GrantMode,
+	risk ipcv1.RiskClass,
+	minimum ipcv1.PermissionTrustFloor,
+	requiredRole string,
+	group string,
+	zhCN string,
+	en string,
+) *ipcv1.DefinedPermission {
+	return &ipcv1.DefinedPermission{
+		Id:                 id,
+		GrantMode:          mode,
+		RiskClass:          risk,
+		MinimumTrust:       minimum,
+		RequiredSignerRole: requiredRole,
+		Group:              group,
+		DisplayName:        &ipcv1.LocalizedText{ZhCn: zhCN, En: en},
+		Description:        &ipcv1.LocalizedText{ZhCn: zhCN, En: en},
+	}
+}

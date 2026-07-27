@@ -18,8 +18,8 @@ func mustReplace(t *testing.T, r *Registry, pkgs ...Package) {
 func TestReplace_RejectsDuplicateUID(t *testing.T) {
 	r := NewRegistry()
 	err := r.Replace([]Package{
-		{ID: "com.a", UID: 20001, Trust: TrustOrdinary},
-		{ID: "com.b", UID: 20001, Trust: TrustOrdinary},
+		{ID: "com.a", UID: 20001, Trust: TrustOrdinary, Generation: 1},
+		{ID: "com.b", UID: 20001, Trust: TrustOrdinary, Generation: 1},
 	})
 	if !errors.Is(err, ErrDuplicateUID) {
 		t.Fatalf("err = %v, want ErrDuplicateUID", err)
@@ -29,8 +29,8 @@ func TestReplace_RejectsDuplicateUID(t *testing.T) {
 func TestReplace_RejectsDuplicatePackageID(t *testing.T) {
 	r := NewRegistry()
 	err := r.Replace([]Package{
-		{ID: "com.a", UID: 20001, Trust: TrustOrdinary},
-		{ID: "com.a", UID: 20002, Trust: TrustOrdinary},
+		{ID: "com.a", UID: 20001, Trust: TrustOrdinary, Generation: 1},
+		{ID: "com.a", UID: 20002, Trust: TrustOrdinary, Generation: 1},
 	})
 	if !errors.Is(err, ErrDuplicateID) {
 		t.Fatalf("err = %v, want ErrDuplicateID", err)
@@ -39,35 +39,35 @@ func TestReplace_RejectsDuplicatePackageID(t *testing.T) {
 
 func TestReplace_RejectsUIDZero(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Replace([]Package{{ID: "com.a", UID: 0, Trust: TrustOrdinary}}); err == nil {
+	if err := r.Replace([]Package{{ID: "com.a", UID: 0, Trust: TrustOrdinary, Generation: 1}}); err == nil {
 		t.Fatal("UID 0 must be rejected")
 	}
 }
 
 func TestReplace_RejectsEmptyID(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Replace([]Package{{ID: "", UID: 20001, Trust: TrustOrdinary}}); err == nil {
+	if err := r.Replace([]Package{{ID: "", UID: 20001, Trust: TrustOrdinary, Generation: 1}}); err == nil {
 		t.Fatal("an empty ID must be rejected")
 	}
 }
 
 func TestReplace_RejectsUnspecifiedTrust(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Replace([]Package{{ID: "com.a", UID: 20001}}); err == nil {
+	if err := r.Replace([]Package{{ID: "com.a", UID: 20001, Generation: 1}}); err == nil {
 		t.Fatal("TrustUnspecified must be rejected")
 	}
-	if err := r.Replace([]Package{{ID: "com.a", UID: 20001, Trust: TrustProfile(99)}}); err == nil {
+	if err := r.Replace([]Package{{ID: "com.a", UID: 20001, Trust: TrustProfile(99), Generation: 1}}); err == nil {
 		t.Fatal("an undefined TrustProfile must be rejected")
 	}
 }
 
 func TestReplace_FailureKeepsPreviousSnapshot(t *testing.T) {
 	r := NewRegistry()
-	mustReplace(t, r, Package{ID: "com.good", UID: 20001, Trust: TrustOrdinary})
+	mustReplace(t, r, Package{ID: "com.good", UID: 20001, Trust: TrustOrdinary, Generation: 1})
 
 	err := r.Replace([]Package{
-		{ID: "com.new", UID: 20002, Trust: TrustOrdinary},
-		{ID: "com.bad", UID: 0, Trust: TrustOrdinary},
+		{ID: "com.new", UID: 20002, Trust: TrustOrdinary, Generation: 2},
+		{ID: "com.bad", UID: 0, Trust: TrustOrdinary, Generation: 2},
 	})
 	if err == nil {
 		t.Fatal("want error")
@@ -85,7 +85,7 @@ func TestReplace_FailureKeepsPreviousSnapshot(t *testing.T) {
 
 func TestReplace_EmptyClearsIndex(t *testing.T) {
 	r := NewRegistry()
-	mustReplace(t, r, Package{ID: "com.a", UID: 20001, Trust: TrustOrdinary})
+	mustReplace(t, r, Package{ID: "com.a", UID: 20001, Trust: TrustOrdinary, Generation: 1})
 	mustReplace(t, r)
 	if r.Len() != 0 {
 		t.Fatalf("Len = %d, want 0", r.Len())
@@ -96,7 +96,7 @@ func TestReplace_EmptyClearsIndex(t *testing.T) {
 
 func TestResolve_KnownUID(t *testing.T) {
 	r := NewRegistry()
-	mustReplace(t, r, Package{ID: "com.example.app", UID: 20001, Trust: TrustPlatform})
+	mustReplace(t, r, Package{ID: "com.example.app", UID: 20001, Trust: TrustPlatform, Generation: 7})
 
 	c, err := r.Resolve(sysprobe.Ucred{PID: 4242, UID: 20001, GID: 20001})
 	if err != nil {
@@ -108,6 +108,9 @@ func TestResolve_KnownUID(t *testing.T) {
 	if c.Trust != TrustPlatform {
 		t.Fatalf("Trust = %v, want platform", c.Trust)
 	}
+	if c.Generation != 7 {
+		t.Fatalf("Generation = %d, want 7", c.Generation)
+	}
 	if c.UID != 20001 || c.GID != 20001 || c.PID != 4242 {
 		t.Fatalf("kernel credentials were not preserved: %+v", c)
 	}
@@ -118,7 +121,7 @@ func TestResolve_KnownUID(t *testing.T) {
 
 func TestResolve_UnknownUID(t *testing.T) {
 	r := NewRegistry()
-	mustReplace(t, r, Package{ID: "com.a", UID: 20001, Trust: TrustOrdinary})
+	mustReplace(t, r, Package{ID: "com.a", UID: 20001, Trust: TrustOrdinary, Generation: 1})
 
 	_, err := r.Resolve(sysprobe.Ucred{PID: 1, UID: 20002, GID: 20002})
 	if !errors.Is(err, ErrUnknownUID) {
@@ -158,7 +161,7 @@ func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 
 func TestRegistry_ConcurrentReadWrite(t *testing.T) {
 	r := NewRegistry()
-	mustReplace(t, r, Package{ID: "com.a", UID: 20001, Trust: TrustOrdinary})
+	mustReplace(t, r, Package{ID: "com.a", UID: 20001, Trust: TrustOrdinary, Generation: 1})
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -182,9 +185,9 @@ func TestRegistry_ConcurrentReadWrite(t *testing.T) {
 	}
 
 	for i := range 200 {
-		pkgs := []Package{{ID: "com.a", UID: 20001, Trust: TrustOrdinary}}
+		pkgs := []Package{{ID: "com.a", UID: 20001, Trust: TrustOrdinary, Generation: uint64(i + 1)}}
 		if i%2 == 0 {
-			pkgs = append(pkgs, Package{ID: "com.b", UID: 20002, Trust: TrustOEM})
+			pkgs = append(pkgs, Package{ID: "com.b", UID: 20002, Trust: TrustOEM, Generation: uint64(i + 1)})
 		}
 		if err := r.Replace(pkgs); err != nil {
 			t.Fatalf("Replace: %v", err)

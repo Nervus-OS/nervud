@@ -1,5 +1,5 @@
-// 本文件把 control 接入 kernel.Module 生命周期，持有唯一的租约槽与 Control Lane，
-// 并集中全部审计写入。租约状态机本身在 slot.go，到期检测循环在 lane.go
+// 本文件把 control 接入 kernel.Module 生命周期，持有按 Resource 隔离的租约槽与
+// Control Lane，并集中全部审计写入。租约状态机本身在 slot.go，到期检测循环在 lane.go
 package control
 
 import (
@@ -18,8 +18,14 @@ import (
 // laneTick 是 Control Lane 检查 deadline/deadman 到期的节拍
 //
 // 10ms 对 HUMAN 的 300ms deadman 约是 3% 的分辨率，够用；空闲（无租约）时 onTick
-// 只做一次原子 Load 就返回，代价可忽略
+// 只扫描不可变槽快照并做每槽原子 Load，不取 control 变更锁。
 const laneTick = 10 * time.Millisecond
+
+// maxResourceSlots is a hard upper bound on every Safety and Control Lane
+// scan. Slots intentionally survive catalog removal so RevokeAll can retain a
+// lock-free immutable snapshot; without a bound, repeated handle churn could
+// make the real-time path grow for the lifetime of the process.
+const maxResourceSlots = 1024
 
 // laneExitTimeout 是 Stop 等 Control Lane 退出的上限（见 Module.Stop 的顺序说明）
 const laneExitTimeout = 500 * time.Millisecond
@@ -31,6 +37,42 @@ type LaneSpawner interface {
 	SpawnDedicated(name string, policy scheduler.Policy, priority int, fn func(context.Context)) error
 }
 
+// LeaseObserver receives the terminal boundary of an effective ControlLease.
+//
+// The callback runs only after the lease has been removed from the authoritative
+// slot. It may run on the Control Lane, a control-plane caller, or Stop, so the
+// implementation must be concurrency-safe and return promptly. RevokeAll never
+// invokes it on the Safety Supervisor Lane; that path is deferred to
+// drainRevoked so the RT path remains lock-free, allocation-free, and
+// non-blocking.
+type LeaseObserver interface {
+	ControlLeaseEnded(conn ConnID, resource string)
+}
+
+type leaseObserverHolder struct {
+	observer LeaseObserver
+}
+
+// resourceSlot 是一个 Resource 的 exclusive_control 槽。槽对象一经创建就不再删除，
+// 因而 slots 快照与 Safety RevokeAll 可以长期持有它的稳定指针。
+type resourceSlot struct {
+	resource string
+	cur      atomic.Pointer[Lease]
+	fresh    atomic.Int64
+
+	// Safety 路径只把被撤租约发布到这里；审计与观察者通知由普通优先级路径排空。
+	// Acquire 在同一 Resource 再次发布前必先排空，因此每个槽只需一个待处理位置。
+	revoked      atomic.Pointer[Lease]
+	revokedEpoch atomic.Uint64
+}
+
+// slotIndex 是不可变的 Resource -> slot 索引。新增 Resource 时在 mu 下 copy-on-write；
+// 读侧和 RevokeAll 只原子读取快照，不碰 Go map 的并发写。
+type slotIndex struct {
+	byResource map[string]*resourceSlot
+	all        []*resourceSlot
+}
+
 // Module 把 control 接入 kernel.Module + kernel.FatalReporter，并实现 safety 侧的
 // LeaseRevoker（RevokeAll）
 type Module struct {
@@ -40,33 +82,25 @@ type Module struct {
 	log     *slog.Logger
 	policy  Policy
 
-	// cur 是唯一的租约槽（v1 单 Resource base.main 的 exclusive_control）。
-	// nil = NONE。读侧无锁；写侧除 RevokeAll 外都由 mu 串行化
-	cur atomic.Pointer[Lease]
+	// slots 按已解析的稳定 Resource handle 隔离 exclusive_control。索引不可变；
+	// 槽内 cur/fresh 独立，因此不同 Resource 可并行持有且 deadman 互不续命。
+	slots atomic.Pointer[slotIndex]
 
 	// mu 只序列化 control 自己的变更路径。RevokeAll 绝不取它 - 它跑在 safety 的
 	// Supervisor Lane（FIFO 90）上，等普通优先级的持锁者就是优先级反转
 	mu sync.Mutex
 
-	// base 是单调时钟基准；fresh 记最近一次新鲜输入距 base 的纳秒。
-	// 用相对值而不是 time.Time 是为了能放进 atomic.Int64：deadman 刷新在每条运动
-	// 命令上发生，不能为它重建不可变 Lease。fresh 只增不减（markFresh 做原子 max），
-	// 防止一个晚到的旧调用把新鲜度倒写回去
-	base  time.Time
-	fresh atomic.Int64
+	// base 是所有槽共享的单调时钟基准；每个槽的 fresh 保存距 base 的纳秒。
+	base time.Time
 
-	// 被 Safety 撤销的租约交给 Control Lane 事后补审计的定长环。
-	// 生产者只有一个（RevokeAll，跑在 safety Supervisor Lane / FIFO 90 上），因此
-	// revHead 无需 CAS；消费者是 Control Lane（运行期）与 Stop（Lane 退出后），二者
-	// 由生命周期序列化，不并发。用并行原子数组 + 环而不是单指针槽：
-	//  - 零堆分配：RevokeAll 只做原子写，绝不 new（由 alloc 测试守住）
-	//  - 不丢事件：单槽在撤销 A -> rearm -> 取 B -> 撤销 B快过一次 drain 时会丢 A
-	//  - 不串 epoch：lease 与它的 halt epoch 存在同一格，不会像两个独立槽那样错配
-	revLease   [revokedRingSize]atomic.Pointer[Lease]
-	revEpoch   [revokedRingSize]atomic.Uint64
-	revHead    atomic.Uint64 // 生产者写位置（只由 RevokeAll 递增）
-	revTail    atomic.Uint64 // 消费者读位置（只由 drainRevoked 递增）
-	revDropped atomic.Uint64 // 环满丢弃计数（审计降级，极少见）
+	// RevokeAll 用奇偶 seqlock 包住整次无锁清槽。Acquire 只有在读到相同偶数值时
+	// 才能发布新租约，封住 Safety 正在发布待通知撤租时重获同 Resource 的竞态。
+	revokeSeq   atomic.Uint64
+	safetyFloor atomic.Uint64
+	revPending  atomic.Uint64
+	revDrainMu  sync.Mutex
+
+	observer atomic.Pointer[leaseObserverHolder]
 
 	// laneWG 计 Control Lane 的在跑数；Stop 用它把Lane 已退出排在最终撤租/排空
 	// 之前，避免 Lane 退出后 Stop 又签不掉、或 drain 与 Lane 并发消费环
@@ -77,16 +111,17 @@ type Module struct {
 	fatal    chan error
 }
 
-// revokedRingSize 是被撤租约待记账环的容量（2 的幂）。足够吸收一次停机风暴里的多轮
-// 撤销；满则丢弃并计数。
-const revokedRingSize = 16
-
 // New 构造 control.Module
 //
 // gate 必须是 main.go 里 motiongate.New 出来的同一个实例。safety 与 control
 // 共用它，才能原子观察同一份锁存状态和 epoch
 func New(spawner LaneSpawner, gate *motiongate.Gate, aud audit.Recorder, log *slog.Logger, policy Policy) *Module {
-	return &Module{
+	base := &resourceSlot{resource: ResourceBaseMain}
+	index := &slotIndex{
+		byResource: map[string]*resourceSlot{ResourceBaseMain: base},
+		all:        []*resourceSlot{base},
+	}
+	m := &Module{
 		spawner: spawner,
 		gate:    gate,
 		aud:     aud,
@@ -96,9 +131,28 @@ func New(spawner LaneSpawner, gate *motiongate.Gate, aud audit.Recorder, log *sl
 		stopCh:  make(chan struct{}),
 		fatal:   make(chan error, 1),
 	}
+	m.slots.Store(index)
+	return m
 }
 
 func (m *Module) Name() string { return "control" }
+
+// SetLeaseObserver installs the lifecycle observer used to invalidate data-plane
+// state derived from a ControlLease. Passing nil removes the observer. Replacing
+// it is atomic and is safe before or during Module operation.
+func (m *Module) SetLeaseObserver(observer LeaseObserver) {
+	if observer == nil {
+		m.observer.Store(nil)
+		return
+	}
+	m.observer.Store(&leaseObserverHolder{observer: observer})
+}
+
+func (m *Module) notifyLeaseEnded(l *Lease) {
+	if holder := m.observer.Load(); holder != nil {
+		holder.observer.ControlLeaseEnded(l.Conn, l.Resource)
+	}
+}
 
 // Start 校验 Policy 后起 Control Lane
 //
@@ -143,9 +197,7 @@ func (m *Module) Stop(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.drainRevoked()
-	if l := m.cur.Load(); l != nil {
-		m.dropLocked(l, actionRevoked, ErrShuttingDown)
-	}
+	m.dropMatchingLocked(func(*Lease) bool { return true }, actionRevoked, ErrShuttingDown)
 	return nil
 }
 

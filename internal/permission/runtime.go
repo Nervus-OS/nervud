@@ -157,17 +157,23 @@ func (g *grantStore) set(pkg, perm string, state GrantState, isMotionGroup bool)
 func (g *grantStore) clearPackage(pkg string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	changed := false
-	for k := range g.states {
+	removed := make(map[grantKey]GrantState)
+	for k, state := range g.states {
 		if k.pkg == pkg {
+			removed[k] = state
 			delete(g.states, k)
-			changed = true
 		}
 	}
-	if !changed {
+	if len(removed) == 0 {
 		return nil
 	}
-	return g.persistLocked()
+	if err := g.persistLocked(); err != nil {
+		for key, state := range removed {
+			g.states[key] = state
+		}
+		return err
+	}
+	return nil
 }
 
 // writeFileAtomic 原子写文件（先临时文件再 rename）。permission 的运行期授予状态

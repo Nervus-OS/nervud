@@ -67,7 +67,9 @@ type Instance struct {
 	PackageID   string
 	ComponentID string
 	UID         uint32
+	Generation  uint64
 	Unit        string
+	Type        pkgregistry.ComponentType
 	Runtime     pkgregistry.Runtime
 	Crit        pkgregistry.Criticality
 	LaunchMode  pkgregistry.LaunchMode
@@ -85,13 +87,33 @@ type Instance struct {
 	// done 在 supervisor 完全退出（含停掉 unit）后关闭。ReloadPackage 升级时据此
 	// 确认旧实例已彻底停掉，再起新版本，避免共享 unit 名的起/停竞态
 	done chan struct{}
+
+	// sandboxRestartPending records that a runtime-permission projection must
+	// restart this component after its old mount namespace is gone. It remains
+	// set across a caller timeout so a retry can finish the same transition
+	// instead of treating the stopped instance as unrelated. Protected by
+	// Manager.mu.
+	sandboxRestartPending bool
+}
+
+// ComponentIdentity is the lock-free projection used by IPC during handshake.
+// Returning this value avoids copying Instance's internal sync.Once/channels
+// across the package boundary.
+type ComponentIdentity struct {
+	PackageID   string
+	ComponentID string
+	UID         uint32
+	Generation  uint64
+	Type        pkgregistry.ComponentType
+	State       State
 }
 
 // snapshot 返回 Instance 的只读副本（不含内部 channel），供跨包返回
 func (i *Instance) snapshot() Instance {
 	return Instance{
 		PackageID: i.PackageID, ComponentID: i.ComponentID, UID: i.UID, Unit: i.Unit,
-		Runtime: i.Runtime, Crit: i.Crit, LaunchMode: i.LaunchMode,
+		Generation: i.Generation,
+		Type:       i.Type, Runtime: i.Runtime, Crit: i.Crit, LaunchMode: i.LaunchMode,
 		State: i.State, Handle: i.Handle,
 	}
 }
@@ -111,6 +133,14 @@ type PackageLookup interface {
 	List() []pkgregistry.Entry
 }
 
+// PermissionLookup is the runtime permission view used when projecting
+// user-consent grants into a process sandbox. The package Entry still supplies
+// install-time eligibility; both checks must pass before a shared writable path
+// is mounted.
+type PermissionLookup interface {
+	Allowed(packageID, permission string) bool
+}
+
 // SafetyEscalator 在 Vital 组件熔断时被调用，触发 Safety 锁存。
 // service 不 import safety - main.go 用适配器把 Trip 接到
 // safety.Trip(ReasonSupervisorEscalation)
@@ -125,6 +155,7 @@ type Invariants = authority.Invariants
 type Manager struct {
 	auth   ProcessController
 	pkgs   PackageLookup
+	perms  PermissionLookup
 	safety SafetyEscalator
 	aud    audit.Recorder
 	log    *slog.Logger
@@ -151,13 +182,19 @@ type Manager struct {
 	backoffMin time.Duration
 	backoffMax time.Duration
 
-	stopped bool
+	stopped      bool
+	stopComplete bool
 
 	// stagingPkgID/stagingRoot 是「装包服务额外可写 staging 根」这条例外。
 	// 经 GrantStagingAccess 注入，不注入则为空、无任何组件拿到额外可写路径。
 	// 装配期一次性写入，Start 之后只读，故不受 mu 保护。
 	stagingPkgID string
 	stagingRoot  string
+
+	// sandboxReloadMu serializes package restarts caused by upgrades and runtime
+	// permission projection. It is deliberately independent from mu: both paths
+	// wait for supervisor goroutines, which briefly need mu while exiting.
+	sandboxReloadMu sync.Mutex
 }
 
 // GrantStagingAccess 让 packageID 的组件对 stagingRoot 可写。
@@ -174,13 +211,21 @@ func (m *Manager) GrantStagingAccess(packageID, stagingRoot string) {
 }
 
 // New 构造 Manager
-func New(auth ProcessController, pkgs PackageLookup, safety SafetyEscalator, aud audit.Recorder, log *slog.Logger, inv *Invariants) *Manager {
+func New(
+	auth ProcessController,
+	pkgs PackageLookup,
+	perms PermissionLookup,
+	safety SafetyEscalator,
+	aud audit.Recorder,
+	log *slog.Logger,
+	inv *Invariants,
+) *Manager {
 	if inv == nil {
 		inv = authority.DefaultInvariants()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		auth: auth, pkgs: pkgs, safety: safety, aud: aud, log: log, inv: inv,
+		auth: auth, pkgs: pkgs, perms: perms, safety: safety, aud: aud, log: log, inv: inv,
 		byKey:  make(map[componentKey]*Instance),
 		byUnit: make(map[string]*Instance),
 		ctx:    ctx, cancel: cancel,
@@ -200,6 +245,16 @@ func (m *Manager) Fatal() <-chan error { return m.fatal }
 // 单个组件启动失败只记审计、不阻断整条启动 - 一个坏组件不该拖垮内核启动。真正
 // 阻断启动的是装配级错误（如 auth/pkgs 为 nil），那在 New 之前就该暴露
 func (m *Manager) Start(_ context.Context) error {
+	m.sandboxReloadMu.Lock()
+	defer m.sandboxReloadMu.Unlock()
+
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
+	m.mu.Unlock()
+
 	for _, e := range m.pkgs.List() {
 		for _, c := range e.Manifest.Components {
 			if c.LaunchMode != pkgregistry.LaunchAlwaysOn {
@@ -219,12 +274,22 @@ func (m *Manager) Start(_ context.Context) error {
 // Stop 反序停全部实例：先请求每个实例停（intentional），再 cancel 让 WaitProcess
 // 返回，最后 join 全部 supervisor（ 关闭反序：ipc -> service -> safety）
 func (m *Manager) Stop(ctx context.Context) error {
+	// Publish the terminal state and cancel supervisors before waiting for a
+	// package reload. A reload may itself be waiting for one of those
+	// supervisors, so taking sandboxReloadMu first would deadlock shutdown.
 	m.mu.Lock()
-	if m.stopped {
+	m.stopped = true
+	m.mu.Unlock()
+	m.cancel()
+
+	m.sandboxReloadMu.Lock()
+	defer m.sandboxReloadMu.Unlock()
+
+	m.mu.Lock()
+	if m.stopComplete {
 		m.mu.Unlock()
 		return nil
 	}
-	m.stopped = true
 	insts := make([]*Instance, 0, len(m.byKey))
 	for _, inst := range m.byKey {
 		insts = append(insts, inst)
@@ -247,9 +312,11 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// cancel 让阻塞中的 WaitProcess/退避等待立刻返回，然后 join
-	m.cancel()
+	// cancel 已在等待 lifecycle 锁前发出；这里 join 保证没有 supervisor 被漏掉。
 	m.wg.Wait()
+	m.mu.Lock()
+	m.stopComplete = true
+	m.mu.Unlock()
 	return nil
 }
 
@@ -262,6 +329,25 @@ func (m *Manager) LookupByUnit(unit string) (Instance, bool) {
 		return Instance{}, false
 	}
 	return inst.snapshot(), true
+}
+
+// LookupComponentByUnit returns only the kernel facts needed to authenticate an
+// IPC component. It deliberately excludes supervisor synchronization state.
+func (m *Manager) LookupComponentByUnit(unit string) (ComponentIdentity, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.byUnit[unit]
+	if !ok {
+		return ComponentIdentity{}, false
+	}
+	return ComponentIdentity{
+		PackageID:   inst.PackageID,
+		ComponentID: inst.ComponentID,
+		UID:         inst.UID,
+		Generation:  inst.Generation,
+		Type:        inst.Type,
+		State:       inst.State,
+	}, true
 }
 
 // 启动失败的哨兵错误。
@@ -277,6 +363,8 @@ var (
 	ErrUnknownComponent = errors.New("service: unknown component")
 	// ErrComponentDisabled 组件被停用（nervusctl disable 或 manifest 声明）
 	ErrComponentDisabled = errors.New("service: component disabled")
+	// ErrManagerStopped 表示 service 生命周期已经进入终态，不能再创建 supervisor。
+	ErrManagerStopped = errors.New("service: manager stopped")
 	// ErrComponentFailed 组件已耗尽重启预算被熔断。
 	//
 	// 【EnsureStarted 目前不会返回它】：熔断只停止自动重启，显式请求仍允许
@@ -303,8 +391,14 @@ func (m *Manager) IsRunning(pkg, comp string) bool {
 // 两个调用方：endpoint.Resolve 解析到 on-demand 提供者时，以及 ipc 的
 // LaunchComponent（Launcher 点开一个 App）。
 func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
+	m.sandboxReloadMu.Lock()
+	defer m.sandboxReloadMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopped {
+		return ErrManagerStopped
+	}
 
 	key := componentKey{pkg, comp}
 	if inst, ok := m.byKey[key]; ok {
@@ -340,15 +434,21 @@ func (m *Manager) EnsureStarted(_ context.Context, pkg, comp string) error {
 // always-on 组件。先停后起是必须的 - 组件 unit 名与版本无关，旧 unit 未停就起新版本
 // 会在同一个 unit 名上发生起/停竞态（ 升级修复）
 func (m *Manager) ReloadPackage(ctx context.Context, pkg string) error {
-	// 1. 摘下并请求停掉该包全部旧实例
+	m.sandboxReloadMu.Lock()
+	defer m.sandboxReloadMu.Unlock()
+
+	// 1. 请求停掉该包全部旧实例。映射必须保留到全部 done；若调用方超时，
+	// EnsureStarted 会继续看到旧实例而不会在同名 unit 上抢跑。
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
 	var olds []*Instance
 	for key, inst := range m.byKey {
 		if key.pkg == pkg {
 			olds = append(olds, inst)
 			m.requestStop(inst)
-			delete(m.byKey, key)
-			delete(m.byUnit, inst.Unit)
 		}
 	}
 	m.mu.Unlock()
@@ -360,15 +460,24 @@ func (m *Manager) ReloadPackage(ctx context.Context, pkg string) error {
 		case <-inst.done:
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-m.ctx.Done():
+			return ErrManagerStopped
 		}
 	}
 
-	// 3. 用新版本重起 always-on 组件（on-demand/manual 等 Resolve/显式请求再拉起）
+	// 3. 只有全部旧 supervisor 退出后才摘映射并用新版本重起 always-on 组件
+	// （on-demand/manual 等 Resolve/显式请求再拉起）。
 	e, ok := m.pkgs.Lookup(pkg)
+	m.mu.Lock()
+	m.detachInstancesLocked(olds)
 	if !ok {
+		m.mu.Unlock()
 		return nil // 升级后又被卸载：无需重起
 	}
-	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
 	for _, c := range e.Manifest.Components {
 		if c.LaunchMode == pkgregistry.LaunchAlwaysOn && !e.ComponentDisabled(c.ID) {
 			m.startLocked(e, c)
@@ -378,22 +487,163 @@ func (m *Manager) ReloadPackage(ctx context.Context, pkg string) error {
 	return nil
 }
 
+// RevokeInstallGrant records an immediate stop intent for processes whose
+// install-time sandbox authority was removed. It intentionally performs no
+// package lookup, systemd call, or wait because permission.Registry.Replace may
+// invoke it while pkgregistry holds its transaction mutex. Each supervisor owns
+// the eventual StopProcess call, including the window where process startup has
+// not returned a handle yet.
+func (m *Manager) RevokeInstallGrant(packageID, permission string) {
+	if permission != permStorageUser {
+		return
+	}
+	m.mu.Lock()
+	for key, inst := range m.byKey {
+		if key.pkg == packageID && instanceMayBeRunning(inst.State) {
+			m.requestStop(inst)
+		}
+	}
+	m.mu.Unlock()
+}
+
+// ProjectRuntimePermission rebuilds active component sandboxes after a
+// USER_CONSENT decision changes. Runtime state has already been committed by
+// permission.Registry before this method is called, so every replacement
+// process observes the new Allowed result while building ReadWritePaths.
+//
+// This hook is intentionally not used by permission.Registry.Replace. Package
+// projection can run while pkgregistry holds its transaction mutex; waiting for
+// supervisors or looking the package up from that callback would introduce a
+// lock inversion and could restart a package during rollback or uninstall.
+func (m *Manager) ProjectRuntimePermission(packageID, permission string, allowed bool) error {
+	if permission != permStorageUser {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), startStopTimeout)
+	defer cancel()
+	err := m.restartActivePackage(ctx, packageID)
+	if m.aud != nil {
+		m.aud.Record(context.Background(), audit.Event{
+			Action:  "service.ProjectRuntimePermission",
+			Subject: packageID,
+			Denied:  err != nil,
+			Err:     err,
+			Detail:  fmt.Sprintf("%s allowed=%t", permission, allowed),
+		})
+	}
+	return err
+}
+
+// restartActivePackage stops every live component of one package, waits until
+// its transient unit (and therefore its mount namespace) is gone, then starts
+// the same component set against the current package and permission snapshots.
+func (m *Manager) restartActivePackage(ctx context.Context, packageID string) error {
+	m.sandboxReloadMu.Lock()
+	defer m.sandboxReloadMu.Unlock()
+
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
+	olds := make([]*Instance, 0)
+	componentIDs := make([]string, 0)
+	for key, inst := range m.byKey {
+		if key.pkg != packageID ||
+			(!instanceMayBeRunning(inst.State) && !inst.sandboxRestartPending) {
+			continue
+		}
+		inst.sandboxRestartPending = true
+		olds = append(olds, inst)
+		componentIDs = append(componentIDs, key.comp)
+		m.requestStop(inst)
+	}
+	m.mu.Unlock()
+
+	for _, inst := range olds {
+		select {
+		case <-inst.done:
+		case <-ctx.Done():
+			return fmt.Errorf("service: project runtime permission for %q: %w", packageID, ctx.Err())
+		case <-m.ctx.Done():
+			return fmt.Errorf("service: project runtime permission for %q: %w", packageID, ErrManagerStopped)
+		}
+	}
+	if len(componentIDs) == 0 {
+		return nil
+	}
+
+	e, ok := m.pkgs.Lookup(packageID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.detachInstancesLocked(olds)
+	if !ok {
+		return nil
+	}
+	if m.stopped {
+		return ErrManagerStopped
+	}
+	for _, componentID := range componentIDs {
+		component, exists := e.Manifest.Component(componentID)
+		if !exists || e.ComponentDisabled(componentID) {
+			continue
+		}
+		m.startLocked(e, component)
+	}
+	return nil
+}
+
+func instanceMayBeRunning(state State) bool {
+	return state == StateStarting || state == StateRunning || state == StateStopping
+}
+
+// detachInstancesLocked removes only the exact completed instances supplied by
+// the caller. The identity check makes this safe against future code that may
+// install a replacement between collection and cleanup. Caller must hold m.mu.
+func (m *Manager) detachInstancesLocked(instances []*Instance) {
+	for _, inst := range instances {
+		key := componentKey{pkg: inst.PackageID, comp: inst.ComponentID}
+		if m.byKey[key] == inst {
+			delete(m.byKey, key)
+		}
+		if m.byUnit[inst.Unit] == inst {
+			delete(m.byUnit, inst.Unit)
+		}
+		inst.sandboxRestartPending = false
+	}
+}
+
 // StopComponent 停止一个组件实例（不改变其 enabled 状态；SetEnabled 才动持久停用）
 func (m *Manager) StopComponent(ctx context.Context, pkg, comp string) error {
+	m.sandboxReloadMu.Lock()
+	defer m.sandboxReloadMu.Unlock()
+
 	m.mu.Lock()
 	inst, ok := m.byKey[componentKey{pkg, comp}]
 	var h authority.ProcessHandle
 	if ok {
+		// An explicit lifecycle stop (disable/uninstall) supersedes a pending
+		// permission-driven sandbox restart.
+		inst.sandboxRestartPending = false
+		m.requestStop(inst)
 		h = inst.Handle
 	}
 	m.mu.Unlock()
 	if !ok {
 		return nil // 未在运行，幂等
 	}
-	m.requestStop(inst)
+	var stopErr error
 	if h.Unit() != "" {
-		return m.auth.StopProcess(ctx, authority.SubjectKernel(),
+		stopErr = m.auth.StopProcess(ctx, authority.SubjectKernel(),
 			authority.StopProcessRequest{Handle: h})
 	}
-	return nil
+	select {
+	case <-inst.done:
+		return stopErr
+	case <-ctx.Done():
+		if stopErr != nil {
+			return errors.Join(stopErr, ctx.Err())
+		}
+		return ctx.Err()
+	}
 }

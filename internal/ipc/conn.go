@@ -18,16 +18,17 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/pkgregistry"
+	"github.com/nervus-os/nervud/internal/protocheck"
 )
 
 // nervud 实现的控制面协议版本
@@ -58,9 +59,9 @@ var (
 	// 不是违规，是能力缺口
 	errUnsupportedBody = errors.New("ipc: body not implemented in this build")
 
-	// errZeroRequestID：Request 带保留的 request_id 0（0 永久保留，
-	// 合法请求从 1 起）。协议违规
-	errZeroRequestID = errors.New("ipc: Request uses reserved request_id 0")
+	// errZeroRequestID：带关联 ID 的请求使用了保留值 0。
+	// 协议明确要求 Request、AcquireControl 和 LaunchComponent 从 1 起。
+	errZeroRequestID = errors.New("ipc: request uses reserved request_id 0")
 
 	// errDispatchResultMismatch：DispatchResult 携带的 route_id 存在，但送回
 	// 结果的连接不是登记的目标连接。没有合法解释 - 没有 Service 会被告知一个
@@ -92,6 +93,9 @@ type conn struct {
 	// caller 是连接建立时解析出的可信身份。握手成功后 ComponentID 被回填
 	// （nervud 验证声明后确认的 Component，而不是相信自报值）
 	caller identity.Caller
+	// componentType comes from service.Manager's verified unit mapping, never
+	// from Hello. It gates Service-only protocol directions.
+	componentType pkgregistry.ComponentType
 
 	phase phase
 
@@ -108,9 +112,11 @@ type conn struct {
 	// 真正停止碰 socket 之后，外层才能安全关闭底层连接
 	writerDone chan struct{}
 
-	// inFlight 是本连接当前挂起的 Dispatch 转发数，供 handleRequest 强制
-	// ConnectionLimits.max_inflight_requests（已下发但此前从未强制）
-	inFlight atomic.Int32
+	// requestMu guards the unified in-flight request tracker. Dispatch and
+	// builtin calls both reserve one entry and their canonical payload bytes.
+	requestMu    sync.Mutex
+	requests     map[uint64]int
+	requestBytes int64
 
 	// connID 是本连接在 control 模块里的标识。control 的 ConnID 是 uint64，
 	// 而 endpoint 那边用 ConnHandle(interface{}) 直接吃 *conn 指针——两套是因为
@@ -127,34 +133,75 @@ type conn struct {
 	leaseMu   sync.Mutex
 	nextLease uint64
 	leases    map[uint64]control.ID
+	// leaseHandles preserves the wire handle across an idempotent renewal.
+	// control returns the same internal ID for that case, and the protocol
+	// requires lease_id to remain stable until the lease ends.
+	leaseHandles map[control.ID]uint64
 }
 
 func newConn(s *Server, c net.Conn, caller identity.Caller, log *slog.Logger) *conn {
 	return &conn{
-		s:          s,
-		c:          c,
-		w:          bufio.NewWriter(c),
-		log:        log,
-		caller:     caller,
-		phase:      phaseHandshake,
-		negMajor:   protocolMajor,
-		negMinor:   protocolMinorMax,
-		outbox:     newOutboundQueue(maxOutboundQueueBytes),
-		writerDone: make(chan struct{}),
-		connID:     control.ConnID(s.nextConnID.Add(1)),
-		leases:     make(map[uint64]control.ID),
+		s:            s,
+		c:            c,
+		w:            bufio.NewWriter(c),
+		log:          log,
+		caller:       caller,
+		phase:        phaseHandshake,
+		negMajor:     protocolMajor,
+		negMinor:     protocolMinorMax,
+		outbox:       newOutboundQueue(maxOutboundQueueBytes),
+		writerDone:   make(chan struct{}),
+		connID:       control.ConnID(s.nextConnID.Add(1)),
+		leases:       make(map[uint64]control.ID),
+		leaseHandles: make(map[control.ID]uint64),
+		requests:     make(map[uint64]int),
 	}
+}
+
+func (co *conn) reserveRequest(requestID uint64, payloadBytes int) ipcv1.StatusCode {
+	co.requestMu.Lock()
+	defer co.requestMu.Unlock()
+	if _, exists := co.requests[requestID]; exists {
+		return ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT
+	}
+	if len(co.requests) >= maxInflightRequests ||
+		co.requestBytes+int64(payloadBytes) > maxInflightPayloadBytes {
+		return ipcv1.StatusCode_STATUS_CODE_RESOURCE_EXHAUSTED
+	}
+	co.requests[requestID] = payloadBytes
+	co.requestBytes += int64(payloadBytes)
+	return ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED
+}
+
+func (co *conn) releaseRequest(requestID uint64) {
+	co.requestMu.Lock()
+	if payloadBytes, ok := co.requests[requestID]; ok {
+		delete(co.requests, requestID)
+		co.requestBytes -= int64(payloadBytes)
+	}
+	co.requestMu.Unlock()
 }
 
 // leaseConnID 返回本连接在 control 模块里的标识。
 func (co *conn) leaseConnID() control.ConnID { return co.connID }
 
-// registerLease 给一个刚签发的租约分配本连接作用域的对外句柄。
+// registerLease 给一个刚签发的租约分配本连接作用域的对外句柄。同一内部租约的
+// 幂等续期复用原句柄；不同租约即使生命周期不重叠也绝不复用旧数字。
 func (co *conn) registerLease(l control.Lease) uint64 {
 	co.leaseMu.Lock()
 	defer co.leaseMu.Unlock()
+	if handle, ok := co.leaseHandles[l.ID]; ok {
+		return handle
+	}
+	if co.leases == nil {
+		co.leases = make(map[uint64]control.ID)
+	}
+	if co.leaseHandles == nil {
+		co.leaseHandles = make(map[control.ID]uint64)
+	}
 	co.nextLease++
 	co.leases[co.nextLease] = l.ID
+	co.leaseHandles[l.ID] = co.nextLease
 	return co.nextLease
 }
 
@@ -173,6 +220,9 @@ func (co *conn) lookupLease(handle uint64) (control.ID, bool) {
 // 接收方没有任何办法分辨。与 request_id 不回绕是同一条理由。
 func (co *conn) forgetLease(handle uint64) {
 	co.leaseMu.Lock()
+	if id, ok := co.leases[handle]; ok && co.leaseHandles[id] == handle {
+		delete(co.leaseHandles, id)
+	}
 	delete(co.leases, handle)
 	co.leaseMu.Unlock()
 }
@@ -281,7 +331,7 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 	// 核对通过才完成握手。co.c 底层一定是 *net.UnixConn
 	// （accept 自 UDS listener），用于 SO_PEERPIDFD
 	uc, _ := co.c.(*net.UnixConn)
-	componentID, err := co.s.verifyComponent(uc, co.caller, hello.GetDeclaredComponentId())
+	instance, err := co.s.verifyComponent(uc, co.caller, hello.GetDeclaredComponentId())
 	if err != nil {
 		// 两类失败都回 UNAUTHENTICATED 关闭，但审计区分：
 		//  - errComponentMismatch（核对到不一致）：潜在伪装，审计为违规
@@ -299,7 +349,8 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 		return false
 	}
 
-	co.caller.ComponentID = componentID
+	co.caller.ComponentID = instance.ComponentID
+	co.componentType = instance.Type
 	co.negMajor, co.negMinor = major, minor
 
 	// HelloAck 成功：回填核对后的 package_id/component_id（这不是授予
@@ -310,7 +361,7 @@ func (co *conn) handleHandshake(env *ipcv1.Envelope) bool {
 			ProtocolMajor: major,
 			ProtocolMinor: minor,
 			PackageId:     co.caller.PackageID,
-			ComponentId:   componentID,
+			ComponentId:   instance.ComponentID,
 			Limits:        co.s.connectionLimits(),
 		}},
 	}}}
@@ -354,6 +405,11 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		return co.handleRequest(body.Request)
 
 	case *ipcv1.Envelope_DispatchResult:
+		if co.componentType != pkgregistry.ComponentService {
+			co.log.Warn("ipc: non-service sent DispatchResult, closing")
+			co.s.auditViolation(co.caller, errUnexpectedBody)
+			return false
+		}
 		return co.handleDispatchResult(body.DispatchResult)
 
 	case *ipcv1.Envelope_ResolveEndpoint:
@@ -448,6 +504,17 @@ func (co *conn) handleRegisterEndpoint(env *ipcv1.Envelope, req *ipcv1.RegisterE
 	if co.s.endpoints == nil {
 		return co.unsupported(env)
 	}
+	if co.componentType != pkgregistry.ComponentService {
+		result := &ipcv1.RegisterEndpointResult{
+			RequestId: req.GetRequestId(),
+			Outcome: &ipcv1.RegisterEndpointResult_Failure{Failure: &ipcv1.Failure{
+				Code: ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+			}},
+		}
+		return co.writeResultEnvelope(&ipcv1.Envelope{
+			Body: &ipcv1.Envelope_RegisterEndpointResult{RegisterEndpointResult: result},
+		})
+	}
 	result := co.s.endpoints.RegisterEndpoint(co, co.caller, req)
 	return co.writeResultEnvelope(&ipcv1.Envelope{
 		Body: &ipcv1.Envelope_RegisterEndpointResult{RegisterEndpointResult: result},
@@ -459,7 +526,21 @@ func (co *conn) handleUnregisterEndpoint(env *ipcv1.Envelope, req *ipcv1.Unregis
 	if co.s.endpoints == nil {
 		return co.unsupported(env)
 	}
+	if co.componentType != pkgregistry.ComponentService {
+		result := &ipcv1.UnregisterEndpointResult{
+			RequestId: req.GetRequestId(),
+			Outcome: &ipcv1.UnregisterEndpointResult_Failure{Failure: &ipcv1.Failure{
+				Code: ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+			}},
+		}
+		return co.writeResultEnvelope(&ipcv1.Envelope{
+			Body: &ipcv1.Envelope_UnregisterEndpointResult{UnregisterEndpointResult: result},
+		})
+	}
 	result := co.s.endpoints.UnregisterEndpoint(co, req)
+	if result.GetSuccess() != nil {
+		co.s.revokeEndpoint(co, req.GetEndpointId(), 0)
+	}
 	return co.writeResultEnvelope(&ipcv1.Envelope{
 		Body: &ipcv1.Envelope_UnregisterEndpointResult{UnregisterEndpointResult: result},
 	})
@@ -495,9 +576,47 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
 	}
 
-	route, rerr := co.s.endpoints.Route(co, req.GetEndpointId())
+	// Sample the revocation epoch before consulting endpoint/catalog authority.
+	// Publishing the route later is conditional on this value remaining stable.
+	dispatchEpoch := co.s.dispatch.snapshotEpoch()
+	route, rerr := co.s.endpoints.Route(co, req.GetEndpointId(), req.GetMethodId())
 	if rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), rerr.Code)))
+	}
+	if err := protocheck.GateSupport(route.Method.Meta); err != nil {
+		co.s.recordMethodGateFailure(co.caller, route, req.GetMethodId(), err)
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), methodGateCode(err))))
+	}
+	payload, err := protocheck.ValidateRequest(
+		route.Method.Meta, route.Method.Request, req.GetPayload())
+	if err != nil {
+		co.s.recordMethodGateFailure(co.caller, route, req.GetMethodId(), err)
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), requestValidationCode(err))))
+	}
+	if route.Method.Meta.GetRequiresControlLease() {
+		if route.ResourceHandle == "" || co.s.leases == nil {
+			return co.enqueue(responseEnvelope(failureResponse(
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
+		}
+		if _, err := co.s.leases.CheckResource(
+			co.connID, route.ResourceHandle, route.ResourceGeneration,
+		); err != nil {
+			return co.enqueue(responseEnvelope(failureResponse(
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
+		}
+	}
+	if code := co.reserveRequest(req.GetRequestId(), len(payload)); code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), code)))
+	}
+
+	deadline := time.Now().Add(methodTimeout(req.GetTimeoutMs(), route.Method.Meta))
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		co.releaseRequest(req.GetRequestId())
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED)))
 	}
 
 	// 内建 endpoint：目标是 nervud 自己，就地执行，不走 Dispatch。
@@ -505,53 +624,50 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 	// 【必须先判 Builtin 再判 TargetConn】。内建没有连接，TargetConn 恒为 nil，
 	// 顺序反了会把它当成「路由成功但没有转发目标」直接回 UNAVAILABLE。
 	if route.Builtin != nil {
-		return co.handleBuiltinRequest(req, route.Builtin)
+		return co.handleBuiltinRequest(req, route, payload, deadline)
 	}
 
 	target, ok := route.TargetConn.(*conn)
 	if !ok || target == nil {
 		// Route 报告成功，但没有可转发的真实连接（装配缺口，或测试替身故意
 		// 留空）。没有变通方案，按不可用处理，而不是假装转发成功
+		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
 	}
 
-	// 准入：本连接自己的 in-flight 预算（的 ConnectionLimits.
-	// max_inflight_requests 此前只下发给客户端参考，从未被服务端强制）
-	if co.inFlight.Add(1) > maxInflightRequests {
-		co.inFlight.Add(-1)
+	routeID, publishStatus := co.s.dispatch.publishDispatchAtEpoch(
+		dispatchEpoch,
+		co,
+		req.GetRequestId(),
+		target,
+		deadline,
+		route,
+		req.GetMethodId(),
+		remainingMillis(remaining),
+		payload,
+		callerContext(co.caller, route.RequiredPermissions),
+	)
+	switch publishStatus {
+	case dispatchPublishEpochChanged:
+		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
-			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_RESOURCE_EXHAUSTED)))
-	}
-
-	deadline := time.Now().Add(clampTimeout(req.GetTimeoutMs()))
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		co.inFlight.Add(-1)
-		return co.enqueue(responseEnvelope(failureResponse(
-			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED)))
-	}
-
-	routeID := co.s.dispatch.create(co, req.GetRequestId(), target, deadline)
-	dispatch := &ipcv1.Envelope{Body: &ipcv1.Envelope_Dispatch{Dispatch: &ipcv1.Dispatch{
-		RouteId:     routeID,
-		EndpointId:  route.ServiceEndpointID,
-		MethodId:    req.GetMethodId(),
-		RemainingMs: uint32(remaining.Milliseconds()),
-		Payload:     req.GetPayload(),
-		Caller:      callerContext(co.caller),
-	}}}
-
-	if !target.enqueue(dispatch) {
-		// 目标连接已经废了（已关闭/刚被判定为慢消费者）：不等 ConnClosed 的
-		// 时序，当场完成这条 route，避免白等一个不会再回应的 Response
-		if e, ok := co.s.dispatch.completeAny(routeID); ok {
-			return resolveRoute(e, failureResponse(e.sourceRequestID, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE))
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
+	case dispatchPublishTargetUnavailable:
+		// The table already removed the unpublished route and closed its token.
+		// Do connection teardown only after releasing dispatch.mu.
+		if target.outbox != nil {
+			target.closeAsSlowConsumer()
 		}
-		return true // 理论上不会发生：routeID 刚创建，唯一删除者只能是上面这行
+		co.s.transfer.CloseRoute(routeID)
+		co.releaseRequest(req.GetRequestId())
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
+	case dispatchPublishOK:
+		return true
+	default:
+		panic("ipc: unknown dispatch publish status")
 	}
-
-	return true
 }
 
 // handleDispatchResult 处理 Service 送回的 DispatchResult：查表
@@ -560,7 +676,7 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 // 存活；目标错位（route_id 存在但送回结果的连接并非登记的目标连接）没有合法
 // 解释 - 按协议违规关闭
 func (co *conn) handleDispatchResult(dr *ipcv1.DispatchResult) bool {
-	e, status := co.s.dispatch.complete(dr.GetRouteId(), co)
+	e, status := co.s.dispatch.complete(dr.GetRouteId(), co, time.Now())
 	switch status {
 	case completeMismatch:
 		co.log.Warn("ipc: DispatchResult route_id targets a different connection, closing",
@@ -570,48 +686,65 @@ func (co *conn) handleDispatchResult(dr *ipcv1.DispatchResult) bool {
 	case completeNotFound:
 		co.s.auditDispatchRace(co.caller.String(), dr.GetRouteId())
 		return true
+	case completeExpired:
+		co.s.transfer.CloseRoute(e.routeID)
+		return resolveRoute(e, failureResponse(
+			e.sourceRequestID, ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED))
 	}
 
-	resp, ok := dispatchResultToResponse(e.sourceRequestID, dr)
-	if !ok {
-		// 畸形 outcome（既非 Success 也非 Failure、或取值域非法）：违反 Provider
-		// Contract。对调用者归一化为 INTERNAL（dispatchResultToResponse 已经
-		// 构造好），完整原因只进审计
-		co.s.auditor.Record(context.Background(), audit.Event{
-			Action:  "ipc.MalformedDispatchResult",
-			Subject: co.caller.String(),
-			Denied:  true,
-		})
+	resp, valid := co.s.validateDispatchResult(e, dr)
+	sourceOK := resolveRoute(e, resp)
+	if !valid {
+		co.log.Warn("ipc: Provider violated method result contract, closing",
+			"route_id", dr.GetRouteId(),
+			"interface", e.route.InterfaceID,
+			"method_id", e.methodID)
+		return false
 	}
-	return resolveRoute(e, resp)
+	return sourceOK
 }
 
-// clampTimeout 是收紧规则的 v1 落地：0 表示方法默认值（而非
-// 无限），结果被夹进 [1ms, maxMethodTimeoutMs]。真正的按方法配置留给未来的
-// Method Registry（B2 范畴），这里用两个已经存在的全局常量代替
-func clampTimeout(ms uint32) time.Duration {
-	if ms == 0 {
-		ms = defaultMethodTimeoutMs
+// methodTimeout applies the method-declared default and maximum, then the
+// connection-wide kernel ceiling. Zero never means unlimited.
+func methodTimeout(requested uint32, meta *ipcv1.MethodMeta) time.Duration {
+	defaultMS := uint32(defaultMethodTimeoutMs)
+	maxMS := uint32(maxMethodTimeoutMs)
+	if meta != nil {
+		if meta.GetDefaultTimeoutMs() != 0 {
+			defaultMS = meta.GetDefaultTimeoutMs()
+		}
+		if declared := meta.GetMaxTimeoutMs(); declared != 0 && declared < maxMS {
+			maxMS = declared
+		}
 	}
-	if ms > maxMethodTimeoutMs {
-		ms = maxMethodTimeoutMs
+	if defaultMS > maxMS {
+		defaultMS = maxMS
 	}
-	return time.Duration(ms) * time.Millisecond
+	if requested == 0 {
+		requested = defaultMS
+	}
+	if requested > maxMS {
+		requested = maxMS
+	}
+	if requested == 0 {
+		requested = 1
+	}
+	return time.Duration(requested) * time.Millisecond
 }
 
 // callerContext 把内核已经核实过的 identity.Caller 投影成可以外传给 Service 的
-// CallerContext（Service 可以读，但不能据此绕过 nervud 已经生效的
-// Policy，更不能自行创造身份或权限裁决）。GrantedPermissions 留空：
-// internal/permission.Registry 目前只有 Allowed(pkg, perm) 点查询，没有列出
-// 某包全部已授权限的方法。GrantedPermissions 因此留空，避免为参考字段扩大权限接口
-func callerContext(c identity.Caller) *ipcv1.CallerContext {
+// CallerContext（Service 可以读，但不能据此绕过 nervud 已经生效的 Policy，更不能
+// 自行创造身份或权限裁决）。granted 只包含 endpoint.Route 在同一个 catalog snapshot
+// 上为【本次调用】逐项核验过的权限，不暴露这个 Package 的完整授权集合。
+func callerContext(c identity.Caller, granted []string) *ipcv1.CallerContext {
 	return &ipcv1.CallerContext{
-		PackageId:    c.PackageID,
-		ComponentId:  c.ComponentID,
-		Uid:          c.UID,
-		Gid:          c.GID,
-		Pid:          c.PID,
-		TrustProfile: trustProfileWire(c.Trust),
+		PackageId:          c.PackageID,
+		ComponentId:        c.ComponentID,
+		Uid:                c.UID,
+		Gid:                c.GID,
+		Pid:                c.PID,
+		TrustProfile:       trustProfileWire(c.Trust),
+		GrantedPermissions: append([]string(nil), granted...),
 	}
 }
 
@@ -629,38 +762,6 @@ func trustProfileWire(t identity.TrustProfile) ipcv1.TrustProfile {
 	default:
 		return ipcv1.TrustProfile_TRUST_PROFILE_UNSPECIFIED
 	}
-}
-
-// dispatchResultToResponse 把 DispatchResult 的 outcome 转成对调用者的
-// Response：只转发类型安全的 Code，绝不透传 Service 的
-// ErrorDetail/PublicMessage，因为没有权威 method schema 可供解码校验。
-// outcome 缺失、二选一都未设置、或 code 落在该分支不允许的取值域
-// （Success 要求 code 属于 {OK, ACCEPTED}，Failure 要求 code 不属于 {UNSPECIFIED, OK,
-// ACCEPTED}，均为 status.proto 自带的不变量），一律归一化为 INTERNAL；第二个
-// 返回值为 false 时调用方负责记完整原因的审计
-func dispatchResultToResponse(reqID uint64, dr *ipcv1.DispatchResult) (*ipcv1.Response, bool) {
-	if s := dr.GetSuccess(); s != nil {
-		switch s.GetCode() {
-		case ipcv1.StatusCode_STATUS_CODE_OK, ipcv1.StatusCode_STATUS_CODE_ACCEPTED:
-			return &ipcv1.Response{RequestId: reqID, Outcome: &ipcv1.Response_Success{
-				Success: &ipcv1.Success{Code: s.GetCode(), Payload: s.GetPayload()},
-			}}, true
-		}
-		return internalResponse(reqID), false
-	}
-	if f := dr.GetFailure(); f != nil {
-		switch f.GetCode() {
-		case ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED,
-			ipcv1.StatusCode_STATUS_CODE_OK,
-			ipcv1.StatusCode_STATUS_CODE_ACCEPTED:
-			return internalResponse(reqID), false
-		default:
-			return &ipcv1.Response{RequestId: reqID, Outcome: &ipcv1.Response_Failure{
-				Failure: &ipcv1.Failure{Code: f.GetCode()},
-			}}, true
-		}
-	}
-	return internalResponse(reqID), false
 }
 
 func internalResponse(reqID uint64) *ipcv1.Response {
@@ -760,40 +861,56 @@ func bodyName(env *ipcv1.Envelope) string {
 
 // handleBuiltinRequest 就地执行一次内建 endpoint 调用并回 Response。
 //
-// 与转发路径的三处不同：
+// 与转发路径的两处不同：
 //
 //  1. 不占 route 表。内建没有「等待对端回结果」这回事——执行完就有结果，
 //     不存在迟到、重复或撤销后到达的 DispatchResult。
-//  2. 不占 in-flight 预算。那个预算是为了限制【本连接压在别的进程上】的
-//     未完成工作量；内建跑在自己的 goroutine 里，由 deadline 约束。
-//  3. panic 必须就地拦住。内建 handler 跑在【内核进程】里，一个 panic 会带走
+//  2. panic 必须就地拦住。内建 handler 跑在【内核进程】里，一个 panic 会带走
 //     整个 nervud —— 那比任何一次调用失败都严重。转发路径没有这个风险，
 //     因为 Provider 在别的进程里。
-func (co *conn) handleBuiltinRequest(req *ipcv1.Request, h endpoint.BuiltinHandler) bool {
-	deadline := time.Now().Add(clampTimeout(req.GetTimeoutMs()))
-	if time.Until(deadline) <= 0 {
-		return co.enqueue(responseEnvelope(failureResponse(
-			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED)))
-	}
-
+func (co *conn) handleBuiltinRequest(
+	req *ipcv1.Request,
+	route endpoint.RouteInfo,
+	payload []byte,
+	deadline time.Time,
+) bool {
 	// 起 goroutine 而不是同步执行：读循环不能被一个慢 handler 卡住，否则这条
 	// 连接上后续的 Ping/Cancel 全都读不到，客户端会误判为失联。
 	go func() {
+		defer co.releaseRequest(req.GetRequestId())
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 
-		payload, code := co.s.callBuiltin(ctx, h, co.caller, req.GetMethodId(), req.GetPayload())
+		resultCh := make(chan endpoint.BuiltinResult, 1)
+		go func() {
+			resultCh <- co.s.callBuiltin(endpoint.BuiltinCall{
+				Context:  ctx,
+				Conn:     co,
+				Caller:   co.caller,
+				MethodID: req.GetMethodId(),
+				Payload:  payload,
+			}, route.Builtin)
+		}()
 
-		var resp *ipcv1.Response
-		if code == ipcv1.StatusCode_STATUS_CODE_OK || code == ipcv1.StatusCode_STATUS_CODE_ACCEPTED {
-			resp = &ipcv1.Response{
-				RequestId: req.GetRequestId(),
-				Outcome: &ipcv1.Response_Success{Success: &ipcv1.Success{
-					Code: code, Payload: payload,
-				}},
-			}
-		} else {
-			resp = failureResponse(req.GetRequestId(), code)
+		var result endpoint.BuiltinResult
+		select {
+		case result = <-resultCh:
+		case <-ctx.Done():
+			co.enqueue(responseEnvelope(failureResponse(
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED)))
+			return
+		}
+
+		resp, valid := co.s.validateBuiltinResult(req.GetRequestId(), route, result)
+		if !valid {
+			co.s.auditor.Record(context.Background(), audit.Event{
+				Action:  "ipc.BuiltinContractViolation",
+				Subject: co.caller.String(),
+				Denied:  true,
+				Detail: fmt.Sprintf(
+					"interface=%s major=%d method_id=%d",
+					route.InterfaceID, route.InterfaceMajor, req.GetMethodId()),
+			})
 		}
 		co.enqueue(responseEnvelope(resp))
 	}()
@@ -806,15 +923,30 @@ func (co *conn) handleBuiltinRequest(req *ipcv1.Request, h endpoint.BuiltinHandl
 // 连接、在途调用、以及 Safety 监督链一起消失。相比之下让这一次调用失败是
 // 明显更小的代价。
 func (s *Server) callBuiltin(
-	ctx context.Context, h endpoint.BuiltinHandler, caller identity.Caller,
-	methodID uint32, payload []byte,
-) (out []byte, code ipcv1.StatusCode) {
+	call endpoint.BuiltinCall,
+	handler endpoint.BuiltinHandler,
+) (result endpoint.BuiltinResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.log.Error("ipc: builtin handler panicked",
-				"method_id", methodID, "caller", caller.PackageID, "panic", r)
-			out, code = nil, ipcv1.StatusCode_STATUS_CODE_INTERNAL
+				"method_id", call.MethodID,
+				"caller", call.Caller.PackageID,
+				"panic", r)
+			result = endpoint.BuiltinResult{
+				Code: ipcv1.StatusCode_STATUS_CODE_INTERNAL,
+			}
 		}
 	}()
-	return h(ctx, caller, methodID, payload)
+	return handler(call)
+}
+
+func remainingMillis(remaining time.Duration) uint32 {
+	if remaining <= 0 {
+		return 0
+	}
+	ms := (remaining + time.Millisecond - 1) / time.Millisecond
+	if ms > time.Duration(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(ms)
 }

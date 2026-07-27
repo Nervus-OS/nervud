@@ -166,7 +166,7 @@ func TestRevokeAllClearsSlotWithoutBump(t *testing.T) {
 	if got := g.Epoch(); got != ep {
 		t.Fatalf("epoch = %d after RevokeAll, want unchanged %d", got, ep)
 	}
-	if m.cur.Load() != nil {
+	if m.current(ResourceBaseMain) != nil {
 		t.Fatal("RevokeAll should have cleared the lease slot")
 	}
 

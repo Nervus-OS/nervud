@@ -7,17 +7,23 @@ import (
 	"testing"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	basemotionv1 "github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	ipcregistry "github.com/nervus-os/nervus-ipc/registry"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-func unmarshalDetail(b []byte, out proto.Message) error {
-	return proto.Unmarshal(b, out)
-}
+const (
+	testProviderPackage   = "com.example.motion"
+	testProviderComponent = "main"
+	testCallerPackage     = "com.example.caller"
+	testMotionPermission  = "perm.motion.control"
+)
 
 var errComponentDisabledStub = errors.New("component disabled (stub)")
 
@@ -27,9 +33,9 @@ type fakePkgs struct {
 }
 
 func newFakePkgs(entries ...pkgregistry.Entry) *fakePkgs {
-	f := &fakePkgs{entries: map[string]pkgregistry.Entry{}}
-	for _, e := range entries {
-		f.entries[e.Manifest.PackageID] = e
+	f := &fakePkgs{entries: make(map[string]pkgregistry.Entry)}
+	for _, entry := range entries {
+		f.entries[entry.Manifest.PackageID] = entry
 	}
 	return f
 }
@@ -37,16 +43,16 @@ func newFakePkgs(entries ...pkgregistry.Entry) *fakePkgs {
 func (f *fakePkgs) Lookup(id string) (pkgregistry.Entry, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	e, ok := f.entries[id]
-	return e, ok
+	entry, ok := f.entries[id]
+	return entry, ok
 }
 
 func (f *fakePkgs) List() []pkgregistry.Entry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]pkgregistry.Entry, 0, len(f.entries))
-	for _, e := range f.entries {
-		out = append(out, e)
+	for _, entry := range f.entries {
+		out = append(out, entry)
 	}
 	return out
 }
@@ -56,27 +62,39 @@ type fakePerm struct {
 	granted map[string]map[string]bool
 }
 
-func newFakePerm() *fakePerm { return &fakePerm{granted: map[string]map[string]bool{}} }
+func newFakePerm() *fakePerm {
+	return &fakePerm{granted: make(map[string]map[string]bool)}
+}
 
-func (f *fakePerm) grant(pkg, perm string) {
+func (f *fakePerm) grant(pkg, permission string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.granted[pkg] == nil {
-		f.granted[pkg] = map[string]bool{}
+		f.granted[pkg] = make(map[string]bool)
 	}
-	f.granted[pkg][perm] = true
+	f.granted[pkg][permission] = true
 }
 
-func (f *fakePerm) revoke(pkg, perm string) {
+func (f *fakePerm) revoke(pkg, permission string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.granted[pkg], perm)
+	delete(f.granted[pkg], permission)
 }
 
-func (f *fakePerm) Allowed(pkg, perm string) bool {
+func (f *fakePerm) AllowedAt(
+	snapshot *catalog.Snapshot,
+	pkg string,
+	permission string,
+) bool {
+	if snapshot == nil {
+		return false
+	}
+	if _, ok := snapshot.Permission(permission); !ok {
+		return false
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.granted[pkg][perm]
+	return f.granted[pkg][permission]
 }
 
 type fakeStarter struct {
@@ -84,595 +102,658 @@ type fakeStarter struct {
 }
 
 func (f *fakeStarter) EnsureStarted(ctx context.Context, pkg, comp string) error {
-	if f.fn == nil {
+	if f == nil || f.fn == nil {
 		return nil
 	}
 	return f.fn(ctx, pkg, comp)
 }
 
-type fakeResourceResolver struct{}
-
-func newFakeResourceResolver() *fakeResourceResolver { return &fakeResourceResolver{} }
-
-func (f *fakeResourceResolver) Resolve(resourceType, role string) (string, bool) {
-	if resourceType == resourceTypeMotionBase && role == resourceRoleMain {
-		return "base.main", true
-	}
-	return "", false
-}
-
-func (f *fakeResourceResolver) Valid(handle string) bool {
-	return handle == "base.main"
-}
-
 type fakeAudit struct {
-	mu  sync.Mutex
-	evs []audit.Event
+	mu     sync.Mutex
+	events []audit.Event
 }
 
-func (f *fakeAudit) Record(_ context.Context, ev audit.Event) {
+func (f *fakeAudit) Record(_ context.Context, event audit.Event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.evs = append(f.evs, ev)
+	f.events = append(f.events, event)
 }
 
-const (
-	testIface = "nervus.interface.motion.base"
-	testPerm  = "perm.motion.control"
-)
-
-func svcEntry(pkg, comp string, vis pkgregistry.Visibility, disabled bool) pkgregistry.Entry {
-	e := pkgregistry.Entry{Manifest: pkgregistry.Manifest{
+func serviceEntry(pkg, comp, interfaceID string, visibility pkgregistry.Visibility) pkgregistry.Entry {
+	return pkgregistry.Entry{Manifest: pkgregistry.Manifest{
 		PackageID: pkg,
-		Components: []pkgregistry.Component{
-			{ID: comp, Type: pkgregistry.ComponentService, Exports: []pkgregistry.Export{
-				{Interface: testIface, Visibility: vis},
+		Components: []pkgregistry.Component{{
+			ID:   comp,
+			Type: pkgregistry.ComponentService,
+			Exports: []pkgregistry.Export{{
+				Interface:  interfaceID,
+				Visibility: visibility,
+			}},
+		}},
+	}}
+}
+
+func testModule(
+	t *testing.T,
+	definitions *catalog.Registry,
+	pkgs *fakePkgs,
+	perm *fakePerm,
+	starter *fakeStarter,
+) *Module {
+	t.Helper()
+	return New(definitions, pkgs, perm, starter, &fakeAudit{}, nil)
+}
+
+func defaultCatalog(t *testing.T) *catalog.Registry {
+	t.Helper()
+	definitions, err := catalog.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	return definitions
+}
+
+func publishSources(t *testing.T, definitions *catalog.Registry, sources ...catalog.Source) {
+	t.Helper()
+	candidate, err := definitions.Prepare(sources)
+	if err != nil {
+		t.Fatalf("Prepare catalog: %v", err)
+	}
+	if !definitions.Publish(candidate) {
+		t.Fatal("Publish catalog candidate = false")
+	}
+}
+
+func motionSource(t *testing.T, pkg, comp, keyID string) catalog.Source {
+	t.Helper()
+	bundle, err := ipcregistry.BuildSchemaBundle(
+		catalog.InterfaceMotionBase,
+		1,
+		basemotionv1.BaseMotionMethod(0).Descriptor(),
+	)
+	if err != nil {
+		t.Fatalf("BuildSchemaBundle: %v", err)
+	}
+	descriptor := &ipcv1.ProviderDescriptor{
+		PackageId: pkg,
+		Interfaces: []*ipcv1.ProvidedInterface{{
+			InterfaceId: catalog.InterfaceMotionBase,
+			InterfaceVersions: []*ipcv1.ProvidedInterfaceVersion{{
+				Major:      1,
+				SchemaHash: append([]byte(nil), bundle.GetSchemaHash()...),
+			}},
+			RequiredPermission:      testMotionPermission,
+			ResourceRiskFloor:       ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+			CompatibleResourceTypes: []string{catalog.ResourceMotionBase},
+			DefaultResourceType:     catalog.ResourceMotionBase,
+			DefaultResourceRole:     "base.main",
+		}},
+		Resources: []*ipcv1.ManagedResource{{
+			StableRole:   "base.main",
+			ResourceType: catalog.ResourceMotionBase,
+			AccessMode:   ipcv1.ResourceAccessMode_RESOURCE_ACCESS_MODE_EXCLUSIVE_CONTROL,
+			RiskClass:    ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL,
+		}},
+	}
+	return catalog.Source{
+		PackageID: pkg,
+		Kind:      catalog.SourceKindSystemImage,
+		Trust:     identity.TrustOEM,
+		Signers: catalog.SignerEvidence{
+			Roles: []string{"oem-service"},
+			VerifiedSigners: []catalog.VerifiedSigner{{
+				Role: "oem-service", KeyID: keyID,
 			}},
 		},
-	}}
-	if disabled {
-		e.DisabledComponents = []string{comp}
-	}
-	return e
-}
-
-func callerEntry(pkg string) pkgregistry.Entry {
-	return pkgregistry.Entry{Manifest: pkgregistry.Manifest{PackageID: pkg}}
-}
-
-func newTestModule(pkgs *fakePkgs, perm *fakePerm, starter *fakeStarter, aud *fakeAudit) *Module {
-	return New(pkgs, perm, starter, newFakeResourceResolver(), aud, nil)
-}
-
-// ---- RegisterEndpoint --------------------------------------------------------
-
-func TestRegisterEndpoint_Success(t *testing.T) {
-	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false))
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
-	res := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{
-		RequestId: 1, InterfaceId: testIface, InterfaceMajor: 1, ResourceHandle: "base.main",
-	})
-	succ := res.GetSuccess()
-	if succ == nil {
-		t.Fatalf("want success, got %+v", res.GetFailure())
-	}
-	if succ.GetEndpointId() != 1 {
-		t.Fatalf("endpoint_id = %d, want 1", succ.GetEndpointId())
-	}
-
-	res2 := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{
-		RequestId: 2, InterfaceId: testIface, InterfaceMajor: 1,
-	})
-	if got := res2.GetSuccess().GetEndpointId(); got != 2 {
-		t.Fatalf("second endpoint_id = %d, want 2", got)
+		Exports: []catalog.ExportBinding{{
+			ComponentID: comp,
+			InterfaceID: catalog.InterfaceMotionBase,
+		}},
+		Artifacts: mustArtifacts(t, descriptor, &ipcv1.InterfaceSchemaBundleSet{
+			Bundles: []*ipcv1.InterfaceSchemaBundle{bundle},
+		}),
 	}
 }
 
-func TestRegisterEndpoint_MissingPermissionDenied(t *testing.T) {
-	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false))
-	perm := newFakePerm()
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
-	res := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{RequestId: 1, InterfaceId: testIface})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
-		t.Fatalf("code = %v, want PERMISSION_DENIED", code)
-	}
-}
-
-func TestRegisterEndpoint_InterfaceNotExportedDenied(t *testing.T) {
-	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false))
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
-	res := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{RequestId: 1, InterfaceId: "iface.not.declared"})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
-		t.Fatalf("code = %v, want PERMISSION_DENIED", code)
-	}
-}
-
-func TestRegisterEndpoint_ComponentDisabledDenied(t *testing.T) {
-	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, true))
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
-	res := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{RequestId: 1, InterfaceId: testIface})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
-		t.Fatalf("code = %v, want PERMISSION_DENIED", code)
-	}
-}
-
-func TestRegisterEndpoint_BadResourceHandleInvalidArgument(t *testing.T) {
-	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false))
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
-	res := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{
-		RequestId: 1, InterfaceId: testIface, ResourceHandle: "not-a-real-handle",
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT {
-		t.Fatalf("code = %v, want INVALID_ARGUMENT", code)
-	}
-}
-
-func TestRegisterEndpoint_PrivateVisibilityUsesPrivatePermission(t *testing.T) {
-	pkgs := newFakePkgs(svcEntry("com.svc", "comp", pkgregistry.VisibilityPackage, false))
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegisterPrivate)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	caller := identity.Caller{PackageID: "com.svc", ComponentID: "comp"}
-	res := m.RegisterEndpoint("conn-a", caller, &ipcv1.RegisterEndpoint{RequestId: 1, InterfaceId: testIface})
-	if res.GetSuccess() == nil {
-		t.Fatalf("want success, got %+v", res.GetFailure())
-	}
-}
-
-// ---- ResolveEndpoint ----------------------------------------------------------
-
-func registerHelper(t *testing.T, m *Module, conn ConnHandle, pkg, comp string, major uint32) uint64 {
+func legacyPackageManagerSource(t *testing.T) catalog.Source {
 	t.Helper()
-	res := m.RegisterEndpoint(conn, identity.Caller{PackageID: pkg, ComponentID: comp}, &ipcv1.RegisterEndpoint{
-		RequestId: 1, InterfaceId: testIface, InterfaceMajor: major,
-	})
-	succ := res.GetSuccess()
-	if succ == nil {
-		t.Fatalf("register setup failed: %+v", res.GetFailure())
+	artifacts, err := catalog.LegacyPackageManagerArtifacts()
+	if err != nil {
+		t.Fatalf("LegacyPackageManagerArtifacts: %v", err)
 	}
-	return succ.GetEndpointId()
+	return catalog.Source{
+		PackageID: legacyPackageManagerPackage,
+		Kind:      catalog.SourceKindSystemImage,
+		Trust:     identity.TrustPlatform,
+		Signers: catalog.SignerEvidence{
+			Roles: []string{platformReleaseSignerRole},
+			VerifiedSigners: []catalog.VerifiedSigner{{
+				Role: platformReleaseSignerRole, KeyID: "platform-key",
+			}},
+		},
+		Exports: []catalog.ExportBinding{{
+			ComponentID: legacyPackageManagerComponent,
+			InterfaceID: catalog.InterfacePackageManager,
+		}},
+		Artifacts: artifacts,
+	}
 }
 
-func TestResolveEndpoint_Success(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+func mustArtifacts(
+	t *testing.T,
+	descriptor *ipcv1.ProviderDescriptor,
+	schemas *ipcv1.InterfaceSchemaBundleSet,
+) *ipcregistry.ProviderArtifacts {
+	t.Helper()
+	marshal := proto.MarshalOptions{Deterministic: true}
+	descriptorWire, err := marshal.Marshal(descriptor)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	schemaWire, err := marshal.Marshal(schemas)
+	if err != nil {
+		t.Fatalf("marshal schemas: %v", err)
+	}
+	artifacts, err := ipcregistry.ParseProviderArtifacts(descriptorWire, schemaWire)
+	if err != nil {
+		t.Fatalf("ParseProviderArtifacts: %v", err)
+	}
+	return artifacts
+}
+
+func schemaHash(t *testing.T, definitions *catalog.Registry, interfaceID string, major uint32) []byte {
+	t.Helper()
+	definition, ok := definitions.Current().Interface(interfaceID, major)
+	if !ok {
+		t.Fatalf("catalog interface %s@%d missing", interfaceID, major)
+	}
+	return definition.SchemaHash
+}
+
+func registerMotion(
+	t *testing.T,
+	module *Module,
+	definitions *catalog.Registry,
+	conn ConnHandle,
+	pkg, comp string,
+) uint64 {
+	t.Helper()
+	result := module.RegisterEndpoint(
+		conn,
+		identity.Caller{PackageID: pkg, ComponentID: comp},
+		&ipcv1.RegisterEndpoint{
+			RequestId:           1,
+			InterfaceId:         catalog.InterfaceMotionBase,
+			InterfaceMajor:      1,
+			InterfaceSchemaHash: schemaHash(t, definitions, catalog.InterfaceMotionBase, 1),
+			ResourceHandle:      "base.main",
+		},
 	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-
-	caller := identity.Caller{PackageID: "com.caller"}
-	res := m.ResolveEndpoint("conn-caller", caller, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	succ := res.GetSuccess()
-	if succ == nil {
-		t.Fatalf("want success, got %+v", res.GetFailure())
+	if result.GetSuccess() == nil {
+		t.Fatalf("RegisterEndpoint: %+v", result.GetFailure())
 	}
-	if succ.GetEndpointId() != 1 {
-		t.Fatalf("endpoint_id = %d, want 1", succ.GetEndpointId())
-	}
-	if succ.GetResourceHandle() != "base.main" {
-		t.Fatalf("resource_handle = %q, want %q", succ.GetResourceHandle(), "base.main")
-	}
-
-	route, rerr := m.Route("conn-caller", succ.GetEndpointId())
-	if rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatalf("route err code = %v, want 0", rerr.Code)
-	}
-	if route.TargetConn != ConnHandle("conn-svc") || route.ServiceEndpointID != 1 {
-		t.Fatalf("route = %+v, want TargetConn=conn-svc ServiceEndpointID=1", route)
-	}
+	return result.GetSuccess().GetEndpointId()
 }
 
-func TestResolveEndpoint_PermissionDenied(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+func resolveMotion(t *testing.T, module *Module, conn ConnHandle, caller string) *ipcv1.ResolveEndpointSuccess {
+	t.Helper()
+	result := module.ResolveEndpoint(
+		conn,
+		identity.Caller{PackageID: caller},
+		&ipcv1.ResolveEndpoint{
+			RequestId:         1,
+			InterfaceId:       catalog.InterfaceMotionBase,
+			MinInterfaceMajor: 1,
+			MaxInterfaceMajor: 1,
+		},
 	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
-		t.Fatalf("code = %v, want PERMISSION_DENIED", code)
+	if result.GetSuccess() == nil {
+		t.Fatalf("ResolveEndpoint: %+v", result.GetFailure())
 	}
+	return result.GetSuccess()
 }
 
-func TestResolveEndpoint_VersionMismatch(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+func configuredMotionModule(t *testing.T) (*Module, *catalog.Registry, *fakePerm) {
+	t.Helper()
+	definitions := defaultCatalog(t)
+	publishSources(t, definitions,
+		motionSource(t, testProviderPackage, testProviderComponent, "oem-key"))
+	permissions := newFakePerm()
+	permissions.grant(testProviderPackage, permServiceRegister)
+	permissions.grant(testCallerPackage, testMotionPermission)
+	module := testModule(
+		t,
+		definitions,
+		newFakePkgs(serviceEntry(
+			testProviderPackage,
+			testProviderComponent,
+			catalog.InterfaceMotionBase,
+			pkgregistry.VisibilityPublic,
+		)),
+		permissions,
+		&fakeStarter{},
 	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
+	return module, definitions, permissions
+}
 
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 2)
+func TestRegisterEndpointValidatesCatalogSchemaAndResource(t *testing.T) {
+	module, definitions, _ := configuredMotionModule(t)
+	caller := identity.Caller{
+		PackageID: testProviderPackage, ComponentID: testProviderComponent,
+	}
 
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
+	valid := &ipcv1.RegisterEndpoint{
+		RequestId:           1,
+		InterfaceId:         catalog.InterfaceMotionBase,
+		InterfaceMajor:      1,
+		InterfaceSchemaHash: schemaHash(t, definitions, catalog.InterfaceMotionBase, 1),
+		ResourceHandle:      "base.main",
 	}
-	detail := &ipcv1.ResolveEndpointErrorDetail{}
-	if err := unmarshalDetail(res.GetFailure().GetErrorDetail(), detail); err != nil {
-		t.Fatalf("unmarshal detail: %v", err)
+	if result := module.RegisterEndpoint("valid", caller, valid); result.GetSuccess() == nil {
+		t.Fatalf("valid registration rejected: %+v", result.GetFailure())
 	}
-	if detail.GetReason() != ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_VERSION_MISMATCH {
-		t.Fatalf("reason = %v, want VERSION_MISMATCH", detail.GetReason())
+
+	wrongSchema := proto.Clone(valid).(*ipcv1.RegisterEndpoint)
+	wrongSchema.RequestId = 2
+	wrongSchema.InterfaceSchemaHash = []byte("wrong")
+	if code := module.RegisterEndpoint("wrong-schema", caller, wrongSchema).
+		GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
+		t.Fatalf("wrong schema code = %v, want FAILED_PRECONDITION", code)
+	}
+
+	missingResource := proto.Clone(valid).(*ipcv1.RegisterEndpoint)
+	missingResource.RequestId = 3
+	missingResource.ResourceHandle = ""
+	if code := module.RegisterEndpoint("missing-resource", caller, missingResource).
+		GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT {
+		t.Fatalf("missing resource code = %v, want INVALID_ARGUMENT", code)
+	}
+
+	unknownResource := proto.Clone(valid).(*ipcv1.RegisterEndpoint)
+	unknownResource.RequestId = 4
+	unknownResource.ResourceHandle = "camera.front"
+	if code := module.RegisterEndpoint("unknown-resource", caller, unknownResource).
+		GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT {
+		t.Fatalf("unknown resource code = %v, want INVALID_ARGUMENT", code)
 	}
 }
 
-func TestResolveEndpoint_InterfaceNotFound(t *testing.T) {
-	pkgs := newFakePkgs(callerEntry("com.caller"))
-	perm := newFakePerm()
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
+func TestRegisterEndpointRejectsComponentOutsideCatalogMembership(t *testing.T) {
+	definitions := defaultCatalog(t)
+	publishSources(t, definitions,
+		motionSource(t, testProviderPackage, testProviderComponent, "oem-key"))
+	entry := serviceEntry(
+		testProviderPackage, "other", catalog.InterfaceMotionBase, pkgregistry.VisibilityPublic)
+	permissions := newFakePerm()
+	permissions.grant(testProviderPackage, permServiceRegister)
+	module := testModule(t, definitions, newFakePkgs(entry), permissions, &fakeStarter{})
 
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface,
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
-	}
-}
-
-func TestResolveEndpoint_EmptySelectorMatchesExplicitDefault(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+	result := module.RegisterEndpoint(
+		"conn",
+		identity.Caller{PackageID: testProviderPackage, ComponentID: "other"},
+		&ipcv1.RegisterEndpoint{
+			RequestId:           1,
+			InterfaceId:         catalog.InterfaceMotionBase,
+			InterfaceMajor:      1,
+			InterfaceSchemaHash: schemaHash(t, definitions, catalog.InterfaceMotionBase, 1),
+			ResourceHandle:      "base.main",
+		},
 	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-
-	implicit := m.ResolveEndpoint("conn-implicit", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	explicit := m.ResolveEndpoint("conn-explicit", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-		Selector: &ipcv1.ResourceSelector{Type: resourceTypeMotionBase, Role: resourceRoleMain},
-	})
-
-	implicitSucc, explicitSucc := implicit.GetSuccess(), explicit.GetSuccess()
-	if implicitSucc == nil || explicitSucc == nil {
-		t.Fatalf("want both success, got implicit=%+v explicit=%+v", implicit.GetFailure(), explicit.GetFailure())
-	}
-	if implicitSucc.GetResourceHandle() != explicitSucc.GetResourceHandle() {
-		t.Fatalf("resource_handle mismatch: implicit=%q explicit=%q",
-			implicitSucc.GetResourceHandle(), explicitSucc.GetResourceHandle())
+	if code := result.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
+		t.Fatalf("component mismatch code = %v, want PERMISSION_DENIED", code)
 	}
 }
 
-func TestResolveEndpoint_ExplicitComponentDenied(t *testing.T) {
-	m := newTestModule(newFakePkgs(), newFakePerm(), &fakeStarter{}, &fakeAudit{})
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, ExplicitComponent: "some.other.component",
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
-		t.Fatalf("code = %v, want PERMISSION_DENIED", code)
-	}
-}
-
-func TestResolveEndpoint_SelectorMismatchResourceNotFound(t *testing.T) {
-	m := newTestModule(newFakePkgs(), newFakePerm(), &fakeStarter{}, &fakeAudit{})
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface,
-		Selector: &ipcv1.ResourceSelector{Type: "nervus.resource.camera", Role: "front"},
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
-	}
-}
-
-func TestResolveEndpoint_AmbiguousWhenTwoCandidates(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc1", "comp", pkgregistry.VisibilityPublic, false),
-		svcEntry("com.svc2", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+func TestLegacyPackageManagerEmptySchemaBridgeIsNarrow(t *testing.T) {
+	definitions := defaultCatalog(t)
+	publishSources(t, definitions, legacyPackageManagerSource(t))
+	permissions := newFakePerm()
+	permissions.grant(legacyPackageManagerPackage, permServiceRegister)
+	module := testModule(
+		t,
+		definitions,
+		newFakePkgs(serviceEntry(
+			legacyPackageManagerPackage,
+			legacyPackageManagerComponent,
+			catalog.InterfacePackageManager,
+			pkgregistry.VisibilityPublic,
+		)),
+		permissions,
+		&fakeStarter{},
 	)
-	perm := newFakePerm()
-	perm.grant("com.svc1", permServiceRegister)
-	perm.grant("com.svc2", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
 
-	registerHelper(t, m, "conn-svc1", "com.svc1", "comp", 1)
-	registerHelper(t, m, "conn-svc2", "com.svc2", "comp", 1)
+	result := module.RegisterEndpoint(
+		"legacy",
+		identity.Caller{
+			PackageID:   legacyPackageManagerPackage,
+			ComponentID: legacyPackageManagerComponent,
+		},
+		&ipcv1.RegisterEndpoint{
+			RequestId:      1,
+			InterfaceId:    catalog.InterfacePackageManager,
+			InterfaceMajor: legacyPackageManagerMajor,
+		},
+	)
+	if result.GetSuccess() == nil {
+		t.Fatalf("legacy empty hash rejected: %+v", result.GetFailure())
+	}
 
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	detail := &ipcv1.ResolveEndpointErrorDetail{}
-	_ = unmarshalDetail(res.GetFailure().GetErrorDetail(), detail)
-	if detail.GetReason() != ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_RESOURCE_AMBIGUOUS {
-		t.Fatalf("reason = %v, want RESOURCE_AMBIGUOUS", detail.GetReason())
+	wrong := module.RegisterEndpoint(
+		"legacy-wrong",
+		identity.Caller{
+			PackageID:   legacyPackageManagerPackage,
+			ComponentID: legacyPackageManagerComponent,
+		},
+		&ipcv1.RegisterEndpoint{
+			RequestId:           2,
+			InterfaceId:         catalog.InterfacePackageManager,
+			InterfaceMajor:      legacyPackageManagerMajor,
+			InterfaceSchemaHash: []byte("wrong"),
+		},
+	)
+	if code := wrong.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
+		t.Fatalf("wrong non-empty legacy hash code = %v, want FAILED_PRECONDITION", code)
 	}
 }
 
-func TestResolveEndpoint_OnDemandStartWakesWaiter(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
-	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
+func TestResolveAndRouteUseOneCatalogContract(t *testing.T) {
+	module, definitions, _ := configuredMotionModule(t)
+	registerMotion(t, module, definitions, "service", testProviderPackage, testProviderComponent)
 
-	var m *Module
-	starter := &fakeStarter{fn: func(ctx context.Context, pkg, comp string) error {
+	resolved := resolveMotion(t, module, "caller", testCallerPackage)
+	if resolved.GetResourceHandle() != "base.main" ||
+		resolved.GetCatalogRevision() != definitions.Current().Revision() ||
+		string(resolved.GetInterfaceSchemaHash()) !=
+			string(schemaHash(t, definitions, catalog.InterfaceMotionBase, 1)) {
+		t.Fatalf("resolve success = %+v", resolved)
+	}
+
+	route, routeErr := module.Route("caller", resolved.GetEndpointId(), 1)
+	if routeErr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("Route code = %v", routeErr.Code)
+	}
+	if route.TargetConn != ConnHandle("service") ||
+		route.ProviderPackageID != testProviderPackage ||
+		route.ProviderComponentID != testProviderComponent ||
+		route.InterfaceID != catalog.InterfaceMotionBase ||
+		route.Method.MethodID != 1 ||
+		route.Method.Request == nil ||
+		route.DefinitionGeneration == 0 ||
+		route.ProviderGeneration == 0 ||
+		route.ResourceGeneration == 0 {
+		t.Fatalf("RouteInfo = %+v", route)
+	}
+	if len(route.RequiredPermissions) != 1 ||
+		route.RequiredPermissions[0] != testMotionPermission {
+		t.Fatalf("required permissions = %v", route.RequiredPermissions)
+	}
+
+	if _, routeErr = module.Route("caller", resolved.GetEndpointId(), 999); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
+		t.Fatalf("unknown method code = %v, want NOT_FOUND", routeErr.Code)
+	}
+}
+
+func TestResolveRejectsVersionAndIncompatibleSelector(t *testing.T) {
+	module, definitions, _ := configuredMotionModule(t)
+	registerMotion(t, module, definitions, "service", testProviderPackage, testProviderComponent)
+
+	version := module.ResolveEndpoint(
+		"version",
+		identity.Caller{PackageID: testCallerPackage},
+		&ipcv1.ResolveEndpoint{
+			RequestId:         1,
+			InterfaceId:       catalog.InterfaceMotionBase,
+			MinInterfaceMajor: 2,
+			MaxInterfaceMajor: 2,
+		},
+	)
+	assertResolveReason(
+		t, version, ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_VERSION_MISMATCH)
+
+	resource := module.ResolveEndpoint(
+		"resource",
+		identity.Caller{PackageID: testCallerPackage},
+		&ipcv1.ResolveEndpoint{
+			RequestId:         2,
+			InterfaceId:       catalog.InterfaceMotionBase,
+			MinInterfaceMajor: 1,
+			MaxInterfaceMajor: 1,
+			Selector: &ipcv1.ResourceSelector{
+				Type: catalog.ResourceManipulatorArm,
+				Role: "arm.main",
+			},
+		},
+	)
+	assertResolveReason(
+		t, resource, ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_RESOURCE_NOT_FOUND)
+}
+
+func TestRouteSeesPermissionRevocationAndCatalogGenerationChange(t *testing.T) {
+	module, definitions, permissions := configuredMotionModule(t)
+	registerMotion(t, module, definitions, "service", testProviderPackage, testProviderComponent)
+	resolved := resolveMotion(t, module, "caller", testCallerPackage)
+
+	if _, routeErr := module.Route("caller", resolved.GetEndpointId(), 1); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("initial Route code = %v", routeErr.Code)
+	}
+	permissions.revoke(testCallerPackage, testMotionPermission)
+	if _, routeErr := module.Route("caller", resolved.GetEndpointId(), 1); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
+		t.Fatalf("revoked Route code = %v, want PERMISSION_DENIED", routeErr.Code)
+	}
+
+	permissions.grant(testCallerPackage, testMotionPermission)
+	publishSources(t, definitions,
+		motionSource(t, testProviderPackage, testProviderComponent, "rotated-oem-key"))
+	if _, routeErr := module.Route("caller", resolved.GetEndpointId(), 1); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
+		t.Fatalf("stale generation Route code = %v, want NOT_FOUND", routeErr.Code)
+	}
+}
+
+func TestResolveAmbiguousRegistrationsFailsClosed(t *testing.T) {
+	module, definitions, _ := configuredMotionModule(t)
+	registerMotion(
+		t, module, definitions, "one", testProviderPackage, testProviderComponent)
+	registerMotion(
+		t, module, definitions, "two", testProviderPackage, testProviderComponent)
+
+	result := module.ResolveEndpoint(
+		"caller",
+		identity.Caller{PackageID: testCallerPackage},
+		&ipcv1.ResolveEndpoint{
+			RequestId:         1,
+			InterfaceId:       catalog.InterfaceMotionBase,
+			MinInterfaceMajor: 1,
+			MaxInterfaceMajor: 1,
+		},
+	)
+	assertResolveReason(
+		t, result, ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_RESOURCE_AMBIGUOUS)
+}
+
+func TestResolveOnDemandRegistrationUsesCapturedSnapshot(t *testing.T) {
+	definitions := defaultCatalog(t)
+	publishSources(t, definitions,
+		motionSource(t, testProviderPackage, testProviderComponent, "oem-key"))
+	permissions := newFakePerm()
+	permissions.grant(testProviderPackage, permServiceRegister)
+	permissions.grant(testCallerPackage, testMotionPermission)
+	hash := schemaHash(t, definitions, catalog.InterfaceMotionBase, 1)
+	registration := make(chan *ipcv1.RegisterEndpointResult, 1)
+
+	var module *Module
+	starter := &fakeStarter{fn: func(_ context.Context, pkg, comp string) error {
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			m.RegisterEndpoint("conn-svc", identity.Caller{PackageID: pkg, ComponentID: comp}, &ipcv1.RegisterEndpoint{
-				RequestId: 1, InterfaceId: testIface, InterfaceMajor: 1,
-			})
+			registration <- module.RegisterEndpoint(
+				"service",
+				identity.Caller{PackageID: pkg, ComponentID: comp},
+				&ipcv1.RegisterEndpoint{
+					RequestId:           1,
+					InterfaceId:         catalog.InterfaceMotionBase,
+					InterfaceMajor:      1,
+					InterfaceSchemaHash: hash,
+					ResourceHandle:      "base.main",
+				},
+			)
 		}()
 		return nil
 	}}
-	m = newTestModule(pkgs, perm, starter, &fakeAudit{})
-
-	start := time.Now()
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	if time.Since(start) > onDemandStartTimeout {
-		t.Fatalf("resolve took too long, wait wasn't woken up by Register broadcast")
-	}
-	if res.GetSuccess() == nil {
-		t.Fatalf("want success after on-demand start, got %+v", res.GetFailure())
-	}
-}
-
-func TestResolveEndpoint_OnDemandStartFailurePropagates(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+	module = testModule(
+		t,
+		definitions,
+		newFakePkgs(serviceEntry(
+			testProviderPackage,
+			testProviderComponent,
+			catalog.InterfaceMotionBase,
+			pkgregistry.VisibilityPublic,
+		)),
+		permissions,
+		starter,
 	)
-	perm := newFakePerm()
-	perm.grant("com.caller", testPerm)
-	starter := &fakeStarter{fn: func(ctx context.Context, pkg, comp string) error {
-		return errComponentDisabledStub
-	}}
-	m := newTestModule(pkgs, perm, starter, &fakeAudit{})
 
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
+	resolved := resolveMotion(t, module, "caller", testCallerPackage)
+	if resolved.GetResourceHandle() != "base.main" {
+		t.Fatalf("on-demand resource = %q", resolved.GetResourceHandle())
+	}
+	if registered := <-registration; registered.GetSuccess() == nil {
+		t.Fatalf("on-demand registration: %+v", registered.GetFailure())
 	}
 }
 
-func TestRoute_PermissionRevokedFailsNextCall(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
+func TestResolveOnDemandDoesNotStartBeforeCatalogAndPermissionProof(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		publishSource bool
+		wantCode      ipcv1.StatusCode
+	}{
+		{
+			name:          "caller permission missing",
+			publishSource: true,
+			wantCode:      ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+		},
+		{
+			name:          "provider artifacts missing",
+			publishSource: false,
+			wantCode:      ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			definitions := defaultCatalog(t)
+			if test.publishSource {
+				publishSources(t, definitions,
+					motionSource(t, testProviderPackage, testProviderComponent, "oem-key"))
+			}
+			starts := 0
+			module := testModule(
+				t,
+				definitions,
+				newFakePkgs(serviceEntry(
+					testProviderPackage,
+					testProviderComponent,
+					catalog.InterfaceMotionBase,
+					pkgregistry.VisibilityPublic,
+				)),
+				newFakePerm(),
+				&fakeStarter{fn: func(context.Context, string, string) error {
+					starts++
+					return nil
+				}},
+			)
+
+			result := module.ResolveEndpoint(
+				"caller",
+				identity.Caller{PackageID: testCallerPackage},
+				&ipcv1.ResolveEndpoint{
+					RequestId:         1,
+					InterfaceId:       catalog.InterfaceMotionBase,
+					MinInterfaceMajor: 1,
+					MaxInterfaceMajor: 1,
+				},
+			)
+			if result.GetFailure().GetCode() != test.wantCode {
+				t.Fatalf("Resolve code = %v, want %v",
+					result.GetFailure().GetCode(), test.wantCode)
+			}
+			if starts != 0 {
+				t.Fatalf("unauthorized Resolve started Provider %d times", starts)
+			}
+		})
+	}
+}
+
+func TestUnregisterAndConnectionCloseInvalidateBindings(t *testing.T) {
+	module, definitions, _ := configuredMotionModule(t)
+	serviceID := registerMotion(
+		t, module, definitions, "service", testProviderPackage, testProviderComponent)
+	resolved := resolveMotion(t, module, "caller", testCallerPackage)
+
+	unregistered := module.UnregisterEndpoint(
+		"service",
+		&ipcv1.UnregisterEndpoint{RequestId: 2, EndpointId: serviceID},
 	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	id := res.GetSuccess().GetEndpointId()
-
-	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatalf("initial route should succeed, got code %v", rerr.Code)
+	if unregistered.GetSuccess() == nil {
+		t.Fatalf("UnregisterEndpoint: %+v", unregistered.GetFailure())
+	}
+	if _, routeErr := module.Route("caller", resolved.GetEndpointId(), 1); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
+		t.Fatalf("Route after unregister = %v", routeErr.Code)
 	}
 
-	perm.revoke("com.caller", testPerm)
-	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
-		t.Fatalf("route after revoke code = %v, want PERMISSION_DENIED", rerr.Code)
+	registerMotion(t, module, definitions, "service-2", testProviderPackage, testProviderComponent)
+	resolved = resolveMotion(t, module, "caller-2", testCallerPackage)
+	module.ConnClosed("service-2")
+	if _, routeErr := module.Route("caller-2", resolved.GetEndpointId(), 1); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
+		t.Fatalf("Route after service close = %v", routeErr.Code)
 	}
 }
 
-func TestRoute_ServiceConnClosedInvalidatesBinding(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
-	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	id := res.GetSuccess().GetEndpointId()
-
-	m.ConnClosed("conn-svc")
-
-	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
-		t.Fatalf("route after service conn closed code = %v, want NOT_FOUND", rerr.Code)
+func TestNilModuleFailsClosed(t *testing.T) {
+	var module *Module
+	if module.RegisterEndpoint(
+		"conn", identity.Caller{}, &ipcv1.RegisterEndpoint{RequestId: 1},
+	).GetSuccess() != nil {
+		t.Fatal("nil RegisterEndpoint succeeded")
 	}
-
-	res2 := m.ResolveEndpoint("conn-caller-2", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 2, InterfaceId: testIface,
-	})
-	if res2.GetSuccess() != nil {
-		t.Fatalf("want failure after service registrations were cleared, got success")
+	if module.ResolveEndpoint(
+		"conn", identity.Caller{}, &ipcv1.ResolveEndpoint{RequestId: 1},
+	).GetSuccess() != nil {
+		t.Fatal("nil ResolveEndpoint succeeded")
+	}
+	if _, routeErr := module.Route("conn", 1, 1); routeErr.Code == ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatal("nil Route succeeded")
+	}
+	module.ConnClosed("conn")
+	if err := module.Stop(context.Background()); err != nil {
+		t.Fatalf("nil Stop: %v", err)
 	}
 }
 
-func TestRoute_CallerConnClosedDropsAllBindings(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
-	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	id := res.GetSuccess().GetEndpointId()
-
-	m.ConnClosed("conn-caller")
-
-	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
-		t.Fatalf("route after caller conn closed code = %v, want NOT_FOUND", rerr.Code)
+func TestStartRejectsIncompleteAssembly(t *testing.T) {
+	definitions := defaultCatalog(t)
+	complete := testModule(
+		t, definitions, newFakePkgs(), newFakePerm(), &fakeStarter{})
+	if err := complete.Start(context.Background()); err != nil {
+		t.Fatalf("complete Start: %v", err)
+	}
+	incomplete := New(definitions, nil, newFakePerm(), &fakeStarter{}, nil, nil)
+	if err := incomplete.Start(context.Background()); err == nil {
+		t.Fatal("incomplete endpoint assembly started")
 	}
 }
 
-func TestUnregisterEndpoint_InvalidatesBinding(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller"),
-	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	svcID := registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-	res := m.ResolveEndpoint("conn-caller", identity.Caller{PackageID: "com.caller"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	id := res.GetSuccess().GetEndpointId()
-
-	unregRes := m.UnregisterEndpoint("conn-svc", &ipcv1.UnregisterEndpoint{RequestId: 2, EndpointId: svcID})
-	if unregRes.GetSuccess() == nil {
-		t.Fatalf("want success, got %+v", unregRes.GetFailure())
+func assertResolveReason(
+	t *testing.T,
+	result *ipcv1.ResolveEndpointResult,
+	want ipcv1.ResolveEndpointReason,
+) {
+	t.Helper()
+	if result.GetFailure() == nil {
+		t.Fatalf("Resolve unexpectedly succeeded: %+v", result.GetSuccess())
 	}
-
-	if _, rerr := m.Route("conn-caller", id); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
-		t.Fatalf("route after unregister code = %v, want NOT_FOUND", rerr.Code)
+	detail := &ipcv1.ResolveEndpointErrorDetail{}
+	if err := proto.Unmarshal(result.GetFailure().GetErrorDetail(), detail); err != nil {
+		t.Fatalf("unmarshal ResolveEndpointErrorDetail: %v", err)
 	}
-}
-
-func TestUnregisterEndpoint_UnknownIDNotFound(t *testing.T) {
-	m := newTestModule(newFakePkgs(), newFakePerm(), &fakeStarter{}, &fakeAudit{})
-	res := m.UnregisterEndpoint("conn-svc", &ipcv1.UnregisterEndpoint{RequestId: 1, EndpointId: 99})
-	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
-		t.Fatalf("code = %v, want NOT_FOUND", code)
-	}
-}
-
-func TestNamespaceIsolation_TwoConnsIndependentNumbering(t *testing.T) {
-	pkgs := newFakePkgs(
-		svcEntry("com.svc", "comp", pkgregistry.VisibilityPublic, false),
-		callerEntry("com.caller1"),
-		callerEntry("com.caller2"),
-	)
-	perm := newFakePerm()
-	perm.grant("com.svc", permServiceRegister)
-	perm.grant("com.caller1", testPerm)
-	perm.grant("com.caller2", testPerm)
-	m := newTestModule(pkgs, perm, &fakeStarter{}, &fakeAudit{})
-
-	registerHelper(t, m, "conn-svc", "com.svc", "comp", 1)
-
-	res1 := m.ResolveEndpoint("conn-1", identity.Caller{PackageID: "com.caller1"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	res2 := m.ResolveEndpoint("conn-2", identity.Caller{PackageID: "com.caller2"}, &ipcv1.ResolveEndpoint{
-		RequestId: 1, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	id1 := res1.GetSuccess().GetEndpointId()
-	id2 := res2.GetSuccess().GetEndpointId()
-	if id1 != 1 || id2 != 1 {
-		t.Fatalf("each connection should number endpoints independently from 1, got id1=%d id2=%d", id1, id2)
-	}
-
-	// conn-1 再 Resolve 一次拿到 id=2；conn-2 没有第二次，故它没有编号 2。
-	//
-	// 这一步是证明「(conn, endpoint_id) 才是查找键」所必需的：上面两条连接的
-	// 首个 id 都是 1，用 id=1 去跨连接 Route 一定命中对方自己的 binding，
-	// 证不出任何隔离性。必须构造一个「此连接不存在但彼连接存在」的编号。
-	res1b := m.ResolveEndpoint("conn-1", identity.Caller{PackageID: "com.caller1"}, &ipcv1.ResolveEndpoint{
-		RequestId: 2, InterfaceId: testIface, MinInterfaceMajor: 1, MaxInterfaceMajor: 1,
-	})
-	id1b := res1b.GetSuccess().GetEndpointId()
-	if id1b != 2 {
-		t.Fatalf("second resolve on conn-1 should get id 2, got %d", id1b)
-	}
-
-	// 隔离性：conn-1 的 2 在 conn-2 上不存在
-	if _, rerr := m.Route("conn-2", id1b); rerr.Code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
-		t.Fatalf("cross-conn route code = %v, want NOT_FOUND", rerr.Code)
-	}
-	// 同一个数字 1 在两条连接上各自可路由，且互不干扰
-	if _, rerr := m.Route("conn-1", id1); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatalf("conn-1 own route code = %v, want 0", rerr.Code)
-	}
-	if _, rerr := m.Route("conn-2", id2); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatalf("conn-2 own route code = %v, want 0", rerr.Code)
-	}
-	if _, rerr := m.Route("conn-1", id1b); rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatalf("conn-1 second route code = %v, want 0", rerr.Code)
-	}
-}
-
-func TestNilModule_FailSafe(t *testing.T) {
-	var m *Module
-
-	if res := m.RegisterEndpoint("c", identity.Caller{}, &ipcv1.RegisterEndpoint{RequestId: 1}); res.GetSuccess() != nil {
-		t.Fatal("RegisterEndpoint on a nil Module should not succeed")
-	}
-	if res := m.ResolveEndpoint("c", identity.Caller{}, &ipcv1.ResolveEndpoint{RequestId: 1}); res.GetSuccess() != nil {
-		t.Fatal("ResolveEndpoint on a nil Module should not succeed")
-	}
-	if res := m.UnregisterEndpoint("c", &ipcv1.UnregisterEndpoint{RequestId: 1}); res.GetSuccess() != nil {
-		t.Fatal("UnregisterEndpoint on a nil Module should not succeed")
-	}
-	if _, rerr := m.Route("c", 1); rerr.Code == ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
-		t.Fatal("Route on a nil Module should not succeed")
-	}
-	m.ConnClosed("c")
-	_ = m.Stop(context.Background())
-}
-
-func TestModule_NameAndLifecycle(t *testing.T) {
-	m := newTestModule(newFakePkgs(), newFakePerm(), &fakeStarter{}, &fakeAudit{})
-	if m.Name() != "endpoint" {
-		t.Fatalf("Name() = %q, want endpoint", m.Name())
-	}
-	if err := m.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := m.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if detail.GetReason() != want {
+		t.Fatalf("resolve reason = %v, want %v", detail.GetReason(), want)
 	}
 }

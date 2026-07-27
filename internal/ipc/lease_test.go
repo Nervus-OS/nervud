@@ -11,8 +11,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
@@ -34,7 +35,14 @@ type fakeLeases struct {
 	issued     []control.Request
 	released   []control.ID
 	revoked    []control.ConnID
-	nextID     byte
+	resources  []catalog.RevokedResource
+	checkErr   error
+	checked    []struct {
+		conn       control.ConnID
+		resource   string
+		generation uint64
+	}
+	nextID byte
 }
 
 func (f *fakeLeases) Acquire(req control.Request) (control.Lease, error) {
@@ -48,12 +56,13 @@ func (f *fakeLeases) Acquire(req control.Request) (control.Lease, error) {
 	var id control.ID
 	id[0] = f.nextID
 	return control.Lease{
-		ID:       id,
-		Conn:     req.Conn,
-		Class:    req.Class,
-		Resource: req.Resource,
-		Epoch:    42,
-		Deadline: time.Now().Add(30 * time.Second),
+		ID:                 id,
+		Conn:               req.Conn,
+		Class:              req.Class,
+		Resource:           req.Resource,
+		ResourceGeneration: req.ResourceGeneration,
+		Epoch:              42,
+		Deadline:           time.Now().Add(30 * time.Second),
 	}, nil
 }
 
@@ -64,10 +73,33 @@ func (f *fakeLeases) Release(id control.ID, _ control.ConnID) error {
 	return nil
 }
 
+func (f *fakeLeases) CheckResource(
+	conn control.ConnID,
+	resource string,
+	generation uint64,
+) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checked = append(f.checked, struct {
+		conn       control.ConnID
+		resource   string
+		generation uint64
+	}{conn: conn, resource: resource, generation: generation})
+	return 42, f.checkErr
+}
+
 func (f *fakeLeases) RevokeConn(conn control.ConnID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, conn)
+}
+
+func (f *fakeLeases) RevokeResource(resource string, generation uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resources = append(f.resources, catalog.RevokedResource{
+		Handle: resource, Generation: generation,
+	})
 }
 
 // snapshot 读取断言需要的计数，全程持锁。
@@ -90,14 +122,14 @@ func (f *fakeLeases) firstIssued() (control.Request, bool) {
 // fakeResources 是 ResourceResolver 的测试替身。
 type fakeResources struct{}
 
-func (fakeResources) Resolve(typ, role string) (string, bool) {
+func (fakeResources) ResolveControl(typ, role string) (string, uint64, bool) {
 	if typ == defaultResourceType && role == defaultResourceRole {
-		return "base.main", true
+		return "base.main", 11, true
 	}
 	if typ == "nervus.resource.manipulator.arm" && role == "main" {
-		return "arm.main", true
+		return "arm.main", 12, true
 	}
-	return "", false
+	return "", 0, false
 }
 
 func newLeaseServer(t *testing.T, leases ControlLeases) (string, *fakeLeases) {
@@ -113,17 +145,19 @@ func newLeaseServer(t *testing.T, leases ControlLeases) (string, *fakeLeases) {
 		// CheckUID 拒掉，表现是握手第一次写就 broken pipe。
 		Invariants: selfUIDInvariants(t),
 		Identity:   selfRegistry(t),
-		Permission: permission.NewRegistry(permission.DefaultCatalog()),
+		Permission: permission.NewDefaultRegistry(),
 		// 必须显式给 Limits：零值意味着 MaxConns/MaxConnsPerUID 都是 0，
 		// 连接在 admit 阶段就被拒，表现是握手时「connection reset by peer」
-		Limits:                   DefaultLimits(),
-		Leases:                   leases,
-		Resources:                fakeResources{},
-		AllowUnverifiedComponent: true,
+		Limits:    DefaultLimits(),
+		Leases:    leases,
+		Resources: fakeResources{},
+		Transfer:  newTestTransfer(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	s.monotonicNow = func() (uint64, error) { return uint64(10 * time.Second), nil }
+	installTestComponentVerifier(s)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -181,10 +215,13 @@ func TestAcquireControl_Success(t *testing.T) {
 	if s.GetResourceHandle() != "base.main" {
 		t.Errorf("resource_handle = %q", s.GetResourceHandle())
 	}
+	if got := s.GetDeadlineNanos(); got < int64(39*time.Second) || got > int64(41*time.Second) {
+		t.Errorf("deadline_nanos = %d, want CLOCK_MONOTONIC absolute value near 40s", got)
+	}
 
 	// 空 selector 必须落到协议规定的隐式默认，与 ResolveEndpoint 一致
 	req, ok := fl.firstIssued()
-	if !ok || req.Resource != "base.main" {
+	if !ok || req.Resource != "base.main" || req.ResourceGeneration != 11 {
 		t.Fatalf("issued = %+v，空 selector 应隐式取 base.main", req)
 	}
 	if req.Class != control.ClassHuman {
@@ -208,8 +245,67 @@ func TestAcquireControl_ExplicitSelector(t *testing.T) {
 	if res.GetSuccess().GetResourceHandle() != "arm.main" {
 		t.Fatalf("resource_handle = %q, want arm.main", res.GetSuccess().GetResourceHandle())
 	}
-	if req, _ := fl.firstIssued(); req.Class != control.ClassAI {
-		t.Errorf("class = %v, want AI", req.Class)
+	if req, _ := fl.firstIssued(); req.Class != control.ClassAI || req.ResourceGeneration != 12 {
+		t.Errorf("request = %+v, want AI on resource generation 12", req)
+	}
+}
+
+func TestAcquireControl_ClassChoiceIsAuditedAsSelfReported(t *testing.T) {
+	recorder := &fakeRecorder{}
+	server := &Server{auditor: recorder}
+	server.auditLeaseClass(
+		identity.Caller{PackageID: "com.example.agent"},
+		control.ClassHuman,
+		"base.main",
+	)
+
+	events := recorder.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Action != "ipc.AcquireControl.classSelfReported" ||
+		event.Subject != "com.example.agent" ||
+		event.Detail != "class=HUMAN resource=base.main" {
+		t.Fatalf("self-reported class audit = %+v", event)
+	}
+}
+
+func TestAcquireControl_RequestedDeadlineBecomesRequestedTTL(t *testing.T) {
+	sock, fl := newLeaseServer(t, &fakeLeases{})
+	c := dialHandshaked(t, sock)
+
+	env := acquireEnv(1, ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN, nil)
+	env.GetAcquireControl().RequestedDeadlineNanos = int64(125 * time.Millisecond)
+	if err := WriteFrame(c, mustMarshal(t, env)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if failure := readEnv(t, c).GetAcquireControlResult().GetFailure(); failure != nil {
+		t.Fatalf("unexpected failure: %v", failure.GetCode())
+	}
+
+	req, ok := fl.firstIssued()
+	if !ok {
+		t.Fatal("request did not reach control module")
+	}
+	if req.RequestedTTL != 125*time.Millisecond {
+		t.Fatalf("RequestedTTL = %s, want 125ms", req.RequestedTTL)
+	}
+	if req.TTL != 0 {
+		t.Fatalf("strict TTL = %s, want zero for a wire preference", req.TTL)
+	}
+}
+
+func TestAcquireControl_ZeroRequestIDClosesConnection(t *testing.T) {
+	sock, fl := newLeaseServer(t, &fakeLeases{})
+	c := dialHandshaked(t, sock)
+
+	if err := WriteFrame(c, mustMarshal(t, acquireEnv(0, ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN, nil))); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	expectClosed(t, c)
+	if issued, _, _ := fl.counts(); issued != 0 {
+		t.Fatalf("control received %d requests after protocol violation, want 0", issued)
 	}
 }
 
@@ -332,6 +428,26 @@ func TestReleaseControl_UnknownHandleDoesNotKillConnection(t *testing.T) {
 	}
 }
 
+func TestReleaseControl_ZeroRequestIDClosesConnection(t *testing.T) {
+	sock, fl := newLeaseServer(t, &fakeLeases{})
+	c := dialHandshaked(t, sock)
+
+	if err := WriteFrame(c, mustMarshal(t, acquireEnv(1, ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN, nil))); err != nil {
+		t.Fatalf("write acquire: %v", err)
+	}
+	leaseID := readEnv(t, c).GetAcquireControlResult().GetSuccess().GetLeaseId()
+	rel := &ipcv1.Envelope{Body: &ipcv1.Envelope_ReleaseControl{ReleaseControl: &ipcv1.ReleaseControl{
+		LeaseId: leaseID,
+	}}}
+	if err := WriteFrame(c, mustMarshal(t, rel)); err != nil {
+		t.Fatalf("write release: %v", err)
+	}
+	expectClosed(t, c)
+	if _, released, _ := fl.counts(); released != 0 {
+		t.Fatalf("control.Release called %d times after protocol violation, want 0", released)
+	}
+}
+
 func TestLeaseHandles_AreConnectionScoped(t *testing.T) {
 	// 查找键是 (连接, 句柄)。两条连接各自从 1 开始编号，A 的句柄在 B 上
 	// 必须无效——否则一个 App 能释放另一个 App 的运动租约。
@@ -353,6 +469,29 @@ func TestLeaseHandles_AreConnectionScoped(t *testing.T) {
 	}
 	if readEnv(t, b).GetReleaseControlResult().GetFailure() == nil {
 		t.Fatal("跨连接释放必须失败：查找键是 (连接, 句柄)")
+	}
+}
+
+func TestLeaseHandles_StayStableAcrossRenewalAndAreNeverReused(t *testing.T) {
+	co := &conn{}
+	var id control.ID
+	id[0] = 7
+
+	first := co.registerLease(control.Lease{ID: id})
+	renewed := co.registerLease(control.Lease{ID: id})
+	if renewed != first {
+		t.Fatalf("renewed lease_id = %d, want stable %d", renewed, first)
+	}
+	if len(co.leases) != 1 || len(co.leaseHandles) != 1 {
+		t.Fatalf("renewal grew handle maps: forward=%d reverse=%d",
+			len(co.leases), len(co.leaseHandles))
+	}
+
+	co.forgetLease(first)
+	reissued := co.registerLease(control.Lease{ID: id})
+	if reissued == first || reissued == 0 {
+		t.Fatalf("reissued lease_id = %d, must be new and non-zero (old %d)",
+			reissued, first)
 	}
 }
 

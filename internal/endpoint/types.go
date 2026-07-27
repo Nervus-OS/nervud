@@ -4,8 +4,9 @@
 package endpoint
 
 import (
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
@@ -22,9 +23,20 @@ type ConnHandle interface{}
 // route_id 分配、Dispatch/DispatchResult 关联、执行 Lane 调度不在本包范围内
 // ，ipc 拿到 RouteInfo 后自行处理
 type RouteInfo struct {
-	TargetConn        ConnHandle
-	ServiceEndpointID uint64
-	ResourceHandle    string
+	TargetConn          ConnHandle
+	ServiceEndpointID   uint64
+	ProviderPackageID   string
+	ProviderComponentID string
+	InterfaceID         string
+	InterfaceMajor      uint32
+	ResourceHandle      string
+
+	Method                 catalog.MethodDefinition
+	RegistrationGeneration uint64
+	DefinitionGeneration   uint64
+	ProviderGeneration     uint64
+	ResourceGeneration     uint64
+	RequiredPermissions    []string
 
 	// Builtin 非 nil 表示目标是 nervud 自己实现的内建 endpoint（见 builtin.go）：
 	// 调用方应当就地执行它，而不是把 Dispatch 转发给某条 Service 连接。
@@ -73,6 +85,10 @@ type serviceRegistration struct {
 	visibility     pkgregistry.Visibility
 	generation     uint64 // 每次同一 (pkg,comp,interface) 重新注册递增
 
+	definitionGeneration uint64
+	providerGeneration   uint64
+	resourceGeneration   uint64
+
 	// builtin 非 nil 表示这是 nervud 自己实现的内建 endpoint（见 builtin.go）：
 	// 没有 conn、恒 live，Route 返回它而不是转发目标。
 	builtin BuiltinHandler
@@ -91,10 +107,15 @@ type binding struct {
 	callerPackageID    string
 	target             *serviceRegistration
 	targetGeneration   uint64 // 创建时快照的 serviceRegistration.generation，供诊断
+	interfaceID        string
 	interfaceMajor     uint32
 	interfaceMinor     uint32
-	requiredPermission string // 来自 interfaceCatalog，空表示无额外裁决
+	requiredPermission string // 来自中央 catalog，空表示无接口级额外裁决
 	resourceHandle     string
+
+	definitionGeneration uint64
+	providerGeneration   uint64
+	resourceGeneration   uint64
 }
 
 // connState 是单条连接名下的全部注册与 binding

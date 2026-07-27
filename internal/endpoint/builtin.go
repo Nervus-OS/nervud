@@ -26,30 +26,40 @@
 //
 // # 权限仍然照常裁决
 //
-// 内建不等于免检。Resolve 阶段照样查 InterfaceCatalog 的接口级门槛，
-// method 级权限等 method_registry 接线后同样适用。「谁实现的」与「谁能调」
-// 是两件独立的事。
+// 内建不等于免检。Resolve 与 Route 使用中央 catalog 的接口级和 method 级
+// 权限。「谁实现的」与「谁能调」是两件独立的事。
 package endpoint
 
 import (
 	"context"
 	"fmt"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// BuiltinHandler 处理一次对内建 endpoint 的调用。
-//
-// ctx 已按调用方的 deadline 设好。caller 是内核解析出的可信身份，
-// handler 可以据它做二次裁决（但主裁决在 IPC 层，这里只是纵深）。
-//
-// 返回 (payload, OK) 表示成功；返回非 OK 的 StatusCode 表示失败。
-// 【不返回 Go error】：内建 handler 跑在内核进程里，一个未归类的 error 会被
-// 迫归一化成 INTERNAL，不如让实现者显式给出语义正确的 code。
-type BuiltinHandler func(ctx context.Context, caller identity.Caller, methodID uint32, payload []byte) ([]byte, ipcv1.StatusCode)
+// BuiltinCall carries the same trusted call context that an external dispatch
+// route has. Conn is deliberately included for route-bound transfer control.
+type BuiltinCall struct {
+	Context  context.Context
+	Conn     ConnHandle
+	Caller   identity.Caller
+	MethodID uint32
+	Payload  []byte
+}
+
+type BuiltinResult struct {
+	Payload []byte
+	Code    ipcv1.StatusCode
+}
+
+// BuiltinHandler executes one in-kernel endpoint method. The handler returns a
+// wire status explicitly; unclassified Go errors must not leak into protocol
+// behavior.
+type BuiltinHandler func(BuiltinCall) BuiltinResult
 
 // RegisterBuiltin 注册一个由 nervud 自己实现的 Interface。
 //
@@ -63,22 +73,41 @@ func (m *Module) RegisterBuiltin(interfaceID string, major, minor uint32, h Buil
 	if interfaceID == "" || h == nil {
 		return fmt.Errorf("endpoint: builtin %q requires a non-empty id and handler", interfaceID)
 	}
+	snapshot := m.snapshot()
+	if snapshot == nil {
+		return fmt.Errorf("endpoint: builtin %q has no authoritative catalog snapshot", interfaceID)
+	}
+	provider, ok := snapshot.ProviderInterface(
+		catalog.KernelPackageID, interfaceID, major)
+	if !ok || provider.PackageID != catalog.KernelPackageID ||
+		provider.ComponentID == "" ||
+		provider.Definition.InterfaceID != interfaceID ||
+		provider.Definition.Major != major ||
+		provider.ProviderOwner.Kind != catalog.SourceKindKernel {
+		return fmt.Errorf("endpoint: builtin %q@%d is not owned by the kernel catalog",
+			interfaceID, major)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, reg := range m.byInterface[interfaceID] {
-		if reg.builtin != nil {
-			return fmt.Errorf("endpoint: builtin %q already registered", interfaceID)
+		if reg.builtin != nil && reg.ifaceMajor == major {
+			return fmt.Errorf("endpoint: builtin %q@%d already registered", interfaceID, major)
 		}
 	}
 
 	m.builtinSeq++
 	reg := &serviceRegistration{
-		id:          m.builtinSeq,
-		interfaceID: interfaceID,
-		ifaceMajor:  major,
-		ifaceMinor:  minor,
+		id:                   m.builtinSeq,
+		packageID:            catalog.KernelPackageID,
+		componentID:          provider.ComponentID,
+		interfaceID:          interfaceID,
+		ifaceMajor:           major,
+		ifaceMinor:           minor,
+		schemaHash:           append([]byte(nil), provider.Definition.SchemaHash...),
+		definitionGeneration: provider.Definition.DefinitionGeneration,
+		providerGeneration:   provider.DefinitionGeneration,
 		// 内建 endpoint 跨 Package 可见：它是平台能力，不属于任何一个包。
 		// 能不能调由权限决定，不由可见性决定。
 		visibility: visibilityPublicForBuiltin,

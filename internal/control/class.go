@@ -7,7 +7,7 @@ package control
 // 就是 nil lease，因此客户端不能申请它。SAFETY 也不是 Class，它是独立的
 // Gate/latch，不能与 HUMAN/AI 共用同一种 lease 实现
 //
-// Class 必须由可信调用方根据身份与权限裁决后传入，不能接受客户端自报值
+// Class 的来源由上层策略决定；当前 IPC 允许调用方自选并审计，本包不做身份推断。
 type Class uint8
 
 const (

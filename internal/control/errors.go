@@ -44,8 +44,13 @@ var (
 	// ErrStaleEpoch 租约所属的 motion epoch 已被撤销
 	ErrStaleEpoch = errors.New("control: lease belongs to a revoked motion epoch")
 
-	// ErrUnknownResource 申请的 Resource 不是 v1 唯一合法的 base.main
+	// ErrUnknownResource 申请没有携带上层 catalog 已解析的非空 Resource handle
 	ErrUnknownResource = errors.New("control: unknown resource scope")
+
+	// ErrResourceCapacity means the process-lifetime slot directory reached its
+	// hard Safety scan bound. Restarting clears retired slots; silently growing
+	// the directory would make RevokeAll's real-time cost unbounded.
+	ErrResourceCapacity = errors.New("control: resource slot capacity exhausted")
 
 	// ErrInvalidRequest 申请本身不良构：Class 未指定、ConnID 为 0 等
 	ErrInvalidRequest = errors.New("control: malformed lease request")
@@ -68,6 +73,7 @@ var (
 var (
 	errConnectionClosed = errors.New("control: owner connection closed")
 	errSafetyRevoked    = errors.New("control: revoked by safety trip")
+	errResourceRevoked  = errors.New("control: resource definition revoked or replaced")
 
 	// errPackageRevoked 是 RevokeByPackage 撤租时写进审计的原因：包被卸载，或其
 	// motion 组权限被用户撤销。与 errConnectionClosed 分开，

@@ -23,10 +23,13 @@ var (
 	ErrComponentProtected = errors.New("pkgregistry: component cannot be disabled")
 	// ErrSystemPackageImmutable 系统镜像来源的 Package 不能被动态卸载（跟随整镜像 OTA）
 	ErrSystemPackageImmutable = errors.New("pkgregistry: system-image package cannot be uninstalled")
+	// ErrPackageRemovalPending blocks install/lifecycle mutations while a prior
+	// uninstall is waiting for its idempotent filesystem cleanup to complete.
+	ErrPackageRemovalPending = errors.New("pkgregistry: package removal is pending")
 )
 
 // isProtectedComponent 报告 "<pkg>/<comp>" 是否在编译期硬编码的不可停用名单里
-// 。理由同 permission.DefaultCatalog：这条底线不能由文件系统写
+// 。理由同中央 catalog 的内建权限底线：这条保护规则不能由文件系统写
 // 权限决定，所以是代码里的 switch 而非可被改动的数据。停用提供停用 UI 的设置 app
 // 自身、权限确认通道、会话/包管理/安全恢复，都会让系统失去自我修复能力。用函数而非
 // 包级 map，避开 gochecknoglobals，也让名单是代码这件事更直白
@@ -81,6 +84,13 @@ type LeaseRevoker interface {
 	RevokeByPackage(pkgID string) error
 }
 
+// PackageTransferRevoker is the narrow control/data-plane lifecycle hook. It
+// avoids a dependency on concrete IPC or transfer implementation types.
+type PackageTransferRevoker interface {
+	RevokePackage(packageID string)
+	RevokeResource(resourceHandle string, generation uint64)
+}
+
 // SetLifecycleHooks 注入卸载/停用需要的外部协作者（service 停组件、control 撤租）。
 // 装配期由 main.go 调用；两者都可为 nil（对应阶段未接线时留接缝）
 func (m *Module) SetLifecycleHooks(stopper ComponentStopper, revoker LeaseRevoker) {
@@ -88,6 +98,13 @@ func (m *Module) SetLifecycleHooks(stopper ComponentStopper, revoker LeaseRevoke
 	defer m.mu.Unlock()
 	m.stopper = stopper
 	m.revoker = revoker
+}
+
+// SetTransferRevoker injects the optional fast-data-plane revocation hook.
+func (m *Module) SetTransferRevoker(revoker PackageTransferRevoker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transferRevoker = revoker
 }
 
 // SetComponentEnabled 停用/启用一个 Component 并持久化
@@ -159,37 +176,92 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	e, ok := m.registry.Lookup(pkgID)
-	if !ok {
+	e, installed := m.registry.Lookup(pkgID)
+	st, hasState := m.readState(pkgID)
+	if !installed && (!hasState || !st.RemovalPending) {
 		return fmt.Errorf("%w: %q", ErrPackageNotInstalled, pkgID)
 	}
-	if e.Source == SourceSystemImage {
+	if (installed && e.Source == SourceSystemImage) ||
+		(hasState && st.Source == SourceSystemImage.String()) {
 		return fmt.Errorf("%w: %q", ErrSystemPackageImmutable, pkgID)
 	}
+	if installed && !hasState {
+		return fmt.Errorf("pkgregistry: installed package %q has no ledger", pkgID)
+	}
 
-	// 1. 停掉该包全部组件的运行实例（接缝：service 未接线时 stopper 为 nil）
+	previous := m.registry.List()
+	previousCatalog := m.definitions.Current()
+	prepared, err := m.prepareEntries(ctx, removeEntryFrom(previous, pkgID))
+	if err != nil {
+		return err
+	}
+
+	if !st.RemovalPending {
+		st.RemovalPending = true
+		st.RemovalComponents = st.RemovalComponents[:0]
+		for _, component := range e.Manifest.Components {
+			st.RemovalComponents = append(st.RemovalComponents, component.ID)
+		}
+		if err := saveRegistryState(m.stateDir, st); err != nil {
+			return err
+		}
+	}
+
+	// Removal is the inverse of installation: first remove provider authority
+	// from the catalog. From this point no new route can bind to this package,
+	// even if stopping a process or deleting its files later fails.
+	if !m.definitions.Publish(prepared.candidate) {
+		return ErrCatalogPublishConflict
+	}
+	m.revokeChangedResources(previousCatalog, prepared.candidate.Snapshot())
+
+	if m.transferRevoker != nil {
+		m.transferRevoker.RevokePackage(pkgID)
+	}
+
+	// Remove all discoverable package authority before waiting on processes or
+	// touching files. The persisted tombstone is now the retry anchor; retaining
+	// a live Registry entry would let ordinary lifecycle APIs re-enable it.
+	var projectionErrs []error
+	if err := m.registry.Replace(prepared.entries); err != nil {
+		projectionErrs = append(projectionErrs, fmt.Errorf("remove registry projection: %w", err))
+	}
+	if err := m.idReg.Replace(projectIdentity(prepared.entries)); err != nil {
+		projectionErrs = append(projectionErrs, fmt.Errorf("remove identity projection: %w", err))
+	}
+	if err := m.perm.Replace(projectGrants(prepared.entries)); err != nil {
+		projectionErrs = append(projectionErrs, fmt.Errorf("remove permission projection: %w", err))
+	}
+
+	// Stop all package components after route/data-plane authority is gone.
 	if m.stopper != nil {
-		for _, c := range e.Manifest.Components {
-			if err := m.stopper.StopComponent(ctx, pkgID, c.ID); err != nil {
+		for _, componentID := range st.RemovalComponents {
+			if err := m.stopper.StopComponent(ctx, pkgID, componentID); err != nil {
 				m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.stop", Subject: pkgID, Denied: true, Err: err})
+				projectionErrs = append(projectionErrs,
+					fmt.Errorf("stop component %q: %w", componentID, err))
 			}
 		}
 	}
 
-	// 2. 撤销其持有的全部 ControlLease（含 motion -> control 递增 epoch）。接缝：Step 9
+	// Revoke control authority before touching package files.
 	if m.revoker != nil {
 		if err := m.revoker.RevokeByPackage(pkgID); err != nil {
 			m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.revoke", Subject: pkgID, Denied: true, Err: err})
+			projectionErrs = append(projectionErrs, fmt.Errorf("revoke control leases: %w", err))
 		}
 	}
-
-	// 3. 从三份投影里剔除该包（全量原子替换，已有范式）
-	if err := m.removeEntry(pkgID); err != nil {
+	if err := errors.Join(projectionErrs...); err != nil {
 		return err
 	}
 
-	// 4. 删代码目录与数据目录（经 authority openat2 递归删除）
-	subj := authority.Subject{PackageID: pkgID, UID: e.UID}
+	if cerr := m.perm.ClearPackage(pkgID); cerr != nil {
+		m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.clearGrants", Subject: pkgID, Denied: true, Err: cerr})
+		return cerr
+	}
+
+	// Delete code and private data through authority.
+	subj := authority.Subject{PackageID: pkgID, UID: st.UID}
 	codeDir := filepath.Join(m.packageRoot, pkgID)
 	if err := m.auth.RemovePackageTree(ctx, subj, authority.RemovePackageTreeRequest{Root: m.packageRoot, Path: codeDir}); err != nil {
 		m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.rmCode", Subject: pkgID, Denied: true, Err: err})
@@ -201,18 +273,12 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 		return err
 	}
 
-	// 5. 删记账文件（nervud 自有 registry 目录，不跨信任边界，走 os；packageID 已
-	// 经 stateFilePath 的 validPackageID 二次校验）
+	// Remove the ledger only after both trees were removed.
 	if sp, err := stateFilePath(m.stateDir, pkgID); err == nil {
 		if rerr := os.Remove(sp); rerr != nil && !os.IsNotExist(rerr) {
 			m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.rmLedger", Subject: pkgID, Denied: true, Err: rerr})
+			return rerr
 		}
-	}
-
-	// 6. 清运行期权限授予状态（_grants.json）。install-set 已随 removeEntry 的投影剔除，
-	// 但运行期危险权限授予是 permission 单独的持久态，不清会被同 ID 重装继承
-	if cerr := m.perm.ClearPackage(pkgID); cerr != nil {
-		m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.clearGrants", Subject: pkgID, Denied: true, Err: cerr})
 	}
 
 	m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall", Subject: pkgID})

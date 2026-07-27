@@ -13,6 +13,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/permission"
 )
@@ -110,14 +111,31 @@ type fakeAuditor struct{ events []audit.Event }
 func (f *fakeAuditor) Record(_ context.Context, ev audit.Event) { f.events = append(f.events, ev) }
 
 type fakePermissionArbiter struct {
-	intersect func(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string)
-	replaced  [][]permission.Grant
-	cleared   []string
+	intersect   func(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string)
+	intersectAt func(
+		definitions *catalog.Snapshot,
+		requested []string,
+		source catalog.SourceKind,
+		trust identity.TrustProfile,
+		signers catalog.SignerEvidence,
+	) (granted, denied []string)
+	replaced [][]permission.Grant
+	cleared  []string
+	clearErr error
 }
 
-func (f *fakePermissionArbiter) Intersect(requested []string, trust identity.TrustProfile, signerRoles []string) (granted, denied []string) {
+func (f *fakePermissionArbiter) IntersectAt(
+	definitions *catalog.Snapshot,
+	requested []string,
+	source catalog.SourceKind,
+	trust identity.TrustProfile,
+	signers catalog.SignerEvidence,
+) (granted, denied []string) {
+	if f.intersectAt != nil {
+		return f.intersectAt(definitions, requested, source, trust, signers)
+	}
 	if f.intersect != nil {
-		return f.intersect(requested, trust, signerRoles)
+		return f.intersect(requested, trust, signers.Roles)
 	}
 	return requested, nil
 }
@@ -129,7 +147,7 @@ func (f *fakePermissionArbiter) Replace(grants []permission.Grant) error {
 
 func (f *fakePermissionArbiter) ClearPackage(pkg string) error {
 	f.cleared = append(f.cleared, pkg)
-	return nil
+	return f.clearErr
 }
 
 func newTestInstaller(t *testing.T) (*Module, *fakeInstaller, *fakeIdentityUpdater, *fakeAuditor) {
@@ -146,7 +164,11 @@ func newTestInstallerWithPerm(t *testing.T) (*Module, *fakeInstaller, *fakeIdent
 	perm := &fakePermissionArbiter{}
 	aud := &fakeAuditor{}
 	registry := NewRegistry()
-	mod := New(auth, idReg, perm, registry, TrustStore{}, aud, nil,
+	definitions, err := catalog.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("new catalog: %v", err)
+	}
+	mod := New(auth, idReg, perm, registry, definitions, TrustStore{}, aud, nil,
 		filepath.Join(dir, "registry"), filepath.Join(dir, "system-packages"),
 		filepath.Join(dir, "packages"), filepath.Join(dir, "data"))
 	return mod, auth, idReg, aud, perm
@@ -344,12 +366,12 @@ func TestInstall_ComputesGrantedPermissions(t *testing.T) {
 
 	found := false
 	for _, ev := range aud.events {
-		if ev.Action == "pkgregistry.Intersect" && ev.Denied {
+		if ev.Action == "pkgregistry.IntersectAt" && ev.Denied {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("want a denied pkgregistry.Intersect audit event, got %+v", aud.events)
+		t.Fatalf("want a denied pkgregistry.IntersectAt audit event, got %+v", aud.events)
 	}
 
 	if len(perm.replaced) != 1 || len(perm.replaced[0]) != 1 {
@@ -395,8 +417,12 @@ func TestInstall_UpgradeReplacesOldVersion(t *testing.T) {
 func newProvisionModule(t *testing.T, auth *fakeInstaller) *Module {
 	t.Helper()
 	dir := t.TempDir()
+	definitions, err := catalog.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("new catalog: %v", err)
+	}
 	return New(auth, &fakeIdentityUpdater{}, &fakePermissionArbiter{}, NewRegistry(),
-		TrustStore{}, &fakeAuditor{}, nil,
+		definitions, TrustStore{}, &fakeAuditor{}, nil,
 		filepath.Join(dir, "registry"), filepath.Join(dir, "system-packages"),
 		filepath.Join(dir, "packages"), filepath.Join(dir, "data"))
 }

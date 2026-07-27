@@ -27,7 +27,9 @@
 // 哪个方法产生 operation 由 Method Registry（A3）的 method 元数据决定
 // （returns_operation + 是否需要 lease），不是本包里写一张方法名清单。是否为
 // 运动类（需 lease 校验）由 Create 的 leaseID 参数驱动：leaseID != 0 即运动类。
-// 自检：加一个新的 operation-returning OEM 方法，不需要改本包任何 Go 代码。
+// 当前一个 operation 只有一个 lease binding，因此运动类只接受一个 Resource；未来
+// 要做多执行器原子动作，wire 必须先提供 repeated (resource, lease, epoch) binding。
+// 自检：加一个新的单 Resource operation-returning OEM 方法，不需要改本包任何 Go 代码。
 //
 // # 依赖方向
 //

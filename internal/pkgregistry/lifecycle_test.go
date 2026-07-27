@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
@@ -15,6 +16,21 @@ type fakeStopper struct {
 	reloaded  []string
 	stopErr   error
 	reloadErr error
+}
+
+type fakeTransferRevoker struct {
+	packages  []string
+	resources []catalog.RevokedResource
+}
+
+func (f *fakeTransferRevoker) RevokePackage(packageID string) {
+	f.packages = append(f.packages, packageID)
+}
+
+func (f *fakeTransferRevoker) RevokeResource(resourceHandle string, generation uint64) {
+	f.resources = append(f.resources, catalog.RevokedResource{
+		Handle: resourceHandle, Generation: generation,
+	})
 }
 
 func (f *fakeStopper) StopComponent(_ context.Context, pkg, comp string) error {
@@ -42,7 +58,9 @@ func installOne(t *testing.T, mod *Module, pkgID string) Entry {
 func TestUninstall_RemovesEverything(t *testing.T) {
 	mod, auth, idReg, _ := newTestInstaller(t)
 	stopper := &fakeStopper{}
+	transferRevoker := &fakeTransferRevoker{}
 	mod.SetLifecycleHooks(stopper, nil)
+	mod.SetTransferRevoker(transferRevoker)
 
 	e := installOne(t, mod, "com.example.app")
 	if mod.registry.Len() != 1 {
@@ -58,6 +76,10 @@ func TestUninstall_RemovesEverything(t *testing.T) {
 	}
 	if len(stopper.stopped) != 1 || stopper.stopped[0] != "com.example.app/main" {
 		t.Fatalf("component not stopped: %+v", stopper.stopped)
+	}
+	if len(transferRevoker.packages) != 1 ||
+		transferRevoker.packages[0] != "com.example.app" {
+		t.Fatalf("transfer sessions not revoked: %+v", transferRevoker.packages)
 	}
 	var rmCode, rmData bool
 	for _, r := range auth.removed {
@@ -96,6 +118,85 @@ func TestUninstall_UIDNotReused(t *testing.T) {
 	}
 	if e2.UID < e1.UID {
 		t.Fatalf("UID went backwards: %d -> %d", e1.UID, e2.UID)
+	}
+}
+
+func TestUninstall_FailureLeavesFailClosedRetryableTombstone(t *testing.T) {
+	mod, auth, idReg, _, perm := newTestInstallerWithPerm(t)
+	stopper := &fakeStopper{}
+	mod.SetLifecycleHooks(stopper, nil)
+	installOne(t, mod, "com.example.app")
+
+	auth.removeErr = errors.New("storage unavailable")
+	err := mod.Uninstall(context.Background(), "com.example.app")
+	if err == nil {
+		t.Fatal("Uninstall succeeded despite filesystem cleanup failure")
+	}
+	if mod.registry.Len() != 0 {
+		t.Fatalf("pending removal remained active in Registry: %d", mod.registry.Len())
+	}
+	state, ok := mod.readState("com.example.app")
+	if !ok || !state.RemovalPending || len(state.RemovalComponents) != 1 ||
+		state.RemovalComponents[0] != "main" {
+		t.Fatalf("removal tombstone = %+v, ok=%v", state, ok)
+	}
+	if last := idReg.replaced[len(idReg.replaced)-1]; len(last) != 0 {
+		t.Fatalf("identity remained published after failed cleanup: %+v", last)
+	}
+	if last := perm.replaced[len(perm.replaced)-1]; len(last) != 0 {
+		t.Fatalf("permissions remained published after failed cleanup: %+v", last)
+	}
+	if err := mod.SetComponentEnabled(
+		context.Background(), "com.example.app", "main", true,
+	); !errors.Is(err, ErrPackageNotInstalled) {
+		t.Fatalf("pending package was lifecycle-addressable: %v", err)
+	}
+
+	staging, manifest, sig := newValidStaging(
+		t, t.TempDir(), "com.example.app", "1.0.0")
+	_, err = mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifest,
+		SigBlock:      sig,
+		StagingDir:    staging,
+		Source:        SourceDynamicInstall,
+	})
+	if !errors.Is(err, ErrPackageRemovalPending) {
+		t.Fatalf("install over tombstone error = %v, want ErrPackageRemovalPending", err)
+	}
+
+	auth.removeErr = nil
+	if err := mod.Uninstall(context.Background(), "com.example.app"); err != nil {
+		t.Fatalf("retry Uninstall: %v", err)
+	}
+	statePath, _ := stateFilePath(mod.stateDir, "com.example.app")
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("tombstone remained after successful retry: %v", err)
+	}
+}
+
+func TestUninstall_ClearGrantFailureDefersFilesystemDeletion(t *testing.T) {
+	mod, auth, _, _, perm := newTestInstallerWithPerm(t)
+	mod.SetLifecycleHooks(&fakeStopper{}, nil)
+	installOne(t, mod, "com.example.app")
+
+	perm.clearErr = errors.New("grant ledger unavailable")
+	if err := mod.Uninstall(context.Background(), "com.example.app"); err == nil {
+		t.Fatal("Uninstall succeeded despite runtime-grant cleanup failure")
+	}
+	if len(auth.removed) != 0 {
+		t.Fatalf("filesystem deletion ran before grant cleanup succeeded: %+v", auth.removed)
+	}
+	state, ok := mod.readState("com.example.app")
+	if !ok || !state.RemovalPending {
+		t.Fatalf("missing removal tombstone after grant failure: %+v, ok=%v", state, ok)
+	}
+
+	perm.clearErr = nil
+	if err := mod.Uninstall(context.Background(), "com.example.app"); err != nil {
+		t.Fatalf("retry Uninstall: %v", err)
+	}
+	if len(auth.removed) != 2 {
+		t.Fatalf("retry did not delete code and data: %+v", auth.removed)
 	}
 }
 

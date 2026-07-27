@@ -77,7 +77,7 @@ func TestConcurrentLifecycle(t *testing.T) {
 	if g.State() != motiongate.StateNormal {
 		t.Fatalf("gate stuck at %v after rearm attempts", g.State())
 	}
-	if l := m.cur.Load(); l != nil {
+	if l := m.current(ResourceBaseMain); l != nil {
 		if _, err := m.Check(l.ID, l.Conn); err != nil {
 			t.Fatalf("lease left in the slot is not self-consistent: %v", err)
 		}

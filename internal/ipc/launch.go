@@ -24,14 +24,14 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/service"
 )
 
 // permSystemLaunch 是发起 LaunchComponent 所需的权限。
 //
-// 与 permission.DefaultCatalog 里的条目【必须同名】——那边是定义，这里是执法点。
+// 与中央 catalog bootstrap 里的条目【必须同名】——那边是定义，这里是执法点。
 // 不是普通应用该有的能力：能任意拉起组件意味着能绕过 on-demand 的节能语义，
 // 也能把一个刚被停用又启用的组件立刻拉起。v1 只给 Launcher 与会话服务。
 const permSystemLaunch = "perm.system.launch"
@@ -39,6 +39,11 @@ const permSystemLaunch = "perm.system.launch"
 // handleLaunchComponent 处理一次启动请求。
 func (co *conn) handleLaunchComponent(req *ipcv1.LaunchComponent) bool {
 	reqID := req.GetRequestId()
+	if reqID == 0 {
+		co.log.Warn("ipc: LaunchComponent with reserved request_id 0, closing")
+		co.s.auditViolation(co.caller, errZeroRequestID)
+		return false
+	}
 
 	if co.s.launcher == nil {
 		// service 未接线（测试/裁剪构建）。回 UNAVAILABLE 而不是关连接：

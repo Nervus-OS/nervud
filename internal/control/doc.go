@@ -4,8 +4,8 @@
 //
 // # 控制权模型
 //
-// ControlLease 从语义第一天起就是 Resource-scoped；v1 唯一合法 Scope 为
-// {base.main}，因此内部退化为单个租约槽的 exclusive_control。
+// ControlLease 是 Resource-scoped：每个已经由 catalog 解析并验证的非空稳定 handle
+// 各有一个 exclusive_control 槽。control 不认识 base/arm/未来执行器的类型名。
 //
 //	SAFETY > HUMAN > AI > NONE
 //
@@ -19,15 +19,13 @@
 //	NONE  nil lease - 客户端不能申请它，它是当前没有有效租约的结论
 //
 // 并发不靠优先级维度解决，靠 Resource 维度：人遥控底盘时 AI 仍可控制其它 Resource。
-// v1 只有 base.main 一个执行器 Resource，所以这一层暂时看不出来，但 API
-// 形状从第一天就是 Resource-scoped，v2 放开时调用方不用改。
+// 同一连接可以同时持有多个 Resource；抢占、续租与 deadman 都只作用于目标槽。
 //
-// # Class 由调用方裁决，本包不信任何自报值
+// # Class 策略边界
 //
-// 远程客户端在请求里写 source=HUMAN 一律不可信。真正的裁决必须在 IPC
-// 请求管线通过身份、Permission 和 Policy 完成，control 只在拿到已裁决的 Class 之后
-// 执行租约状态机。同理，AI 现在该不该自主行动由 Agent Service 的策略决定，本包
-// 不查任何 policy - 内核层不设这道闸门是一个已知取舍（见下）。
+// control 不推断调用者是 HUMAN 还是 AI，只消费上层传入的 Class。当前 IPC 明确允许
+// 调用方自选并审计，因此 HUMAN 不是额外身份特权；未来若收紧，策略仍应在 IPC/权限层
+// 完成，本包的 Resource 槽与抢占状态机无需修改。
 //
 // # 依赖方向
 //
@@ -35,26 +33,31 @@
 // LeaseRevoker 是消费者定义的窄接口，*control.Module 隐式满足，装配因此单向无环
 // （main.go 先构造 control，再把它注入 safety.New）。
 //
+// 数据面通过 SetLeaseObserver 注入同样窄的 LeaseObserver，不让 control import
+// transfer。任何已生效 Lease 的终止边界只通知一次；Safety 的 RevokeAll 只写每槽预分配
+// 的待处理位置，由普通优先级的 drainRevoked 延后通知，绝不在 Safety Supervisor Lane
+// 回调外部代码。
+//
 // 因 import scheduler（其 sched.go 带 //go:build linux）本包整体是 linux-only，
 // 与 internal/safety 一致。
 //
 // # 并发模型（三条硬规则）
 //
-//	cur  atomic.Pointer[Lease] 读侧完全无锁：Check/Refresh 每条运动命令走一次，零堆分配
-//	mu   sync.Mutex       只序列化 control 自己的变更路径（签发/续租/释放/撤销/到期）
-//	fresh atomic.Int64      deadman 新鲜度，记距单调基准的纳秒，避免每条命令重建 Lease
+//	slots atomic.Pointer[slotIndex] 不可变槽目录，读侧无锁、扩容时 copy-on-write
+//	cur/fresh 每个 Resource 各一组原子槽，Check/Refresh 零堆分配且互不续命
+//	mu sync.Mutex 只序列化 control 自己的普通变更路径（签发/续租/释放/撤销/到期）
 //
 // 1. RevokeAll 绝不取 mu。它由 safety 的 Supervisor Lane（FIFO 90）在 beginHalt 里调用；
 // Go 的 mutex 没有优先级继承，等一个普通优先级的持锁者就是 FIFO 90 上的优先级反转。
-// 它只做一次 atomic Swap，并把被撤的租约交给 Control Lane 事后记账。
+// 它只扫描一次不可变槽快照、对每个 cur 做 atomic Swap，并把被撤租约留在对应槽内，
+// 交给 Control Lane 事后记账。
 //
 // 2. RevokeAll 不递增 epoch。每个边界只能递增一次，而 safety 触发时
 // gate.Trip 已经递增过了；这里再递增就是 churn。
 //
-// 3. 签发采用发布后复核：递增 epoch -> 发布租约 -> 重读 Gate；若此刻已锁存或 epoch
-// 再次变化，说明这条租约诞生即失效，立刻撤下。配合 Check 每次比对
-// lease.Epoch == gate.Epoch，构成三重 fail-closed - 即使签发与 Safety 触发并发，
-// 也不可能存在一条能授权运动的租约。
+// 3. motion epoch 是全局单调 token 分配器，但普通租约边界只撤目标 Resource；其它槽保留
+// 自己的 token。Safety Trip 的 epoch 记录为全局 floor，floor 及之前的所有租约都失效。
+// 签发仍采用发布后复核（Gate + RevokeAll seqlock），并发 Safety 不可能穿透。
 //
 // # Control Lane
 //
@@ -68,8 +71,10 @@
 //
 // # v1 已知取舍
 //
-//   - 内核层没有机器人能不能自主动的闸门：AI lease 的签发只受 Permission、Safety
-//     与 Resource 状态约束，自主模式策略在 Agent Service。
+//   - 内核层没有机器人能不能自主动的闸门。当前 AcquireControl 本身只受 Safety、
+//     Resource 与租约状态机约束；Permission 在具体 method 的派发门上重新裁决。
+//     因此无 method 权限的调用方发不了命令，但仍可能占住一个 lease 槽。把 class/会话
+//     资格或申请租约权限收紧，属于未来 IPC/权限策略点，不应下沉到 Provider。
 //   - 没有 on-behalf-of 归因：App 经 Agent 触发的动作，租约持有者是 Agent Service。
 //     内核审计只保证租约生命周期（签发/撤销的时刻与 epoch）可与 Agent Service 自己的
 //     日志对齐；Agent 崩溃丢日志时追溯链会断。

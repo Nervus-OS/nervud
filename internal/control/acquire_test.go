@@ -82,8 +82,8 @@ func TestAcquireRejectsMalformed(t *testing.T) {
 			wantErr: ErrInvalidRequest,
 		},
 		{
-			name:    "Resource is not base.main",
-			mutate:  func(r *Request) { r.Resource = "arm.left" },
+			name:    "Resource is empty",
+			mutate:  func(r *Request) { r.Resource = "" },
 			wantErr: ErrUnknownResource,
 		},
 		{
@@ -109,7 +109,7 @@ func TestAcquireRejectsMalformed(t *testing.T) {
 			if _, err := m.Acquire(req); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Acquire err = %v, want %v", err, tc.wantErr)
 			}
-			if m.cur.Load() != nil {
+			if m.current(ResourceBaseMain) != nil {
 				t.Fatal("rejected acquire must not publish a lease")
 			}
 			if g.Epoch() != before {
@@ -135,6 +135,58 @@ func TestShorterThanPolicyIsAccepted(t *testing.T) {
 	}
 }
 
+func TestRequestedTTLIsAClampedWirePreference(t *testing.T) {
+	t.Run("long preference clamps to policy", func(t *testing.T) {
+		m, _, _ := newTestModule(t)
+		req := humanReq(1)
+		req.RequestedTTL = time.Hour
+
+		lease := mustAcquire(t, m, req)
+		if lease.TTL != DefaultPolicy().Human.TTL {
+			t.Fatalf("ttl = %s, want policy %s", lease.TTL, DefaultPolicy().Human.TTL)
+		}
+	})
+
+	t.Run("short preference tightens default deadman", func(t *testing.T) {
+		m, _, _ := newTestModule(t)
+		req := humanReq(1)
+		req.RequestedTTL = 100 * time.Millisecond
+
+		lease := mustAcquire(t, m, req)
+		if lease.TTL != 100*time.Millisecond || lease.Deadman != lease.TTL {
+			t.Fatalf("ttl/deadman = %s/%s, want 100ms/100ms", lease.TTL, lease.Deadman)
+		}
+	})
+
+	t.Run("strict internal ttl still rejects over policy", func(t *testing.T) {
+		m, _, _ := newTestModule(t)
+		req := humanReq(1)
+		req.TTL = time.Hour
+		if _, err := m.Acquire(req); !errors.Is(err, ErrPolicyViolation) {
+			t.Fatalf("strict ttl error = %v, want ErrPolicyViolation", err)
+		}
+	})
+
+	t.Run("strict and preferred ttl are mutually exclusive", func(t *testing.T) {
+		m, _, _ := newTestModule(t)
+		req := humanReq(1)
+		req.TTL = time.Second
+		req.RequestedTTL = time.Second
+		if _, err := m.Acquire(req); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("mixed ttl error = %v, want ErrInvalidRequest", err)
+		}
+	})
+
+	t.Run("negative preference is malformed", func(t *testing.T) {
+		m, _, _ := newTestModule(t)
+		req := humanReq(1)
+		req.RequestedTTL = -time.Nanosecond
+		if _, err := m.Acquire(req); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("negative requested ttl error = %v, want ErrInvalidRequest", err)
+		}
+	})
+}
+
 func TestAcquireDeniedWhileLatched(t *testing.T) {
 	m, g, _ := newTestModule(t)
 	g.Trip()
@@ -142,7 +194,7 @@ func TestAcquireDeniedWhileLatched(t *testing.T) {
 	if _, err := m.Acquire(humanReq(1)); !errors.Is(err, ErrSafetyLatched) {
 		t.Fatalf("Acquire while latched = %v, want ErrSafetyLatched", err)
 	}
-	if m.cur.Load() != nil {
+	if m.current(ResourceBaseMain) != nil {
 		t.Fatal("no lease may be published while the gate is latched")
 	}
 

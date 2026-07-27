@@ -38,46 +38,41 @@ func (m *Module) runLane(ctx context.Context) {
 
 // onTick 检查一次到期与待记账的撤销
 //
-// 空闲（无租约、无待记账撤销）时全程无锁，只做两次原子 Load 就返回：mu 会被普通
-// 优先级的控制面路径持有，本 Lane 每 10ms 去抢一次纯属自找优先级反转
+// 空闲（无租约、无待记账撤销）时全程无锁：读一次不可变槽快照并逐槽原子 Load。
+// mu 会被普通优先级的控制面路径持有，本 Lane 每 10ms 去抢一次纯属优先级反转。
 func (m *Module) onTick(now time.Time) {
-	if m.revHead.Load() != m.revTail.Load() {
+	if m.revPending.Load() != 0 {
 		m.drainRevoked()
 	}
 
-	l := m.cur.Load()
-	if l == nil {
-		return
-	}
-	cause := m.leaseState(l, now)
-	if cause == nil {
-		return
-	}
-	// Safety 已锁存或 epoch 已被撤销：这条边界属于 safety，epoch 它已经递增过，
-	// 租约也会由 RevokeAll 收走。这里不抢着处理，否则会多递增一次 epoch
-	if errors.Is(cause, ErrSafetyLatched) || errors.Is(cause, ErrStaleEpoch) {
-		return
-	}
+	for _, slot := range m.slots.Load().all {
+		l := slot.cur.Load()
+		if l == nil {
+			continue
+		}
+		cause := m.leaseState(slot, l, now)
+		if cause == nil {
+			continue
+		}
+		// Safety 已锁存或 epoch 已被撤销：这条边界属于 safety，epoch 它已经递增过，
+		// 租约也会由 RevokeAll 收走。这里不抢着处理，否则会多递增一次 epoch。
+		if errors.Is(cause, ErrSafetyLatched) || errors.Is(cause, ErrStaleEpoch) {
+			continue
+		}
 
-	// 确实到期了才取锁，取锁后重核一次 - 锁前的判断可能已过时：一次 Refresh 可能刚
-	// 把新鲜度顶上来，或租约已被续租（换了新指针）/被 RevokeAll 收走。不重核就会把一条
-	// 又变有效的租约误撤。
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	cur := m.cur.Load()
-	if cur != l {
-		return // 已被续租换成新值，或已被别的路径收走
+		// 确实到期了才取锁，取锁后重核一次。其它槽的边界可能已把本槽换代成新指针，
+		// Refresh 也可能刚刷新本槽 freshness；两种情况都不能误撤。
+		m.mu.Lock()
+		cur := slot.cur.Load()
+		if cur == l {
+			cause = m.leaseState(slot, l, now)
+			if cause != nil &&
+				!errors.Is(cause, ErrSafetyLatched) && !errors.Is(cause, ErrStaleEpoch) {
+				m.dropLocked(slot, l, actionFor(cause), cause)
+			}
+		}
+		m.mu.Unlock()
 	}
-	// 用同一 tick 时间重核，但会重新读取 m.fresh - 竞态正是锁前判过期、锁后 fresh 已被
-	// Refresh 顶上来，重读 freshness 即可挡住，不必换用 time.Now（换了还会破坏用
-	// 合成时间驱动到期的测试）。
-	cause = m.leaseState(l, now)
-	if cause == nil ||
-		errors.Is(cause, ErrSafetyLatched) || errors.Is(cause, ErrStaleEpoch) {
-		return
-	}
-	m.dropLocked(l, actionFor(cause), cause)
 }
 
 // actionFor 把失效原因映射成审计 Action，让 deadman 失效与单纯的租约到期在离线
@@ -89,28 +84,24 @@ func actionFor(cause error) string {
 	return actionExpired
 }
 
-// drainRevoked 补记 RevokeAll 交办的撤销审计，排空整个环。
+// drainRevoked 补记 RevokeAll 交办的撤销审计，排空所有槽的待处理位置。
 //
 // RevokeAll 跑在 Safety Supervisor Lane（FIFO 90）上，只做原子写；把字符串格式化与
 // 审计写入挪到这里，是为了不让一条高优先级的安全路径去等普通优先级的审计设施。
 //
-// 单消费者：运行期只有 Control Lane 调用，Stop 只在 Lane 退出后调用（见 Module.Stop），
-// 二者不并发，故 revTail 无需 CAS，也不需要持 mu（读的是不可变 Lease 值与它的 epoch）。
+// Control Lane、Acquire（下一条租约发布前的顺序屏障）与 Stop 都可能消费，revDrainMu
+// 将它们串行化。该锁只存在于普通优先级 drain 路径；RevokeAll 不取锁。
 func (m *Module) drainRevoked() {
-	for {
-		tail := m.revTail.Load()
-		if tail >= m.revHead.Load() {
-			break
-		}
-		i := tail & (revokedRingSize - 1)
-		l := m.revLease[i].Load()
-		if l == nil {
-			break // 生产者已发布 head 但尚未写完这格，下次再来
-		}
-		epoch := m.revEpoch[i].Load()
-		m.revLease[i].Store(nil)
-		m.revTail.Store(tail + 1)
+	m.revDrainMu.Lock()
+	defer m.revDrainMu.Unlock()
 
+	for _, slot := range m.slots.Load().all {
+		l := slot.revoked.Swap(nil)
+		if l == nil {
+			continue
+		}
+		epoch := slot.revokedEpoch.Load()
+		m.notifyLeaseEnded(l)
 		m.aud.Record(context.Background(), audit.Event{
 			Action:  "control." + actionRevoked,
 			Subject: l.Owner.String(),
@@ -119,13 +110,8 @@ func (m *Module) drainRevoked() {
 			Detail: fmt.Sprintf("lease=%s class=%s resource=%s epoch=%d halt_epoch=%d",
 				l.ID, l.Class, l.Resource, l.Epoch, epoch),
 		})
-	}
-	if n := m.revDropped.Swap(0); n > 0 {
-		m.aud.Record(context.Background(), audit.Event{
-			Action:  "control.RevokeAuditDropped",
-			Subject: "kernel",
-			Denied:  true,
-			Detail:  fmt.Sprintf("dropped=%d", n),
-		})
+		// pending 覆盖整个 observer+audit 边界；Acquire 看到非零会等待 revDrainMu，
+		// 不会让迟到的旧 ControlLeaseEnded 误伤同 conn/resource 的新租约派生状态。
+		m.revPending.Add(^uint64(0))
 	}
 }

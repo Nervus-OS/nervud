@@ -10,21 +10,11 @@ import (
 	"time"
 
 	"github.com/nervus-os/nervud/internal/audit"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// resourceTypeMotionBase/resourceRoleMain 是空 Selector 时的隐式默认值。
-// 默认值属于 ResolveEndpoint 的 wire 语义，不属于 Registry 持有的 Resource
-// 数据，因此常量放在 endpoint 而不是 resource
-const (
-	resourceTypeMotionBase = "nervus.resource.motion.base"
-	resourceRoleMain       = "main"
-)
-
-// perm.service.register(.private) 的权限 ID 必须与 permission.DefaultCatalog
-// 中登记的一致。不在这里 import permission 只为两个
-// 字符串常量，避免额外耦合
 const (
 	permServiceRegister        = "perm.service.register"
 	permServiceRegisterPrivate = "perm.service.register.private"
@@ -60,7 +50,7 @@ type PackageLookup interface {
 // 接口定义与 ipc.PermissionChecker 完全一致，endpoint 和 ipc 各自持有一份到
 // *permission.Registry 的窄引用
 type PermissionChecker interface {
-	Allowed(packageID, permission string) bool
+	AllowedAt(snapshot *catalog.Snapshot, packageID, permission string) bool
 }
 
 // ComponentStarter 拉起一个 on-demand 组件（Resolve 解析到它时调用）
@@ -70,28 +60,18 @@ type ComponentStarter interface {
 	EnsureStarted(ctx context.Context, pkg, comp string) error
 }
 
-// ResourceResolver 是对 resource.Registry 的窄接口：把 (resource_type, role)
-// 解析成 resource_handle，并校验一个 handle 当前是否已知。实现由
-// *resource.Registry（或转发它的 *resource.Module）
-// 隐式满足，同 PackageLookup/PermissionChecker/ComponentStarter 的既有模式
-type ResourceResolver interface {
-	Resolve(resourceType, role string) (handle string, ok bool)
-	Valid(handle string) bool
-}
-
 // Module 是 endpoint 的 kernel.Module 实现，持有 Register/Resolve/Route 的
 // 全部运行期状态
 //
 // v1 的 Start/Stop 基本是空操作：它不持有自己的 RT Lane 或后台循环，全部状态
 // 都挂在每条 IPC 连接的生命周期上，随连接创建或销毁
 type Module struct {
-	pkgs      PackageLookup
-	perm      PermissionChecker
-	starter   ComponentStarter
-	resources ResourceResolver
-	aud       audit.Recorder
-	log       *slog.Logger
-	catalog   InterfaceCatalog
+	definitions *catalog.Registry
+	pkgs        PackageLookup
+	perm        PermissionChecker
+	starter     ComponentStarter
+	aud         audit.Recorder
+	log         *slog.Logger
 
 	mu sync.Mutex
 
@@ -114,13 +94,24 @@ type Module struct {
 
 // New 构造 endpoint 的 Module
 //
-// 窄接口注入（main.go 的装配范式）：pkgs/perm/starter/resources 分别由
-// *pkgregistry.Registry/*permission.Registry/*service.Manager/*resource.Module
-// 隐式满足
-func New(pkgs PackageLookup, perm PermissionChecker, starter ComponentStarter, resources ResourceResolver, aud audit.Recorder, log *slog.Logger) *Module {
+// definitions is the one authoritative catalog shared with permission,
+// resource, pkgregistry, and IPC. Endpoint keeps no fallback catalog: a
+// missing snapshot makes registration, resolution, and routing fail closed.
+func New(
+	definitions *catalog.Registry,
+	pkgs PackageLookup,
+	perm PermissionChecker,
+	starter ComponentStarter,
+	aud audit.Recorder,
+	log *slog.Logger,
+) *Module {
 	return &Module{
-		pkgs: pkgs, perm: perm, starter: starter, resources: resources, aud: aud, log: log,
-		catalog:       DefaultInterfaceCatalog(),
+		definitions:   definitions,
+		pkgs:          pkgs,
+		perm:          perm,
+		starter:       starter,
+		aud:           aud,
+		log:           log,
 		byConn:        make(map[ConnHandle]*connState),
 		byInterface:   make(map[string][]*serviceRegistration),
 		pendingStarts: make(map[componentKey][]chan struct{}),
@@ -130,8 +121,20 @@ func New(pkgs PackageLookup, perm PermissionChecker, starter ComponentStarter, r
 
 func (m *Module) Name() string { return "endpoint" }
 
-// Start 无后台循环需要起 - 全部状态挂在连接生命周期上
-func (m *Module) Start(context.Context) error { return nil }
+// Start has no worker to launch, but it rejects incomplete assembly before IPC
+// can accept connections.
+func (m *Module) Start(context.Context) error {
+	if m == nil {
+		return errors.New("endpoint: nil module")
+	}
+	if m.snapshot() == nil {
+		return errors.New("endpoint: authoritative catalog is unavailable")
+	}
+	if m.pkgs == nil || m.perm == nil || m.starter == nil {
+		return errors.New("endpoint: package, permission, and starter dependencies are required")
+	}
+	return nil
+}
 
 // Stop 只做一次日志层面的"还有 N 个存活 binding"诊断输出
 func (m *Module) Stop(context.Context) error {
@@ -194,21 +197,29 @@ func (m *Module) removeFromInterfaceIndexLocked(reg *serviceRegistration) {
 func (m *Module) visibleCandidatesLocked(callerPkg, interfaceID string) []*serviceRegistration {
 	var out []*serviceRegistration
 	for _, reg := range m.byInterface[interfaceID] {
-		if reg.packageID == callerPkg || reg.visibility == pkgregistry.VisibilityPublic {
+		if reg.live &&
+			(reg.packageID == callerPkg || reg.visibility == pkgregistry.VisibilityPublic) {
 			out = append(out, reg)
 		}
 	}
 	return out
 }
 
-// findOnDemandCandidate 在已装包里找哪个 (pkg, comp) 的 manifest 声明了
-// Exports 含 interfaceID 且对 callerPkg 可见
-//
-// 不持有 m.mu：pkgs.List 是 pkgregistry 自己的原子读，不需要 endpoint 的锁
-func (m *Module) findOnDemandCandidate(callerPkg, interfaceID string) (pkg, comp string, found bool) {
+// manifestOnDemandCandidates returns enabled Service components whose manifest
+// export is visible to callerPkg. This is only the package-side half of the
+// proof; Resolve must intersect it with catalog ProviderInterfaces before a
+// component is allowed to start.
+func (m *Module) manifestOnDemandCandidates(
+	callerPkg,
+	interfaceID string,
+) map[componentKey]struct{} {
+	if m == nil || m.pkgs == nil {
+		return nil
+	}
+	out := make(map[componentKey]struct{})
 	for _, e := range m.pkgs.List() {
 		for _, c := range e.Manifest.Components {
-			if e.ComponentDisabled(c.ID) {
+			if e.ComponentDisabled(c.ID) || c.Type != pkgregistry.ComponentService {
 				continue
 			}
 			for _, exp := range c.Exports {
@@ -216,12 +227,12 @@ func (m *Module) findOnDemandCandidate(callerPkg, interfaceID string) (pkg, comp
 					continue
 				}
 				if exp.Visibility == pkgregistry.VisibilityPublic || e.Manifest.PackageID == callerPkg {
-					return e.Manifest.PackageID, c.ID, true
+					out[componentKey{pkg: e.Manifest.PackageID, comp: c.ID}] = struct{}{}
 				}
 			}
 		}
 	}
-	return "", "", false
+	return out
 }
 
 // tryOnDemandStart 拉起一个 on-demand 组件并等待它完成 RegisterEndpoint
@@ -229,6 +240,9 @@ func (m *Module) findOnDemandCandidate(callerPkg, interfaceID string) (pkg, comp
 // 等待 channel 必须在调用 EnsureStarted 之前登记，否则组件启动得足够快时，
 // RegisterEndpoint 的广播可能发生在我们登记等待者之前，永远等不到唤醒
 func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, err error) {
+	if m == nil || m.starter == nil {
+		return false, errors.New("endpoint: component starter is unavailable")
+	}
 	key := componentKey{pkg: pkg, comp: comp}
 	ch := make(chan struct{})
 
@@ -271,4 +285,19 @@ func (m *Module) removeWaiterLocked(key componentKey, ch chan struct{}) {
 		return
 	}
 	m.pendingStarts[key] = waiters
+}
+
+func (m *Module) snapshot() *catalog.Snapshot {
+	if m == nil || m.definitions == nil {
+		return nil
+	}
+	return m.definitions.Current()
+}
+
+func (m *Module) allowedAt(snapshot *catalog.Snapshot, packageID, permission string) bool {
+	if permission == "" {
+		return true
+	}
+	return snapshot != nil && m != nil && m.perm != nil &&
+		m.perm.AllowedAt(snapshot, packageID, permission)
 }

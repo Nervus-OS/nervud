@@ -5,11 +5,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
 func TestRegistryReplace_RejectsEmptyPackageID(t *testing.T) {
-	r := NewRegistry(DefaultCatalog())
+	r := NewDefaultRegistry()
 	err := r.Replace([]Grant{{PackageID: "", Permissions: []string{"perm.a"}}})
 	if err == nil {
 		t.Fatal("an empty package ID must be rejected")
@@ -17,7 +18,7 @@ func TestRegistryReplace_RejectsEmptyPackageID(t *testing.T) {
 }
 
 func TestRegistryReplace_RejectsDuplicatePackageID(t *testing.T) {
-	r := NewRegistry(DefaultCatalog())
+	r := NewDefaultRegistry()
 	err := r.Replace([]Grant{
 		{PackageID: "com.a", Permissions: []string{"perm.a"}},
 		{PackageID: "com.a", Permissions: []string{"perm.b"}},
@@ -28,7 +29,7 @@ func TestRegistryReplace_RejectsDuplicatePackageID(t *testing.T) {
 }
 
 func TestRegistryReplace_FailureKeepsPreviousSnapshot(t *testing.T) {
-	r := NewRegistry(DefaultCatalog())
+	r := NewDefaultRegistry()
 	if err := r.Replace([]Grant{{PackageID: "com.good", Permissions: []string{"perm.diagnostics.read"}}}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestRegistryReplace_FailureKeepsPreviousSnapshot(t *testing.T) {
 }
 
 func TestRegistryAllowed(t *testing.T) {
-	r := NewRegistry(DefaultCatalog())
+	r := NewDefaultRegistry()
 	if err := r.Replace([]Grant{{PackageID: "com.a", Permissions: []string{"perm.diagnostics.read"}}}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestRegistryAllowed(t *testing.T) {
 }
 
 func TestRegistryAllowed_ReflectsRevocationImmediately(t *testing.T) {
-	r := NewRegistry(DefaultCatalog())
+	r := NewDefaultRegistry()
 	if err := r.Replace([]Grant{{PackageID: "com.a", Permissions: []string{"perm.diagnostics.read"}}}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -85,7 +86,6 @@ func TestRegistryAllowed_ReflectsRevocationImmediately(t *testing.T) {
 }
 
 func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
-	skipIfGrantAll(t)
 	var empty Registry
 	if empty.Allowed("com.a", "perm.diagnostics.read") {
 		t.Fatal("Allowed on an uninitialized Registry must return false")
@@ -93,7 +93,13 @@ func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 	if empty.Len() != 0 {
 		t.Fatal("an uninitialized Registry should have length 0")
 	}
-	granted, denied := empty.Intersect([]string{"perm.diagnostics.read"}, identity.TrustPlatform, nil)
+	granted, denied := empty.IntersectAt(
+		nil,
+		[]string{"perm.diagnostics.read"},
+		catalog.SourceKindSystemImage,
+		identity.TrustPlatform,
+		catalog.SignerEvidence{},
+	)
 	if len(granted) != 0 || len(denied) != 1 {
 		t.Fatalf("Intersect on an uninitialized Registry should deny everything, got granted=%v denied=%v", granted, denied)
 	}
@@ -107,10 +113,15 @@ func TestUninitializedRegistry_IsFailSafe(t *testing.T) {
 	}
 }
 
-func TestRegistryIntersect_UsesOwnCatalog(t *testing.T) {
-	skipIfGrantAll(t)
-	r := NewRegistry(DefaultCatalog())
-	granted, denied := r.Intersect([]string{"perm.diagnostics.read", "perm.platform.control"}, identity.TrustOrdinary, nil)
+func TestRegistryIntersectAt_UsesCentralCatalog(t *testing.T) {
+	r := NewDefaultRegistry()
+	granted, denied := r.IntersectAt(
+		r.definitions.Current(),
+		[]string{"perm.diagnostics.read", "perm.platform.control"},
+		catalog.SourceKindDynamicInstall,
+		identity.TrustOrdinary,
+		catalog.SignerEvidence{},
+	)
 	if len(granted) != 1 || granted[0] != "perm.diagnostics.read" {
 		t.Fatalf("granted = %v, want [perm.diagnostics.read]", granted)
 	}
@@ -120,7 +131,7 @@ func TestRegistryIntersect_UsesOwnCatalog(t *testing.T) {
 }
 
 func TestRegistry_ConcurrentReadWrite(t *testing.T) {
-	r := NewRegistry(DefaultCatalog())
+	r := NewDefaultRegistry()
 	if err := r.Replace([]Grant{{PackageID: "com.a", Permissions: []string{"perm.diagnostics.read"}}}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -155,4 +166,41 @@ func TestRegistry_ConcurrentReadWrite(t *testing.T) {
 
 	close(stop)
 	wg.Wait()
+}
+
+type recordingPermissionRevoker struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (r *recordingPermissionRevoker) RevokePermission(packageID, permission string) {
+	r.mu.Lock()
+	r.calls = append(r.calls, packageID+"/"+permission)
+	r.mu.Unlock()
+}
+
+func TestRegistryReplace_RevokesRemovedPermission(t *testing.T) {
+	r := NewDefaultRegistry()
+	revoker := &recordingPermissionRevoker{}
+	r.SetPermissionRevoker(revoker)
+	if err := r.Replace([]Grant{{
+		PackageID: "com.a",
+		Permissions: []string{
+			"perm.diagnostics.read",
+			"perm.storage.user",
+		},
+	}}); err != nil {
+		t.Fatalf("initial Replace: %v", err)
+	}
+	if err := r.Replace([]Grant{{
+		PackageID:   "com.a",
+		Permissions: []string{"perm.diagnostics.read"},
+	}}); err != nil {
+		t.Fatalf("replacement Replace: %v", err)
+	}
+	revoker.mu.Lock()
+	defer revoker.mu.Unlock()
+	if len(revoker.calls) != 1 || revoker.calls[0] != "com.a/perm.storage.user" {
+		t.Fatalf("revocations = %v, want removed permission only", revoker.calls)
+	}
 }
