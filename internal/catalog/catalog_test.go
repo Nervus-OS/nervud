@@ -117,6 +117,19 @@ func TestLegacyPackageManagerArtifactsOnlyBindCanonicalInterface(t *testing.T) {
 		string(method.Request.FullName()) != "nervus.interface.pkgmanager.v1.InstallRequest" {
 		t.Fatalf("legacy package-manager method = %+v, %v", method, ok)
 	}
+	iface, ok := candidate.Snapshot().Interface(InterfacePackageManager, 1)
+	if !ok || iface.RequiredPermission != "perm.pkg.query" {
+		t.Fatalf("package-manager interface permission = %q, %v; want perm.pkg.query",
+			iface.RequiredPermission, ok)
+	}
+	query, ok := candidate.Snapshot().Permission("perm.pkg.query")
+	if !ok || query.GrantMode != ipcv1.GrantMode_GRANT_MODE_NORMAL {
+		t.Fatalf("package query permission = %+v, %v", query, ok)
+	}
+	install, ok := candidate.Snapshot().Permission("perm.pkg.install")
+	if !ok || install.GrantMode != ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
+		t.Fatalf("package install permission = %+v, %v", install, ok)
+	}
 }
 
 func TestOEMPrivateProviderBuildsWithoutKernelSpecificCode(t *testing.T) {

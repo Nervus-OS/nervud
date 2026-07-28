@@ -84,7 +84,7 @@ func LegacyPackageManagerArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 			Interfaces: []*ipcv1.ProvidedInterface{bootstrapInterface(
 				InterfacePackageManager,
 				bundle,
-				"perm.pkg.install",
+				"perm.pkg.query",
 				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
 				nil,
 				"",
@@ -149,7 +149,7 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 			bootstrapInterface(
 				InterfacePackageManager,
 				packageBundle,
-				"perm.pkg.install",
+				"perm.pkg.query",
 				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
 				nil,
 				"",

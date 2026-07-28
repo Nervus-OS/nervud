@@ -456,6 +456,80 @@ func TestLegacyPackageManagerEmptySchemaBridgeIsNarrow(t *testing.T) {
 	}
 }
 
+func TestPackageManagerQueryDoesNotRequireInstallPermission(t *testing.T) {
+	definitions := defaultCatalog(t)
+	publishSources(t, definitions, legacyPackageManagerSource(t))
+	permissions := newFakePerm()
+	permissions.grant(legacyPackageManagerPackage, permServiceRegister)
+	permissions.grant(testCallerPackage, "perm.pkg.query")
+	module := testModule(
+		t,
+		definitions,
+		newFakePkgs(serviceEntry(
+			legacyPackageManagerPackage,
+			legacyPackageManagerComponent,
+			catalog.InterfacePackageManager,
+			pkgregistry.VisibilityPublic,
+		)),
+		permissions,
+		&fakeStarter{},
+	)
+
+	registered := module.RegisterEndpoint(
+		"service",
+		identity.Caller{
+			PackageID:   legacyPackageManagerPackage,
+			ComponentID: legacyPackageManagerComponent,
+		},
+		&ipcv1.RegisterEndpoint{
+			RequestId:      1,
+			InterfaceId:    catalog.InterfacePackageManager,
+			InterfaceMajor: legacyPackageManagerMajor,
+		},
+	)
+	if registered.GetSuccess() == nil {
+		t.Fatalf("RegisterEndpoint: %+v", registered.GetFailure())
+	}
+
+	resolved := module.ResolveEndpoint(
+		"caller",
+		identity.Caller{PackageID: testCallerPackage},
+		&ipcv1.ResolveEndpoint{
+			RequestId:         2,
+			InterfaceId:       catalog.InterfacePackageManager,
+			MinInterfaceMajor: legacyPackageManagerMajor,
+			MaxInterfaceMajor: legacyPackageManagerMajor,
+		},
+	)
+	if resolved.GetSuccess() == nil {
+		t.Fatalf("ResolveEndpoint with query permission: %+v", resolved.GetFailure())
+	}
+	endpointID := resolved.GetSuccess().GetEndpointId()
+
+	queryRoute, routeErr := module.Route("caller", endpointID, 3)
+	if routeErr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("List route without install permission = %v", routeErr.Code)
+	}
+	if len(queryRoute.RequiredPermissions) != 1 ||
+		queryRoute.RequiredPermissions[0] != "perm.pkg.query" {
+		t.Fatalf("List required permissions = %v", queryRoute.RequiredPermissions)
+	}
+
+	if _, routeErr = module.Route("caller", endpointID, 1); routeErr.Code != ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED {
+		t.Fatalf("Install route without install permission = %v, want PERMISSION_DENIED", routeErr.Code)
+	}
+	permissions.grant(testCallerPackage, "perm.pkg.install")
+	installRoute, routeErr := module.Route("caller", endpointID, 1)
+	if routeErr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		t.Fatalf("Install route with install permission = %v", routeErr.Code)
+	}
+	if len(installRoute.RequiredPermissions) != 2 ||
+		installRoute.RequiredPermissions[0] != "perm.pkg.query" ||
+		installRoute.RequiredPermissions[1] != "perm.pkg.install" {
+		t.Fatalf("Install required permissions = %v", installRoute.RequiredPermissions)
+	}
+}
+
 func TestResolveAndRouteUseOneCatalogContract(t *testing.T) {
 	module, definitions, _ := configuredMotionModule(t)
 	registerMotion(t, module, definitions, "service", testProviderPackage, testProviderComponent)
