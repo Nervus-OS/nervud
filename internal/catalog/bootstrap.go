@@ -5,6 +5,7 @@ import (
 
 	basemotionv1 "github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
 	manipulatorv1 "github.com/nervus-os/nervus-ipc/protocol/interface/manipulatorv1"
+	operationv1 "github.com/nervus-os/nervus-ipc/protocol/interface/operationv1"
 	pkgmanagerv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
 	resourcedirv1 "github.com/nervus-os/nervus-ipc/protocol/interface/resourcedirv1"
 	safetyv1 "github.com/nervus-os/nervus-ipc/protocol/interface/safetyv1"
@@ -39,6 +40,7 @@ func DefaultBootstrap() ([]Source, error) {
 			{ComponentID: "builtin.safety", InterfaceID: InterfaceSafetyControl},
 			{ComponentID: "builtin.transfer", InterfaceID: InterfaceTransferControl},
 			{ComponentID: "builtin.resourcedir", InterfaceID: InterfaceResourceDirectory},
+			{ComponentID: "builtin.operation", InterfaceID: InterfaceOperationControl},
 		},
 		Artifacts: artifacts,
 		KernelBuiltins: []KernelBuiltin{{
@@ -97,6 +99,15 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 		InterfaceResourceDirectory, 1, resourcedirv1.ResourceDirectoryMethod(0).Descriptor())
 	if err != nil {
 		return nil, fmt.Errorf("catalog: build resource-directory bootstrap schema: %w", err)
+	}
+	// 【带事件枚举】：OperationChanged 有载荷，必须走 bundle 而不是内联到
+	// descriptor——内联那条路是给元数据接口用的，它不允许 payload_type。
+	operationBundle, err := ipcregistry.BuildSchemaBundleWithEvents(
+		InterfaceOperationControl, 1,
+		operationv1.OperationControlMethod(0).Descriptor(),
+		operationv1.OperationControlEvent(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build operation-control bootstrap schema: %w", err)
 	}
 
 	descriptor := &ipcv1.ProviderDescriptor{
@@ -158,6 +169,19 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 				"",
 				"",
 			),
+			// 【不设 required_permission】：能不能查一个 operation，由它
+			// 自己的所有者关系决定（Manager.Get 的 canSee），不由一条全局
+			// 权限决定。加一条权限只会让「持有它就能看全机 operation」
+			// 变成一件可能的事。
+			bootstrapInterface(
+				InterfaceOperationControl,
+				operationBundle,
+				"",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
 		},
 		Resources: []*ipcv1.ManagedResource{
 			{
@@ -182,6 +206,7 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 		safetyBundle,
 		transferBundle,
 		resourceDirBundle,
+		operationBundle,
 	}}
 	return parseArtifacts(descriptor, bundles, "bootstrap")
 }

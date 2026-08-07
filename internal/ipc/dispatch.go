@@ -166,6 +166,11 @@ func (t *dispatchTable) publishDispatchAtEpoch(
 
 	var executionSnapshot *ipcv1.ExecutionContext
 	if execution != nil {
+		// 【逐字段拷贝，不是 proto.Clone】：这份快照是要冻结进 route 表的，
+		// 逐字段列出让「新增一个字段却忘了带过来」在代码评审时看得见。
+		//
+		// 代价是加字段时必须记得改这里——忘了的表现是 Provider 收到的
+		// ExecutionContext 少一个字段，而两边都不报错。
 		executionSnapshot = &ipcv1.ExecutionContext{
 			LeaseId:            execution.GetLeaseId(),
 			ControllerClass:    execution.GetControllerClass(),
@@ -173,6 +178,7 @@ func (t *dispatchTable) publishDispatchAtEpoch(
 			DeadlineNanos:      execution.GetDeadlineNanos(),
 			ResourceHandle:     execution.GetResourceHandle(),
 			ResourceGeneration: execution.GetResourceGeneration(),
+			OperationId:        execution.GetOperationId(),
 		}
 		if executionSnapshot.GetLeaseId() != 0 {
 			if t.nextCommandSequence == ^uint64(0) {

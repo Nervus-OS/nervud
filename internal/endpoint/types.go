@@ -29,6 +29,11 @@ type RouteInfo struct {
 	ProviderComponentID string
 	InterfaceID         string
 	InterfaceMajor      uint32
+	// InterfaceMinor / InterfaceSchemaHash 是【类型绑定】：调用方据它们恢复
+	// 解码 typed 载荷。长任务尤其需要——SDK 断线重连后手里只有一个
+	// operation_id，没有这份绑定就无从解码进度与结果。
+	InterfaceMinor      uint32
+	InterfaceSchemaHash []byte
 	ResourceHandle      string
 
 	Method                 catalog.MethodDefinition
@@ -92,6 +97,10 @@ type serviceRegistration struct {
 	// builtin 非 nil 表示这是 nervud 自己实现的内建 endpoint（见 builtin.go）：
 	// 没有 conn、恒 live，Route 返回它而不是转发目标。
 	builtin BuiltinHandler
+
+	// subscribeAdmit 非 nil 表示本内建接口的事件需要按实例作用域准入
+	// （见 BuiltinSubscribeAdmitter）。外部 registration 恒为 nil。
+	subscribeAdmit BuiltinSubscribeAdmitter
 
 	// live 为 false 表示该 registration 已失效（连接断开 / UnregisterEndpoint）。
 	// 引用它的 binding 在下次 Route 时据此判定失效 - 这是 v1 被动失效的落点，

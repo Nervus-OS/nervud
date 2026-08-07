@@ -21,6 +21,10 @@ type EventRoute struct {
 
 	// Event 携带权威 EventMeta：投递类别、速率上限、权限。
 	Event catalog.EventDefinition
+
+	// Admit 非 nil 时，本次订阅必须先经它裁决实例作用域（见
+	// BuiltinSubscribeAdmitter）。只有内建 endpoint 会给出它。
+	Admit BuiltinSubscribeAdmitter
 }
 
 // RouteEvent 校验一次订阅并给出事件源坐标。
@@ -91,6 +95,9 @@ func (m *Module) RouteEvent(
 		InterfaceID:        b.interfaceID,
 		InterfaceMajor:     b.interfaceMajor,
 		Event:              event,
+		// 内建才可能有准入。外部 registration 的 subscribeAdmit 恒为 nil，
+		// 它们的事件是 endpoint 作用域的。
+		Admit: b.target.subscribeAdmit,
 	}, RouteError{}
 }
 

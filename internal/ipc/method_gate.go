@@ -67,9 +67,21 @@ func (s *Server) validateDispatchResult(
 
 	if success := result.GetSuccess(); success != nil {
 		if err := protocheck.ValidateProviderStatus(
-			meta, protocheck.ProviderOutcomeSuccess, success.GetCode()); err != nil {
+			meta, protocheck.ProviderOutcomeSuccess, success.GetCode(),
+			s.operations != nil); err != nil {
 			return s.rejectProviderResult(entry, err)
 		}
+		// 长任务的 ACCEPTED 走单独一条：载荷由【内核】写，不是 Provider。
+		//
+		// 【Provider 不得自己写句柄】：operation_id 由 nervud 分配、状态机也归
+		// nervud。让 Provider 填这个字段等于让它指定「调用方拿到的是哪个
+		// operation」——填错或伪造的后果是取消永远取消不到、进度永远收不到，
+		// 而两边都不报错。
+		if meta.GetReturnsOperation() &&
+			success.GetCode() == ipcv1.StatusCode_STATUS_CODE_ACCEPTED {
+			return s.operationAcceptedResponse(entry, success)
+		}
+
 		checked, err := protocheck.ValidateSuccess(
 			meta, entry.route.Method.Response, success.GetPayload())
 		if err != nil {
@@ -90,7 +102,8 @@ func (s *Server) validateDispatchResult(
 
 	if failure := result.GetFailure(); failure != nil {
 		if err := protocheck.ValidateProviderStatus(
-			meta, protocheck.ProviderOutcomeFailure, failure.GetCode()); err != nil {
+			meta, protocheck.ProviderOutcomeFailure, failure.GetCode(),
+			s.operations != nil); err != nil {
 			return s.rejectProviderResult(entry, err)
 		}
 		if len(failure.GetErrorDetail()) != 0 {
@@ -128,7 +141,8 @@ func (s *Server) validateBuiltinResult(
 	if result.Code == ipcv1.StatusCode_STATUS_CODE_OK ||
 		result.Code == ipcv1.StatusCode_STATUS_CODE_ACCEPTED {
 		if err := protocheck.ValidateProviderStatus(
-			route.Method.Meta, protocheck.ProviderOutcomeSuccess, result.Code); err != nil {
+			route.Method.Meta, protocheck.ProviderOutcomeSuccess, result.Code,
+			s.operations != nil); err != nil {
 			return internalResponse(requestID), false
 		}
 		checked, err := protocheck.ValidateSuccess(
@@ -146,7 +160,8 @@ func (s *Server) validateBuiltinResult(
 	}
 
 	if err := protocheck.ValidateProviderStatus(
-		route.Method.Meta, protocheck.ProviderOutcomeFailure, result.Code); err != nil {
+		route.Method.Meta, protocheck.ProviderOutcomeFailure, result.Code,
+		s.operations != nil); err != nil {
 		return internalResponse(requestID), false
 	}
 	return failureResponse(requestID, result.Code), true

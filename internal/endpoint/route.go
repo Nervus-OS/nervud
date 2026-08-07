@@ -83,6 +83,8 @@ func (m *Module) Route(
 		ProviderComponentID:    b.target.componentID,
 		InterfaceID:            b.interfaceID,
 		InterfaceMajor:         b.interfaceMajor,
+		InterfaceMinor:         b.target.ifaceMinor,
+		InterfaceSchemaHash:    append([]byte(nil), b.target.schemaHash...),
 		ResourceHandle:         b.resourceHandle,
 		Method:                 method,
 		RegistrationGeneration: b.targetGeneration,

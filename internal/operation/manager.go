@@ -30,11 +30,16 @@ type ResourceValidator interface {
 // 的运动，且 epoch 新鲜（= 与活跃 motion epoch 一致）。任何存疑一律返回 false
 // （fail-closed）。
 //
-// v1 尚无 operation 的 wire proto，leaseID <-> control 的 lease 句柄（[16]byte +
-// ConnID）映射要等 dispatch 接线后提供。因此 main.go 目前注入 fail-closed
-// 占位实现，运动类 operation 在 wire 接线前一律被前置拒绝。
+// # 为什么第一个参数是 conn
+//
+// leaseID 是【连接作用域】的 wire 句柄，不是 control 内部的 [16]byte ID——
+// 两条不同连接上的同一个数字是两个毫无关系的租约。少了 conn，这个接口就无法
+// 表达一次有意义的查询：实现方只能拿着一个数字去猜它属于谁。
+//
+// 映射（wire 句柄 → control.ID）住在 ipc 的 conn 里，因此实现由 ipc 提供，
+// 由 main.go 在装配期注入。本包仍然不认识 control，也不认识 ipc。
 type LeaseValidator interface {
-	ValidLease(leaseID, epoch uint64, resource string) bool
+	ValidLease(conn ConnHandle, leaseID, epoch uint64, resource string) bool
 }
 
 // deadlineScanInterval 是后台 goroutine 扫描 deadline 到期的节拍。operation
@@ -80,6 +85,9 @@ type Manager struct {
 	ops  map[uint64]*Operation
 	subs map[uint64][]*subscription
 
+	// observer 是 wire 侧的事件旁路，见 SetEventObserver。
+	observer func(Event)
+
 	// nextID 单调递增分配 operation_id，从 1 起（0 为无效哨兵），不复用。
 	nextID atomic.Uint64
 
@@ -114,6 +122,54 @@ func New(res ResourceValidator, lease LeaseValidator, aud audit.Recorder, log *s
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
+}
+
+// SetLeaseValidator 在装配期补上租约校验器。
+//
+// # 为什么不能在 New 里传
+//
+// 校验器的实现住在 ipc（它同时握着 wire 句柄映射与 control 模块），而 ipc
+// 必须在 operation 之后构造——operation 要在 IPC 开门前就绪。构造顺序把这个
+// 依赖变成了一个环，用一次装配期回填打开它。
+//
+// 【在此之前 lease 为 nil，运动类 operation 一律 fail closed】。那正是想要的：
+// 装配没走完就放行运动，比拒绝危险得多。
+func (m *Manager) SetLeaseValidator(v LeaseValidator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lease = v
+}
+
+// leaseValidator 取当前校验器。validateCreate 跑在 m.mu 之外，而
+// SetLeaseValidator 在锁内写——不经这个取值器直接读就是数据竞争。
+func (m *Manager) leaseValidator() LeaseValidator {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lease
+}
+
+// SetEventObserver 安装 wire 侧的事件旁路。装配期调用一次，不在运行期换。
+//
+// # 为什么需要它，而不是让 ipc 用 Subscribe
+//
+// Subscribe 给的是进程内的 chan，一个订阅一条。wire 侧的扇出有自己的一套
+// （delivery_class 背压、SubscriptionClosed、连接断开清理），住在
+// internal/subscription 里。让 ipc 为每条 wire 订阅起一个 goroutine 去桥接
+// 两套机制，等于把「谁在观察这个 operation」记在两个地方——而两处一旦失步，
+// 表现是订阅方永远收不到事件，或者收到早该停的事件。
+//
+// 旁路只有一个，wire 侧自己按 operation_id 分发。
+//
+// # 【必须非阻塞，且不得回调进本包】
+//
+// 它在 m.mu 下被调用。阻塞会拖住状态机与 Safety 收敛；回调进来会死锁。
+//
+// 锁序固定为 operation.mu → subscription.mu，反向不存在（subscription 不认识
+// operation）。
+func (m *Manager) SetEventObserver(fn func(Event)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.observer = fn
 }
 
 func (m *Manager) Name() string { return "operation" }
@@ -183,10 +239,10 @@ func (m *Manager) loop() {
 //
 // conn 是拥有本 operation 的连接，供连接断开时收敛；
 // 系统内部创建传 nil。
-func (m *Manager) Create(conn ConnHandle, caller identity.Caller, origin OriginBinding,
+func (m *Manager) Create(conn, provider ConnHandle, caller identity.Caller, origin OriginBinding,
 	resources []string, leaseID, epoch uint64, deadline time.Time) (uint64, ipcv1.StatusCode) {
 
-	if code := m.validateCreate(caller, resources, leaseID, epoch, deadline); code != ipcv1.StatusCode_STATUS_CODE_OK {
+	if code := m.validateCreate(conn, caller, resources, leaseID, epoch, deadline); code != ipcv1.StatusCode_STATUS_CODE_OK {
 		m.recordRejected(caller, resources, leaseID, code)
 		return 0, code
 	}
@@ -197,17 +253,18 @@ func (m *Manager) Create(conn ConnHandle, caller identity.Caller, origin OriginB
 	// 底层数组，否则调用方事后改切片就篡改了权威绑定、还会与订阅者读并发成竞态。
 	origin.SchemaHash = cloneBytes(origin.SchemaHash)
 	op := &Operation{
-		ID:          id,
-		Origin:      origin,
-		Caller:      caller,
-		Resources:   cloneStrings(resources),
-		LeaseID:     leaseID,
-		MotionEpoch: epoch,
-		Deadline:    deadline,
-		State:       StatePending,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		conn:        conn,
+		ID:           id,
+		Origin:       origin,
+		Caller:       caller,
+		Resources:    cloneStrings(resources),
+		LeaseID:      leaseID,
+		MotionEpoch:  epoch,
+		Deadline:     deadline,
+		State:        StatePending,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		conn:         conn,
+		providerConn: provider,
 	}
 
 	m.mu.Lock()
@@ -229,7 +286,7 @@ func (m *Manager) Create(conn ConnHandle, caller identity.Caller, origin OriginB
 }
 
 // validateCreate 跑 Create 的全部前置校验，返回 OK 表示通过。不改任何状态。
-func (m *Manager) validateCreate(caller identity.Caller, resources []string,
+func (m *Manager) validateCreate(conn ConnHandle, caller identity.Caller, resources []string,
 	leaseID, epoch uint64, deadline time.Time) ipcv1.StatusCode {
 
 	// 必须至少绑定一个 resource；空句柄是畸形请求。
@@ -264,10 +321,11 @@ func (m *Manager) validateCreate(caller identity.Caller, resources []string,
 	// 运动类由 leaseID != 0 数据驱动，必须有有效 lease 和新鲜 epoch，
 	// 且绑定到本 operation 的唯一 resource（v1 单 resource）。
 	if leaseID != 0 {
-		if m.lease == nil {
+		validator := m.leaseValidator()
+		if validator == nil {
 			return ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION
 		}
-		if !m.lease.ValidLease(leaseID, epoch, resources[0]) {
+		if !validator.ValidLease(conn, leaseID, epoch, resources[0]) {
 			return ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION
 		}
 	}
@@ -282,6 +340,29 @@ func (m *Manager) Get(caller identity.Caller, id uint64) (Operation, bool) {
 	defer m.mu.Unlock()
 	op, ok := m.ops[id]
 	if !ok || !canSee(caller, op) {
+		return Operation{}, false
+	}
+	return op.clone(), true
+}
+
+// ProviderOperation 按【执行方连接】查一个 operation。
+//
+// 回报侧（Accept/Progress/Complete）的归属检查走它：Provider 只能回报 nervud
+// 派给它的那些。少了这道绑定，任何一个系统服务都能把别人的 operation 报成
+// 失败——而调用方看到的是一次「正常」的失败，连细因都是伪造的那一份。
+//
+// 【不存在与不归你，同一个回答】：区分开会告诉调用方「这个 id 存在，只是不
+// 归你」，那本身就是信息。与 Get 的不可区分投影一致。
+func (m *Manager) ProviderOperation(provider ConnHandle, id uint64) (Operation, bool) {
+	if provider == nil {
+		// nil 执行方意味着「内建承载、没有外部 Provider」。允许它匹配会让任何
+		// 拿不到连接的调用方都能回报——fail closed。
+		return Operation{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.ops[id]
+	if !ok || op.providerConn != provider {
 		return Operation{}, false
 	}
 	return op.clone(), true
@@ -479,6 +560,11 @@ func (m *Manager) terminateLocked(op *Operation, to State, status ipcv1.StatusCo
 		op.TerminalResult = cloneBytes(detail)
 	case StateFailed:
 		op.TerminalError = cloneBytes(detail)
+	case StateUnspecified:
+	case StatePending:
+	case StateRunning:
+	case StateCancelRequested:
+	case StateCancelled:
 	}
 	m.emitLocked(op, Event{
 		OperationID:    op.ID,
@@ -503,13 +589,21 @@ func (m *Manager) terminateLocked(op *Operation, to State, status ipcv1.StatusCo
 // 这一份副本，Event 对接收方按只读约定使用。
 func (m *Manager) emitLocked(op *Operation, ev Event) {
 	subs := m.subs[op.ID]
-	if len(subs) == 0 {
+	observer := m.observer
+	if len(subs) == 0 && observer == nil {
 		return
 	}
 	ev.Origin.SchemaHash = cloneBytes(ev.Origin.SchemaHash)
 	ev.Payload = cloneBytes(ev.Payload)
 	ev.TerminalResult = cloneBytes(ev.TerminalResult)
 	ev.TerminalError = cloneBytes(ev.TerminalError)
+
+	// 旁路先走：wire 上的订阅方通过它收事件，而进程内的 chan 订阅者是
+	// 另一条路。顺序在这里没有语义，但固定下来让审计时序可复现。
+	if observer != nil {
+		observer(ev)
+	}
+
 	for _, sub := range subs {
 		if sub.closed {
 			continue

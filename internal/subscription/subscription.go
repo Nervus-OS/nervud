@@ -31,7 +31,8 @@ type Sink interface {
 	Deliver(env *ipcv1.Envelope) bool
 }
 
-// Key 唯一标识一个事件源：Provider 连接上的某个 endpoint 的某个事件。
+// Key 唯一标识一个事件源：Provider 连接上的某个 endpoint 的某个事件，
+// 外加一个可选的实例作用域。
 //
 // 用 Provider 侧的 (连接, endpoint_id) 而不是接口名：同一个接口可以有多个
 // Provider，订阅方订的是【它解析到的那一个】，不是「所有实现了这个接口的」。
@@ -39,6 +40,26 @@ type Key struct {
 	ProviderConn any
 	EndpointID   uint64
 	EventID      uint32
+
+	// Scope 把一个 endpoint 上的多个可独立观察的实例分开。0 = 不分。
+	//
+	// # 它解决的问题
+	//
+	// 一个内建 endpoint 上跑着全机的 operation，一路摄像头上开着好几条 stream。
+	// 没有 Scope 的话，订阅方会收到【全部实例】的事件——那不只是浪费带宽，
+	// 是信息泄漏：别人的进度、失败细因、资源句柄都会送到。
+	//
+	// # 为什么是 uint64 而不是 any
+	//
+	// 现实里的实例标识全是数字句柄（operation_id、stream_id），而 any 作为
+	// map 键会在运行时因为不可比较的动态类型 panic——那种 panic 发生在扇出
+	// 热路径上，会带走整个 nervud。
+	//
+	// # 精确匹配，没有通配
+	//
+	// Scope 不同即收不到。想「订阅全部」就是回到广播，而广播正是本字段要
+	// 解决的问题。需要整机视角的运维工具走管理通道，不走 App 控制面。
+	Scope uint64
 }
 
 // subscription 是一条已建立的订阅。
@@ -234,10 +255,47 @@ func (r *Registry) CloseConn(callerConn any) []uint64 {
 	return ids
 }
 
+// CloseScope 终止指向某个实例的全部订阅。
+//
+// 实例消失时调用——一个 operation 走到终态并被回收之后，再也不会有它的事件。
+// 【不关同一 endpoint 上别的实例】：那些还活着。
+//
+// 与 CloseProviderEndpoint 的关系是包含：那个关整个 endpoint（endpoint 本身
+// 失效了），这个只关一个实例。用错的后果方向相反——用前者会误杀别人的订阅，
+// 用后者会漏掉本该关的。
+func (r *Registry) CloseScope(
+	providerConn any, endpointID, scope uint64, reason ipcv1.SubscriptionClosedReason,
+) []Closed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var closed []Closed
+	for key, list := range r.byKey {
+		if key.ProviderConn != providerConn || key.EndpointID != endpointID ||
+			key.Scope != scope {
+			continue
+		}
+		for _, s := range list {
+			closed = append(closed, Closed{
+				Conn: s.conn, SubscriptionID: s.id, Reason: reason,
+			})
+			if subs := r.byConn[s.conn]; subs != nil {
+				delete(subs, s.id)
+				if len(subs) == 0 {
+					delete(r.byConn, s.conn)
+				}
+			}
+		}
+		delete(r.byKey, key)
+	}
+	return closed
+}
+
 // CloseProviderEndpoint 终止指向某个 Provider endpoint 的全部订阅。
 //
 // endpoint 失效或被撤权时调用：那之后再也不会有事件，让订阅方一直等着比
-// 明确告诉它更糟。
+// 明确告诉它更糟。【跨全部实例作用域】——endpoint 都没了，它上面的实例
+// 自然也没了。
 func (r *Registry) CloseProviderEndpoint(
 	providerConn any, endpointID uint64, reason ipcv1.SubscriptionClosedReason,
 ) []Closed {

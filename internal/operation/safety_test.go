@@ -24,7 +24,7 @@ func TestSafetySupersede_ConvergesRunningMotionOp(t *testing.T) {
 
 func TestSafetySupersede_NonMotionUntouched(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
-	id, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
+	id, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
 	if code != acceptedCode {
 		t.Fatalf("Create non-motion: %v", code)
 	}

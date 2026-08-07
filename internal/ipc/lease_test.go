@@ -89,6 +89,31 @@ func (f *fakeLeases) Release(id control.ID, conn control.ConnID) error {
 	return nil
 }
 
+// CheckLease 按内部租约 ID 反查。替身里 active 是按 (conn, resource) 索引的，
+// 所以这里线性扫一遍——测试规模下无所谓，而多维护一张索引反而更容易与
+// Acquire/Release 失步。
+func (f *fakeLeases) CheckLease(id control.ID, conn control.ConnID) (control.LeaseProof, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.checkErr != nil {
+		return control.LeaseProof{}, f.checkErr
+	}
+	for _, lease := range f.active {
+		if lease.ID != id || lease.Conn != conn {
+			continue
+		}
+		return control.LeaseProof{
+			ID:                 lease.ID,
+			Class:              lease.Class,
+			Resource:           lease.Resource,
+			ResourceGeneration: lease.ResourceGeneration,
+			Deadline:           lease.Deadline,
+			Epoch:              lease.Epoch,
+		}, nil
+	}
+	return control.LeaseProof{}, control.ErrControlNotHeld
+}
+
 func (f *fakeLeases) CheckResource(
 	conn control.ConnID,
 	resource string,

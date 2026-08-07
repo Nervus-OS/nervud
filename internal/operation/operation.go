@@ -124,9 +124,19 @@ type Operation struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	// conn 是拥有本 operation 的连接，未导出：外部快照看不到它，只用于
-	// ReleaseByConn 的按连接收敛。系统内部创建时为 nil。
+	// conn 是拥有本 operation 的【调用方】连接，未导出：外部快照看不到它，
+	// 只用于 ReleaseByConn 的按连接收敛。系统内部创建时为 nil。
 	conn ConnHandle
+
+	// providerConn 是【执行方】连接，即 nervud 把这次调用 Dispatch 给了谁。
+	//
+	// 它是回报侧的归属凭据：Provider 只能 Accept/Progress/Complete
+	// nervud 派给它的那些。少了这道绑定，任何一个系统服务都能把别人的
+	// operation 报成失败——而调用方看到的是一次「正常」的失败，连细因都是
+	// 伪造的那一份。
+	//
+	// 内建 endpoint 承载的 operation 没有外部执行方，为 nil。
+	providerConn ConnHandle
 }
 
 // clone 返回一份对外安全的深拷贝：切片字段独立，调用方改动不回写内部状态。

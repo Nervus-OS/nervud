@@ -61,6 +61,44 @@ type BuiltinResult struct {
 // behavior.
 type BuiltinHandler func(BuiltinCall) BuiltinResult
 
+// BuiltinSubscribeCall 是一次订阅准入询问。
+//
+// 【只在事件声明了 EventMeta.subscribe_payload_type 时发生】。没声明的事件
+// 是 endpoint 作用域的，谁能 Resolve 到这个 endpoint 谁就能订，不需要再问。
+type BuiltinSubscribeCall struct {
+	Caller  identity.Caller
+	EventID uint32
+	// Payload 是 Subscribe.payload 原始字节，类型由 subscribe_payload_type 决定。
+	// 由 endpoint 所有者解码——内核不替它猜。
+	Payload []byte
+}
+
+// BuiltinSubscribeResult 是准入结果。
+type BuiltinSubscribeResult struct {
+	// Scope 是这次订阅绑定的实例（operation_id、stream_id 一类）。
+	// Code 为 OK 时【必须非 0】：0 表示不分实例，而那正是准入要防的广播。
+	Scope uint64
+	// Code 为 OK 表示放行。其余值原样回给订阅方。
+	Code ipcv1.StatusCode
+}
+
+// BuiltinSubscribeAdmitter 判定一次订阅是否放行，并给出它的实例作用域。
+//
+// # 为什么这道判定必须在 Subscribe 时做，而不是扇出时过滤
+//
+// 订上了再逐条丢弃会让调用方以为自己在观察，然后一直等一个永远不来的事件。
+// 「订不上」是一次明确的失败，调用方立刻知道该怎么办。
+//
+// # 为什么只有内建 endpoint 有这个能力
+//
+// 本函数跑在【连接的读循环里】。内建的实现是进程内的一次查表，微秒级；
+// 换成外部 Provider 就意味着一次往返，而那会让整条连接上的请求响应、Ping、
+// 乃至别的订阅一起卡住。外部 Provider 的订阅准入需要先把 Subscribe 做成
+// 异步（与 Request/Dispatch 同形），那是另一件事。
+//
+// 因此实现【不得阻塞、不得 panic】。它是内核代码，两条都由作者保证。
+type BuiltinSubscribeAdmitter func(BuiltinSubscribeCall) BuiltinSubscribeResult
+
 // RegisterBuiltin 注册一个由 nervud 自己实现的 Interface。
 //
 // 装配期调用（main.go），不在运行期动态增删——内建能力是内核的一部分，
@@ -119,6 +157,63 @@ func (m *Module) RegisterBuiltin(interfaceID string, major, minor uint32, h Buil
 	}
 	m.byInterface[interfaceID] = append(m.byInterface[interfaceID], reg)
 	return nil
+}
+
+// BuiltinEndpointID 返回一个内建接口的 registration 句柄。
+//
+// 事件扇出需要它：扇出键是 (ProviderConn, EndpointID, EventID, Scope)，而内建
+// 没有 conn，EndpointID 就是唯一能定位事件源的东西。
+//
+// 【必须与 RouteEvent 给订阅方的那个是同一个数字】。订阅登记用 RouteEvent 的
+// ProviderEndpointID，扇出用这里的返回值；对不上就是订阅方永远收不到事件——
+// 而两边都不报错，因为各自看来都是合法的键。
+func (m *Module) BuiltinEndpointID(interfaceID string, major uint32) (uint64, bool) {
+	if m == nil {
+		return 0, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, reg := range m.byInterface[interfaceID] {
+		if reg.builtin != nil && reg.ifaceMajor == major {
+			return reg.id, true
+		}
+	}
+	return 0, false
+}
+
+// RegisterBuiltinSubscriber 给一个已注册的内建接口装上订阅准入。
+//
+// 【必须在 RegisterBuiltin 之后调用】。分成两步而不是给 RegisterBuiltin 加参数：
+// 四个内建里只有一个需要准入，让另外三个都写一个 nil 会让「不需要」和
+// 「忘了写」在代码里长得一模一样。
+func (m *Module) RegisterBuiltinSubscriber(
+	interfaceID string, major uint32, admit BuiltinSubscribeAdmitter,
+) error {
+	if m == nil {
+		return fmt.Errorf("endpoint: nil module")
+	}
+	if admit == nil {
+		return fmt.Errorf("endpoint: builtin %q@%d requires a non-nil admitter",
+			interfaceID, major)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, reg := range m.byInterface[interfaceID] {
+		if reg.builtin == nil || reg.ifaceMajor != major {
+			continue
+		}
+		if reg.subscribeAdmit != nil {
+			// 重复注册会让「哪一个准入在生效」取决于装配顺序。与 RegisterBuiltin
+			// 拒绝重复注册同一条理由。
+			return fmt.Errorf("endpoint: builtin %q@%d already has a subscribe admitter",
+				interfaceID, major)
+		}
+		reg.subscribeAdmit = admit
+		return nil
+	}
+	return fmt.Errorf("endpoint: builtin %q@%d is not registered", interfaceID, major)
 }
 
 // visibilityPublicForBuiltin 是内建 endpoint 的可见性。

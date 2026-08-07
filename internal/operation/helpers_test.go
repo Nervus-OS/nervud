@@ -56,9 +56,17 @@ func (f fakeResource) Valid(h string) bool { return f.valid[h] }
 
 type fakeLease struct {
 	ok bool
+
+	// sawConn 记下最后一次校验拿到的连接，供断言 conn 确实被透传下来。
+	// 【它必须到达 control 侧】：leaseID 是连接作用域句柄，两条连接上的同一个
+	// 数字是两个毫无关系的租约。
+	sawConn ConnHandle
 }
 
-func (f fakeLease) ValidLease(_, _ uint64, _ string) bool { return f.ok }
+func (f *fakeLease) ValidLease(conn ConnHandle, _, _ uint64, _ string) bool {
+	f.sawConn = conn
+	return f.ok
+}
 
 type clock struct {
 	mu sync.Mutex
@@ -97,7 +105,7 @@ func newTestManager(t *testing.T, leaseOK bool) (*Manager, *fakeAuditor, *clock)
 	clk := &clock{t: time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)}
 	m := New(
 		fakeResource{valid: map[string]bool{testResource: true}},
-		fakeLease{ok: leaseOK},
+		&fakeLease{ok: leaseOK},
 		aud,
 		discardLog(),
 	)
@@ -117,7 +125,7 @@ func testOrigin() OriginBinding {
 func createMotion(t *testing.T, m *Manager, conn ConnHandle, caller identity.Caller, epoch uint64) uint64 {
 	t.Helper()
 	deadline := m.now().Add(time.Minute)
-	id, code := m.Create(conn, caller, testOrigin(), []string{testResource}, 42, epoch, deadline)
+	id, code := m.Create(conn, nil, caller, testOrigin(), []string{testResource}, 42, epoch, deadline)
 	if code != acceptedCode {
 		t.Fatalf("Create motion: code=%v, want ACCEPTED", code)
 	}

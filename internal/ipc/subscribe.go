@@ -60,12 +60,18 @@ func (co *conn) handleSubscribe(req *ipcv1.Subscribe) bool {
 		return co.enqueue(subscribeFailure(reqID, routeErr.Code))
 	}
 
+	scope, code := co.admitSubscription(route, req)
+	if code != ipcv1.StatusCode_STATUS_CODE_OK {
+		return co.enqueue(subscribeFailure(reqID, code))
+	}
+
 	id := co.s.subscriptions.Subscribe(
 		co, co, req.GetEndpointId(),
 		subscription.Key{
 			ProviderConn: route.ProviderConn,
 			EndpointID:   route.ProviderEndpointID,
 			EventID:      req.GetEventId(),
+			Scope:        scope,
 		},
 		route.Event.Meta,
 	)
@@ -83,6 +89,57 @@ func (co *conn) handleSubscribe(req *ipcv1.Subscribe) bool {
 			},
 		},
 	}})
+}
+
+// admitSubscription 裁决一次订阅的实例作用域。
+//
+// 【契约说了算】：EventMeta.subscribe_payload_type 非空 = 本事件按实例分，
+// 必须有人回答「这个调用方能不能订这个实例」；为空 = endpoint 作用域，
+// 谁能 Resolve 到就能订。
+//
+// 四种组合里只有一种放行，其余全部 fail closed——两侧不一致时，任何一个方向的
+// 猜测都会造成实际后果：猜「按实例」会让合法订阅收不到事件，猜「按 endpoint」
+// 会把别人的事件送出去。
+func (co *conn) admitSubscription(
+	route endpoint.EventRoute, req *ipcv1.Subscribe,
+) (uint64, ipcv1.StatusCode) {
+	scoped := route.Event.Meta.GetSubscribePayloadType() != ""
+
+	if !scoped {
+		if len(req.GetPayload()) != 0 {
+			// 契约没声明订阅参数，调用方却带了一份。静默忽略会让它以为自己
+			// 加了过滤条件，然后收到全部事件却不知道过滤没生效。
+			return 0, ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT
+		}
+		return 0, ipcv1.StatusCode_STATUS_CODE_OK
+	}
+
+	if route.Admit == nil {
+		// 契约要求按实例订阅，但这个 endpoint 没有准入实现——当前只有内建
+		// 支持（见 BuiltinSubscribeAdmitter 的说明）。
+		//
+		// 【必须拒绝】：放行等于按 endpoint 作用域订阅一个明确声明了要按实例
+		// 分的事件，那正是契约在防的泄漏。回 UNAVAILABLE 而不是 INTERNAL——
+		// 这是能力缺口，不是调用方的错。
+		return 0, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE
+	}
+
+	result := route.Admit(endpoint.BuiltinSubscribeCall{
+		Caller:  co.caller,
+		EventID: req.GetEventId(),
+		Payload: req.GetPayload(),
+	})
+	if result.Code != ipcv1.StatusCode_STATUS_CODE_OK {
+		return 0, result.Code
+	}
+	if result.Scope == 0 {
+		// 准入放行却没给作用域。0 表示「不分实例」，用在这里等于广播——
+		// 而这条路径存在的全部理由就是不广播。当成内核装配 bug 拒掉。
+		co.log.Error("ipc: builtin subscribe admitter returned OK with zero scope",
+			"event_id", req.GetEventId())
+		return 0, ipcv1.StatusCode_STATUS_CODE_INTERNAL
+	}
+	return result.Scope, ipcv1.StatusCode_STATUS_CODE_OK
 }
 
 func (co *conn) handleUnsubscribe(req *ipcv1.Unsubscribe) bool {

@@ -9,7 +9,7 @@ import (
 func TestCreate_Validation(t *testing.T) {
 	t.Run("no resources", func(t *testing.T) {
 		m, aud, _ := newTestManager(t, true)
-		id, code := m.Create(nil, testCaller(), testOrigin(), nil, 0, 0, m.now().Add(time.Minute))
+		id, code := m.Create(nil, nil, testCaller(), testOrigin(), nil, 0, 0, m.now().Add(time.Minute))
 		if code != invalidCode || id != 0 {
 			t.Fatalf("empty resources: id=%d code=%v, want 0/INVALID_ARGUMENT", id, code)
 		}
@@ -20,7 +20,7 @@ func TestCreate_Validation(t *testing.T) {
 
 	t.Run("empty handle", func(t *testing.T) {
 		m, _, _ := newTestManager(t, true)
-		_, code := m.Create(nil, testCaller(), testOrigin(), []string{""}, 0, 0, m.now().Add(time.Minute))
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{""}, 0, 0, m.now().Add(time.Minute))
 		if code != invalidCode {
 			t.Fatalf("empty handle: code=%v, want INVALID_ARGUMENT", code)
 		}
@@ -28,7 +28,7 @@ func TestCreate_Validation(t *testing.T) {
 
 	t.Run("unknown resource", func(t *testing.T) {
 		m, _, _ := newTestManager(t, true)
-		_, code := m.Create(nil, testCaller(), testOrigin(), []string{"no.such"}, 0, 0, m.now().Add(time.Minute))
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{"no.such"}, 0, 0, m.now().Add(time.Minute))
 		if code != preconCode {
 			t.Fatalf("unknown resource: code=%v, want FAILED_PRECONDITION", code)
 		}
@@ -37,7 +37,7 @@ func TestCreate_Validation(t *testing.T) {
 	t.Run("motion without lease validator", func(t *testing.T) {
 		aud := &fakeAuditor{}
 		m := New(fakeResource{valid: map[string]bool{testResource: true}}, nil, aud, discardLog())
-		_, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 42, 1, m.now().Add(time.Minute))
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 42, 1, m.now().Add(time.Minute))
 		if code != preconCode {
 			t.Fatalf("motion w/o validator: code=%v, want FAILED_PRECONDITION (fail-closed)", code)
 		}
@@ -45,7 +45,7 @@ func TestCreate_Validation(t *testing.T) {
 
 	t.Run("motion with invalid lease", func(t *testing.T) {
 		m, _, _ := newTestManager(t, false) // lease validator rejects
-		_, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 42, 1, m.now().Add(time.Minute))
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 42, 1, m.now().Add(time.Minute))
 		if code != preconCode {
 			t.Fatalf("invalid lease: code=%v, want FAILED_PRECONDITION", code)
 		}
@@ -55,9 +55,9 @@ func TestCreate_Validation(t *testing.T) {
 		aud := &fakeAuditor{}
 		m := New(
 			fakeResource{valid: map[string]bool{testResource: true, "gripper.main": true}},
-			fakeLease{ok: true}, aud, discardLog(),
+			&fakeLease{ok: true}, aud, discardLog(),
 		)
-		_, code := m.Create(nil, testCaller(), testOrigin(),
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(),
 			[]string{testResource, "gripper.main"}, 42, 1, time.Now().Add(time.Minute))
 		if code != invalidCode {
 			t.Fatalf("multi-resource motion: code=%v, want INVALID_ARGUMENT", code)
@@ -66,7 +66,7 @@ func TestCreate_Validation(t *testing.T) {
 
 	t.Run("expired deadline", func(t *testing.T) {
 		m, _, _ := newTestManager(t, true)
-		_, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(-time.Second))
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(-time.Second))
 		if code != invalidCode {
 			t.Fatalf("past deadline: code=%v, want INVALID_ARGUMENT", code)
 		}
@@ -74,7 +74,7 @@ func TestCreate_Validation(t *testing.T) {
 
 	t.Run("far-future deadline", func(t *testing.T) {
 		m, _, _ := newTestManager(t, true)
-		_, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(2*time.Hour))
+		_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(2*time.Hour))
 		if code != invalidCode {
 			t.Fatalf("absurd deadline: code=%v, want INVALID_ARGUMENT", code)
 		}
@@ -82,7 +82,7 @@ func TestCreate_Validation(t *testing.T) {
 
 	t.Run("happy non-motion", func(t *testing.T) {
 		m, aud, _ := newTestManager(t, true)
-		id, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
+		id, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
 		if code != acceptedCode || id == 0 {
 			t.Fatalf("non-motion happy: id=%d code=%v", id, code)
 		}
@@ -109,7 +109,7 @@ func TestCreate_MonotonicIDs(t *testing.T) {
 	m, _, _ := newTestManager(t, true)
 	var prev uint64
 	for i := 0; i < 5; i++ {
-		id, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
+		id, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
 		if code != acceptedCode {
 			t.Fatalf("Create %d: code=%v", i, code)
 		}
@@ -289,7 +289,7 @@ func TestStop_RejectsNewCreate(t *testing.T) {
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	_, code := m.Create(nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
+	_, code := m.Create(nil, nil, testCaller(), testOrigin(), []string{testResource}, 0, 0, m.now().Add(time.Minute))
 	if code == acceptedCode {
 		t.Fatal("Create after Stop must be rejected")
 	}

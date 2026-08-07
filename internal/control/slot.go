@@ -414,6 +414,30 @@ func (m *Module) Check(id ID, conn ConnID) (uint64, error) {
 	return l.Epoch, nil
 }
 
+// CheckLease 按【租约句柄】复核并返回它的不可变投影。
+//
+// 与 CheckResource 的区别是查询方向：那个从「连接 + 资源」出发，回答
+// 「这条连接现在是否握着这个资源」；本方法从「租约句柄」出发，回答
+// 「这个句柄现在还有效吗、它握的是哪个资源」。
+//
+// operation 的创建走这条：调用方给的是一个 lease 句柄，而内核必须确认它
+// 确实覆盖本次 operation 要绑定的那个资源——句柄有效但指向别的资源，是
+// 「拿着左臂的租约去动右臂」，而两者都是合法句柄。
+func (m *Module) CheckLease(id ID, conn ConnID) (LeaseProof, error) {
+	_, l, err := m.lookup(id, conn, time.Now())
+	if err != nil {
+		return LeaseProof{}, err
+	}
+	return LeaseProof{
+		ID:                 l.ID,
+		Class:              l.Class,
+		Resource:           l.Resource,
+		ResourceGeneration: l.ResourceGeneration,
+		Deadline:           l.Deadline,
+		Epoch:              l.Epoch,
+	}, nil
+}
+
 // CheckResource is the Method Gate query: it proves that conn currently owns a
 // valid lease for exactly resource and returns the immutable fields IPC must
 // project into ExecutionContext. The second lookup closes the race where the

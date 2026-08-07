@@ -27,6 +27,7 @@ import (
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/operation"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/protocheck"
 )
@@ -632,7 +633,7 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 	if rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
 		return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), rerr.Code)))
 	}
-	if err := protocheck.GateSupport(route.Method.Meta); err != nil {
+	if err := protocheck.GateSupport(route.Method.Meta, co.s.operations != nil); err != nil {
 		co.s.recordMethodGateFailure(co.caller, route, req.GetMethodId(), err)
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), methodGateCode(err))))
@@ -735,6 +736,23 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		execution.MotionEpoch = leaseProof.Epoch
 	}
 
+	// 【Operation 在 Dispatch 之前建】。这个顺序让 Provider 收到 Dispatch 时
+	// operation_id 已经有效，因此它可以直接回 DispatchResult{ACCEPTED}——
+	// 那个码要求「Operation 必须已经存在」。
+	//
+	// 反过来（先 Dispatch 再建）会产生一个窗口：Provider 已经开始动，而
+	// operation 还不存在，此时它的第一次 ReportProgress 会被拒。
+	var operationID uint64
+	if route.Method.Meta.GetReturnsOperation() {
+		id, code := co.createOperation(route, target, deadline, execution)
+		if code != ipcv1.StatusCode_STATUS_CODE_ACCEPTED {
+			co.releaseRequest(req.GetRequestId())
+			return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), code)))
+		}
+		operationID = id
+		execution.OperationId = id
+	}
+
 	routeID, publishStatus := co.s.dispatch.publishDispatchAtEpoch(
 		dispatchEpoch,
 		co,
@@ -748,8 +766,24 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		callerContext(co.caller, route.RequiredPermissions),
 		execution,
 	)
+	// 三条失败路径都要把已经建好的 operation 收敛掉。
+	//
+	// 【不收敛的后果】：一条 PENDING 的 operation 挂在那里，Provider 从来没
+	// 收到过 Dispatch，因此永远不会有人 Accept 或 Complete 它。它会一直占着
+	// 直到 deadline 到期——而调用方已经拿到失败响应，根本不知道它存在。
+	failOperation := func(code ipcv1.StatusCode) {
+		if operationID == 0 || co.s.operations == nil {
+			return
+		}
+		if err := co.s.operations.Fail(operationID, code, nil); err != nil {
+			co.log.Warn("ipc: converge undispatched operation",
+				"operation_id", operationID, "err", err)
+		}
+	}
+
 	switch publishStatus {
 	case dispatchPublishEpochChanged:
+		failOperation(ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)
 		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
@@ -760,10 +794,12 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 			target.closeAsSlowConsumer()
 		}
 		co.s.transfer.CloseRoute(routeID)
+		failOperation(ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)
 		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
 	case dispatchPublishSequenceExhausted:
+		failOperation(ipcv1.StatusCode_STATUS_CODE_INTERNAL)
 		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
@@ -772,6 +808,47 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 	default:
 		panic("ipc: unknown dispatch publish status")
 	}
+}
+
+// createOperation 为一次 returns_operation 的调用建 operation。
+//
+// 返回 ACCEPTED 表示建成；其余码原样回给调用方——Create 的前置失败
+// （资源无效、租约过期、epoch 陈旧）已经是可区分的原因，不需要再包一层。
+func (co *conn) createOperation(
+	route endpoint.RouteInfo,
+	target *conn,
+	deadline time.Time,
+	execution *ipcv1.ExecutionContext,
+) (uint64, ipcv1.StatusCode) {
+	if co.s.operations == nil {
+		// GateSupport 已经拦过，走到这里说明装配在两处不一致。
+		return 0, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE
+	}
+
+	// 资源集合：v1 一个 operation 绑一个资源（见 operation 包的说明）。
+	// 接口不绑资源时给空集合，Create 会以 INVALID_ARGUMENT 拒——那是对的：
+	// 一个不绑任何资源的长任务没有可被 Safety 接管的对象。
+	var resources []string
+	if route.ResourceHandle != "" {
+		resources = []string{route.ResourceHandle}
+	}
+
+	return co.s.operations.Create(
+		co,     // 调用方连接：断开时收敛
+		target, // 执行方连接：回报侧的归属凭据
+		co.caller,
+		operation.OriginBinding{
+			InterfaceID: route.InterfaceID,
+			IfaceMajor:  route.InterfaceMajor,
+			IfaceMinor:  route.InterfaceMinor,
+			MethodID:    route.Method.MethodID,
+			SchemaHash:  route.InterfaceSchemaHash,
+		},
+		resources,
+		execution.GetLeaseId(),
+		execution.GetMotionEpoch(),
+		deadline,
+	)
 }
 
 func methodRequiresControl(meta *ipcv1.MethodMeta) bool {

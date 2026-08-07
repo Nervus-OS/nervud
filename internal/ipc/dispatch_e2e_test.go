@@ -35,6 +35,8 @@ type routingEndpoints struct {
 	resourceGen    uint64
 	requiresLease  bool
 	isMotion       bool
+	// returnsOper 让这个替身声明一个长任务方法。
+	returnsOper bool
 }
 
 func (r *routingEndpoints) ResolveEndpoint(endpoint.ConnHandle, identity.Caller, *ipcv1.ResolveEndpoint) *ipcv1.ResolveEndpointResult {
@@ -105,6 +107,7 @@ func (r *routingEndpoints) Route(
 				ResponseType:         string(descriptor.FullName()),
 				DefaultTimeoutMs:     defaultMethodTimeoutMs,
 				MaxTimeoutMs:         maxMethodTimeoutMs,
+				ReturnsOperation:     r.returnsOper,
 				RequiresControlLease: r.requiresLease,
 				IsMotion:             r.isMotion,
 			},
@@ -132,6 +135,24 @@ func newRoutingTestServer(
 	if len(leaseValues) != 0 {
 		leases = leaseValues[0]
 	}
+	return newRoutingTestServerWith(t, re, leases, nil)
+}
+
+// newRoutingTestServerWithOperations 是接了 Operation Manager 的变体。
+func newRoutingTestServerWithOperations(
+	t *testing.T, re *routingEndpoints, ops OperationManager,
+) (*Server, string) {
+	t.Helper()
+	return newRoutingTestServerWith(t, re, nil, ops)
+}
+
+func newRoutingTestServerWith(
+	t *testing.T,
+	re *routingEndpoints,
+	leases ControlLeases,
+	ops OperationManager,
+) (*Server, string) {
+	t.Helper()
 
 	sock := filepath.Join(t.TempDir(), "nervud.sock")
 	s, err := New(Config{
@@ -144,6 +165,7 @@ func newRoutingTestServer(
 		Endpoints:  re,
 		Leases:     leases,
 		Resources:  fakeResources{},
+		Operations: ops,
 		Transfer:   newTestTransfer(t),
 	})
 	if err != nil {

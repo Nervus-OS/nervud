@@ -493,19 +493,13 @@ func assemble(
 	// 就绪后 operation 才谈得上被 dispatch 创建，IPC 开门前状态机须已就绪。窄接口注入
 	// resource（resMod.Valid 校验 resource_handle）与 audit。
 	//
-	// LeaseValidator 仍传 nil = fail-closed，运动类 operation 一律被 Create 前置拒绝。
+	// LeaseValidator 在 ipc 装配之后注入（见下方 SetLeaseValidator 那一段）：
+	// 解开 wire lease 句柄需要 conn 的映射表，而那住在 ipc 里。
 	//
-	// 【ControlLease wire 已接通，但这一处仍然接不了】，原因有两层：
-	//
-	//  1. operation.Manager 目前【没有任何调用方】。envelope.proto 把 Operation
-	//     查询（GetOperation/CancelOperation）标为 [v2+]，dispatch 也不创建
-	//     operation——接一个没人调的校验器是假工作。
-	//  2. LeaseValidator.ValidLease 收的是 uint64 leaseID，而那是【连接作用域】的
-	//     wire 句柄；control.Check 要的是 (control.ID [16]byte, ConnID)。这层映射
-	//     住在 ipc 的 conn 里，operation 那一层看不见连接。真要接，得先决定
-	//     operation 怎么携带连接身份——那是 operation wire 设计的一部分。
-	//
-	// 换言之这里不是漏接，是被 operation wire 挡着。wire 落地时两条一起解决。
+	// 这里先传 nil 不是遗留，是【构造顺序】：operation 必须在 endpoint 之后、
+	// ipc 之前注册（Resolve/Route 就绪后 operation 才谈得上被 dispatch 创建，
+	// IPC 开门前状态机须已就绪），而 ipc 又要在 operation 之后才能构造。
+	// 中间这一段里 lease 为 nil，运动类 operation fail closed。
 	opMod := operation.New(resMod, nil, aud, logger)
 	k.Register(opMod)
 
@@ -534,7 +528,11 @@ func assemble(
 		// 与 ResolveEndpoint 用同一张表、同一套匹配规则。空 selector 在 v2 里
 		// 不再有隐式默认，两条路径一起 fail closed。
 		Resources: resMod,
-		Transfer:  transferMgr,
+		// Operations 接通长任务：声明了 returns_operation 的方法在这里才谈得上
+		// 被受理。为 nil 时它们一律被拒——不是降级成普通调用，那会让调用方
+		// 拿到一个 OK 而机器还在动。
+		Operations: opMod,
+		Transfer:   transferMgr,
 		// Launcher 接通 LaunchComponent（envelope 80/81）：Launcher 点开一个 App、
 		// 会话服务开机唤起桌面，都走它。在此之前唯一能拉起组件的路径是
 		// endpoint.Resolve 拉起 on-demand 提供者，于是"启动应用"只能伪装成
@@ -565,6 +563,36 @@ func assemble(
 			"register builtin %s: %w", catalog.InterfaceTransferControl, err)
 	}
 	logger.Info("endpoint: builtin registered", "interface", catalog.InterfaceTransferControl)
+
+	// Operation 的三处回填必须在 ipc 构造之后：校验器与内建 handler 都住在
+	// ipc 里，而 operation 又必须在 ipc 之前注册（IPC 开门前状态机须就绪）。
+	// 构造顺序把依赖变成了一个环，用装配期回填打开它。
+	//
+	// 【顺序有意义】：先装 handler（它建立 operationWire），再注册 endpoint
+	// 拿到句柄，最后才接事件旁路——旁路要用那个句柄做扇出键。
+	opMod.SetLeaseValidator(ipcSrv.OperationLeaseValidator())
+	if err := epMod.RegisterBuiltin(
+		catalog.InterfaceOperationControl, 1, 0, ipcSrv.OperationBuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf(
+			"register builtin %s: %w", catalog.InterfaceOperationControl, err)
+	}
+	if err := epMod.RegisterBuiltinSubscriber(
+		catalog.InterfaceOperationControl, 1, ipcSrv.OperationSubscribeAdmitter(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf(
+			"register builtin subscriber %s: %w", catalog.InterfaceOperationControl, err)
+	}
+	operationEndpointID, ok := epMod.BuiltinEndpointID(catalog.InterfaceOperationControl, 1)
+	if !ok {
+		return nil, cleanup, fmt.Errorf(
+			"builtin %s has no endpoint id after registration",
+			catalog.InterfaceOperationControl)
+	}
+	ipcSrv.SetOperationEndpointID(operationEndpointID)
+	opMod.SetEventObserver(ipcSrv.OperationEventObserver())
+	logger.Info("endpoint: builtin registered", "interface", catalog.InterfaceOperationControl)
+
 	k.Register(ipcSrv)
 
 	// 特权管理通道（root-only UDS）：供 nervusctl 触发装包/卸载/停用启用/权限授撤。

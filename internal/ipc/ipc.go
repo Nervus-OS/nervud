@@ -29,6 +29,7 @@ import (
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
+	"github.com/nervus-os/nervud/internal/operation"
 	"github.com/nervus-os/nervud/internal/service"
 	"github.com/nervus-os/nervud/internal/subscription"
 	"github.com/nervus-os/nervud/internal/sysprobe"
@@ -173,8 +174,12 @@ type Config struct {
 	Launcher ComponentLauncher
 
 	// Resources 把 AcquireControl 的 ResourceSelector 解析成 resource_handle。
-	// 为 nil 时只认协议规定的隐式默认（BaseMotion 的 base.main）。
+	// 为 nil 时任何租约申请都解析失败——v2 没有隐式默认。
 	Resources ResourceResolver
+
+	// Operations 拥有长任务的状态机。为 nil 时声明了 returns_operation 的
+	// 方法一律被拒（能力缺口，不是协议违规）。
+	Operations OperationManager
 
 	// Transfer owns the generic high-throughput data plane. Method metadata,
 	// rather than capability-specific kernel code, decides which calls may
@@ -286,6 +291,13 @@ type Server struct {
 	launcher      ComponentLauncher
 	resources     ResourceResolver
 	transfer      TransferManager
+	// operations 拥有长任务的状态机。为 nil 时【声明了 returns_operation 的
+	// 方法一律被拒】——不是静默降级成普通调用：那会让调用方拿到一个 OK
+	// 而机器还在动，而它以为已经做完了。
+	operations OperationManager
+	// operationWire 是内建 endpoint 的那一份状态（endpoint 句柄），
+	// 由 OperationBuiltinHandler 在装配期建立。
+	operationWire *operationWire
 	limits        Limits
 	// monotonicNow is the Linux CLOCK_MONOTONIC source used for wire deadlines.
 	// Tests replace it because production sysprobe support is Linux-only.
@@ -383,6 +395,7 @@ func New(cfg Config) (*Server, error) {
 		leases:          cfg.Leases,
 		launcher:        cfg.Launcher,
 		resources:       cfg.Resources,
+		operations:      cfg.Operations,
 		transfer:        cfg.Transfer,
 		limits:          normalizeLimits(cfg.Limits),
 		monotonicNow:    sysprobe.MonotonicNanos,
@@ -1153,6 +1166,10 @@ type ControlLeases interface {
 	// CheckResource is the method-gate proof that this exact connection still
 	// owns the lease for the resolved resource.
 	CheckResource(conn control.ConnID, resource string, generation uint64) (control.LeaseProof, error)
+	// CheckLease 按租约句柄复核，回答「这个句柄还有效吗、它握的是哪个资源」。
+	// 运动类 operation 的创建走它——那条路径手里只有一个句柄，而必须确认它
+	// 确实覆盖要绑定的那个资源。
+	CheckLease(id control.ID, conn control.ConnID) (control.LeaseProof, error)
 	// RevokeConn 撤销某连接名下的全部租约。
 	//
 	// 【连接收尾时必须调用】。租约绑本连接、不可转让、断开即失效
@@ -1163,6 +1180,35 @@ type ControlLeases interface {
 	// RevokeResource invalidates leases issued against an obsolete catalog
 	// generation before the same public handle can be reused.
 	RevokeResource(resource string, generation uint64)
+}
+
+// OperationManager 是 ipc 对 internal/operation 的窄接口依赖。
+//
+// 接口在消费者（ipc）这一侧定义，*operation.Manager 隐式满足——与
+// ComponentResolver / PermissionChecker 同一模式。
+type OperationManager interface {
+	// Create 在 dispatch 遇到 returns_operation 方法时建一条 operation。
+	// conn 是调用方连接，provider 是执行方连接。
+	Create(conn, provider operation.ConnHandle, caller identity.Caller,
+		origin operation.OriginBinding, resources []string,
+		leaseID, epoch uint64, deadline time.Time) (uint64, ipcv1.StatusCode)
+
+	// Get / Cancel 是调用方侧，自带 caller 可见性裁决。
+	Get(caller identity.Caller, id uint64) (operation.Operation, bool)
+	Cancel(caller identity.Caller, id uint64) ipcv1.StatusCode
+
+	// ProviderOperation 是回报侧的归属检查：Provider 只能回报派给它的那些。
+	ProviderOperation(provider operation.ConnHandle, id uint64) (operation.Operation, bool)
+
+	// Accept / Progress / Succeed / Fail / Cancelled 是 Provider 的回报接缝。
+	Accept(id, epoch uint64) error
+	Progress(id uint64, payload []byte) error
+	Succeed(id uint64, result []byte) error
+	Fail(id uint64, code ipcv1.StatusCode, detail []byte) error
+	Cancelled(id uint64) error
+
+	// ReleaseByConn 在连接断开时收敛该连接名下未终结的 operation。
+	ReleaseByConn(conn operation.ConnHandle)
 }
 
 // ComponentLauncher 是 ipc 对 internal/service 的窄接口依赖：拉起一个组件，

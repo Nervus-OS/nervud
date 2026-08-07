@@ -36,6 +36,13 @@ const (
 	// 由签名的系统服务用 ProviderArtifacts 声明，内核不该认识它。
 	InterfaceResourceDirectory = "nervus.interface.resource.directory"
 
+	// InterfaceOperationControl 是长任务的查询/取消/回报面。
+	//
+	// 它与资源目录同理由列在这里：Operation 的状态机归内核所有，除了 nervud
+	// 没有第二个实现者。摄像头那类【能力】由签名的系统服务用 ProviderArtifacts
+	// 声明，内核不该认识。
+	InterfaceOperationControl = "nervus.interface.operation.control"
+
 	ResourceMotionBase     = "nervus.resource.motion.base"
 	ResourceManipulatorArm = "nervus.resource.manipulator.arm"
 )
