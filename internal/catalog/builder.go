@@ -267,10 +267,31 @@ func (b *Builder) interfaceRecord(
 		}
 		methods[methodID] = method
 	}
+	// 事件与方法同规参与风险裁决：一个订阅原始摄像头流的事件同样是隐私敏感的，
+	// 不能因为它「只是个事件」就绕过 authorizeRisk
+	events := make(map[uint32]EventDefinition)
+	for eventID, meta := range schema.Events() {
+		if meta.GetRiskClass() > maxRisk {
+			maxRisk = meta.GetRiskClass()
+		}
+		payload, err := findMessage(schema, meta.GetPayloadType())
+		if err != nil {
+			return interfaceRecord{}, fmt.Errorf("interface %q@%d event %d payload: %w",
+				def.InterfaceID, def.Major, eventID, err)
+		}
+		events[eventID] = EventDefinition{
+			InterfaceID: def.InterfaceID,
+			Major:       def.Major,
+			EventID:     eventID,
+			Meta:        proto.Clone(meta).(*ipcv1.EventMeta),
+			Payload:     payload,
+		}
+	}
+
 	if err := authorizeRisk(source, maxRisk, false); err != nil {
 		return interfaceRecord{}, fmt.Errorf("interface %q@%d: %w", def.InterfaceID, def.Major, err)
 	}
-	return interfaceRecord{def: def, methods: methods}, nil
+	return interfaceRecord{def: def, methods: methods, events: events}, nil
 }
 
 func resolveMethodDefinition(
@@ -814,7 +835,9 @@ func sameInterfaceContract(left, right interfaceRecord) bool {
 	rightDef.Owner = DefinitionOwner{}
 	leftDef.DefinitionGeneration = 0
 	rightDef.DefinitionGeneration = 0
-	if !reflect.DeepEqual(leftDef, rightDef) || len(left.methods) != len(right.methods) {
+	if !reflect.DeepEqual(leftDef, rightDef) ||
+		len(left.methods) != len(right.methods) ||
+		len(left.events) != len(right.events) {
 		return false
 	}
 	for methodID, leftMethod := range left.methods {
@@ -823,7 +846,24 @@ func sameInterfaceContract(left, right interfaceRecord) bool {
 			return false
 		}
 	}
+	// 事件也是契约的一部分：DeliveryClass 决定订阅方看到 sequence 缺口时该
+	// 「什么都不做」还是「数据永久丢失」。两个 Provider 若能各说各的，
+	// App 解析到谁就决定了它会不会漏数据
+	for eventID, leftEvent := range left.events {
+		rightEvent, ok := right.events[eventID]
+		if !ok || !sameEventContract(leftEvent, rightEvent) {
+			return false
+		}
+	}
 	return true
+}
+
+func sameEventContract(left, right EventDefinition) bool {
+	if left.InterfaceID != right.InterfaceID || left.Major != right.Major ||
+		left.EventID != right.EventID || left.KernelBuiltin != right.KernelBuiltin {
+		return false
+	}
+	return proto.Equal(left.Meta, right.Meta)
 }
 
 func sameMethodContract(left, right MethodDefinition) bool {
@@ -858,6 +898,10 @@ func assignDefinitionGenerations(previous, next *Snapshot) {
 		for methodID, method := range record.methods {
 			method.DefinitionGeneration = generation
 			record.methods[methodID] = method
+		}
+		for eventID, event := range record.events {
+			event.DefinitionGeneration = generation
+			record.events[eventID] = event
 		}
 		next.interfaces[key] = record
 	}

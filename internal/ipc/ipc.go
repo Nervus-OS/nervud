@@ -30,6 +30,7 @@ import (
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
 	"github.com/nervus-os/nervud/internal/service"
+	"github.com/nervus-os/nervud/internal/subscription"
 	"github.com/nervus-os/nervud/internal/sysprobe"
 	"github.com/nervus-os/nervud/internal/transfer"
 )
@@ -207,6 +208,15 @@ type EndpointResolver interface {
 	// 权限、这次调用是否仍然合法"。ipc 自己不缓存任何路由状态，每次都查
 	Route(conn endpoint.ConnHandle, endpointID uint64, methodID uint32) (endpoint.RouteInfo, endpoint.RouteError)
 
+	// RouteEvent 是订阅侧的准入：拿到 (endpoint_id, event_id) 后查一次
+	// 「事件源在哪、权威 EventMeta 是什么、这次订阅是否合法」。
+	// 准入链与 Route 同源，差别只在最后一步查的是事件而非方法
+	RouteEvent(conn endpoint.ConnHandle, endpointID uint64, eventID uint32) (endpoint.EventRoute, endpoint.RouteError)
+
+	// LookupProviderEvent 校验一次 PublishEvent：这条连接是否真的拥有该
+	// endpoint，以及该 event_id 是否在契约里声明过
+	LookupProviderEvent(conn endpoint.ConnHandle, serviceEndpointID uint64, eventID uint32) (catalog.EventDefinition, endpoint.RouteError)
+
 	// ConnClosed 由 ipc 在连接的 serve 循环退出时调用一次，让 endpoint 清理
 	// 该连接名下的全部 registration/binding，并使仍存活的关联 binding 失效
 	ConnClosed(conn endpoint.ConnHandle)
@@ -269,11 +279,14 @@ type Server struct {
 	// configuration knob that bypasses kernel-backed component identity.
 	verifyComponentForTest func(*net.UnixConn, identity.Caller, string) (service.ComponentIdentity, error)
 	endpoints              EndpointResolver
-	leases                 ControlLeases
-	launcher               ComponentLauncher
-	resources              ResourceResolver
-	transfer               TransferManager
-	limits                 Limits
+	// subscriptions 持有全部事件订阅。为 nil 时 Subscribe 回 UNAVAILABLE，
+	// PublishEvent 静默丢弃——最小装配与大量测试并不需要订阅。
+	subscriptions *subscription.Registry
+	leases        ControlLeases
+	launcher      ComponentLauncher
+	resources     ResourceResolver
+	transfer      TransferManager
+	limits        Limits
 	// monotonicNow is the Linux CLOCK_MONOTONIC source used for wire deadlines.
 	// Tests replace it because production sysprobe support is Linux-only.
 	monotonicNow func() (uint64, error)
@@ -366,6 +379,7 @@ func New(cfg Config) (*Server, error) {
 		permission:      cfg.Permission,
 		components:      cfg.Components,
 		endpoints:       cfg.Endpoints,
+		subscriptions:   subscription.New(),
 		leases:          cfg.Leases,
 		launcher:        cfg.Launcher,
 		resources:       cfg.Resources,
@@ -763,6 +777,16 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		// 靠这份指针身份区分，而不是数字本身
 		defer s.endpoints.ConnClosed(co)
 	}
+	if s.subscriptions != nil {
+		// 清掉本连接名下的全部订阅。
+		//
+		// 【不发 SubscriptionClosed】：对端已经没了，发给谁。它与因背压终止
+		// 单条订阅不是一回事——那时连接还活着，必须告诉它哪一条没了。
+		//
+		// 本连接作为 Provider 时的清理由 endpoints.ConnClosed 触发的
+		// endpoint 失效链路负责，不在这里。
+		defer s.subscriptions.CloseConn(co)
+	}
 	if s.leases != nil {
 		// 撤掉本连接名下的全部 ControlLease。租约绑连接、断开即失效，不撤的话
 		// 一个断了线的 App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL
@@ -1045,6 +1069,26 @@ func (s *Server) auditViolation(caller identity.Caller, err error) {
 		Subject: caller.String(),
 		Denied:  true,
 		Err:     err,
+	})
+}
+
+// auditPublishRejected 记一条被拒的事件上报。
+//
+// 【独立 Action】：Provider 推一个它不拥有的 endpoint 或契约外的 event_id，
+// 既不是协议违规（body 本身合法）也不是能力缺口（本 build 实现了它），
+// 而是 Provider 侧的 bug 或越权尝试。混进上面两类里会让真正的信号被淹没。
+func (s *Server) auditPublishRejected(
+	caller identity.Caller, endpointID uint64, eventID uint32, code ipcv1.StatusCode,
+) {
+	if !s.violationLog.allow() {
+		return
+	}
+	s.auditor.Record(context.Background(), audit.Event{
+		Action:  "ipc.PublishEventRejected",
+		Subject: caller.String(),
+		Denied:  true,
+		Detail: fmt.Sprintf("endpoint=%d event=%d code=%s",
+			endpointID, eventID, code),
 	})
 }
 

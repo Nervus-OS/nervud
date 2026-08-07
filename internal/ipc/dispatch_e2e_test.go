@@ -57,6 +57,24 @@ func (r *routingEndpoints) UnregisterEndpoint(_ endpoint.ConnHandle, req *ipcv1.
 	}}
 }
 
+// 订阅链路在本文件的用例里不参与——这两个替身恒回 NOT_FOUND。
+// 订阅本身的行为由 internal/subscription 与 subscribe_test.go 覆盖。
+func (r *routingEndpoints) RouteEvent(
+	_ endpoint.ConnHandle, _ uint64, _ uint32,
+) (endpoint.EventRoute, endpoint.RouteError) {
+	return endpoint.EventRoute{}, endpoint.RouteError{
+		Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+	}
+}
+
+func (r *routingEndpoints) LookupProviderEvent(
+	_ endpoint.ConnHandle, _ uint64, _ uint32,
+) (catalog.EventDefinition, endpoint.RouteError) {
+	return catalog.EventDefinition{}, endpoint.RouteError{
+		Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+	}
+}
+
 func (r *routingEndpoints) Route(
 	_ endpoint.ConnHandle,
 	_ uint64,

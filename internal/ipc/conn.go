@@ -296,6 +296,18 @@ func (co *conn) enqueue(env *ipcv1.Envelope) bool {
 	return false
 }
 
+// Deliver 实现 subscription.Sink：尝试排队一条 Event，队列满时【不关闭连接】。
+//
+// 与 enqueue 的区别是刻意的。enqueue 用于请求-响应链路：那里投递不下意味着
+// 对端连自己要的东西都收不动，关掉是对的。订阅不同——一条订阅跟不上不代表
+// 整条连接废了，同一个订阅方可能还有别的、消费得动的订阅。
+//
+// 因此这里只报告成败，由 subscription.Registry 按 delivery_class 决定
+// 合并、丢弃还是只关掉这一条订阅。
+func (co *conn) Deliver(env *ipcv1.Envelope) bool {
+	return co.outbox.push(env)
+}
+
 // closeAsSlowConsumer 处理 outbound 队列已满/已关闭这类"这条连接跟不上"的
 // 情形：关闭连接并限速审计。用独立 Action 与 ProtocolViolation/UnsupportedBody
 // 区分 - 这是资源状况，不是攻击信号（同 auditUnsupported 复用 violationLog
@@ -462,6 +474,15 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 	case *ipcv1.Envelope_LaunchComponent:
 		return co.handleLaunchComponent(body.LaunchComponent)
 
+	case *ipcv1.Envelope_Subscribe:
+		return co.handleSubscribe(body.Subscribe)
+
+	case *ipcv1.Envelope_Unsubscribe:
+		return co.handleUnsubscribe(body.Unsubscribe)
+
+	case *ipcv1.Envelope_PublishEvent:
+		return co.handlePublishEvent(body.PublishEvent)
+
 	case *ipcv1.Envelope_Hello:
 		// 握手已完成，再来一个 Hello 是非法握手状态
 		co.log.Warn("ipc: duplicate Hello after handshake, closing")
@@ -492,17 +513,13 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		co.s.auditViolation(co.caller, errUnexpectedBody)
 		return false
 
-	case *ipcv1.Envelope_Cancel,
-		*ipcv1.Envelope_Subscribe,
-		*ipcv1.Envelope_Unsubscribe:
-		// 对端 -> nervud 方向合法、但本 build 未实现的 body。Cancel/Subscribe/
-		// Unsubscribe 来自 App/Service，各自需要专属回复或路由，凭空造回复违反
-		// ，故关闭并审计为 UnsupportedBody - 与协议违规分开，既不
-		// 污染安全信号，也不把未来的 ServiceHost 接入误判成攻击。
-		// ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 已随 internal/endpoint
-		// 落地迁出本组；DispatchResult 已随本文件的 route 表落地迁出本组（见
-		// handleDispatchResult）。各自的 handler 随对应模块（subscription）落地后
-		// 迁出
+	case *ipcv1.Envelope_Cancel:
+		// 对端 -> nervud 方向合法、但本 build 未实现。Cancel 需要专属回复与
+		// 在途调用追踪，凭空造回复会让调用方以为取消成功了，故关闭并审计为
+		// UnsupportedBody——与协议违规分开，既不污染安全信号，也不把未来的
+		// 接入误判成攻击。
+		//
+		// Subscribe/Unsubscribe 已随 internal/subscription 落地迁出本组。
 		return co.unsupported(env)
 
 	default:

@@ -188,6 +188,25 @@ type MethodDefinition struct {
 	ProviderGeneration   uint64
 }
 
+// EventDefinition 是一个可订阅事件的权威定义，地位同 MethodDefinition。
+//
+// 订阅准入靠它回答三件事：谁能订阅（Meta.RequiredPermission）、推送多快
+// （Meta.MaxEventsPerSecond）、缺口意味着什么（Meta.DeliveryClass）。
+// 三者都不在事件载荷里，也【不能】由 Provider 在推送时自报。
+type EventDefinition struct {
+	InterfaceID string
+	Major       uint32
+	EventID     uint32
+
+	Meta    *ipcv1.EventMeta
+	Payload protoreflect.MessageDescriptor
+
+	KernelBuiltin        bool
+	CatalogRevision      uint64
+	DefinitionGeneration uint64
+	ProviderGeneration   uint64
+}
+
 // ProviderInterface proves that PackageID is an accepted runtime implementer of
 // Definition. Canonical Interface existence alone is not implementation
 // authority.
@@ -260,6 +279,7 @@ type resourceKey struct {
 type interfaceRecord struct {
 	def     InterfaceDefinition
 	methods map[uint32]MethodDefinition
+	events  map[uint32]EventDefinition
 }
 
 type providerInterfaceRecord struct {
@@ -361,6 +381,51 @@ func (s *Snapshot) Method(interfaceID string, major, methodID uint32) (MethodDef
 	out := cloneMethodDefinition(method)
 	out.CatalogRevision = s.revision
 	return out, true
+}
+
+func (s *Snapshot) Event(interfaceID string, major, eventID uint32) (EventDefinition, bool) {
+	if s == nil {
+		return EventDefinition{}, false
+	}
+	record, ok := s.interfaces[interfaceKey{id: interfaceID, major: major}]
+	if !ok {
+		return EventDefinition{}, false
+	}
+	event, ok := record.events[eventID]
+	if !ok {
+		return EventDefinition{}, false
+	}
+	out := cloneEventDefinition(event)
+	out.CatalogRevision = s.revision
+	return out, true
+}
+
+// ProviderEvent 证明 packageID 确实是该接口的已接受实现者，再取事件定义。
+//
+// 与 ProviderMethod 同规：接口里【定义】了这个事件，不等于这个 Provider
+// 【被允许】提供它。
+func (s *Snapshot) ProviderEvent(
+	packageID string,
+	interfaceID string,
+	major uint32,
+	eventID uint32,
+) (EventDefinition, bool) {
+	if s == nil {
+		return EventDefinition{}, false
+	}
+	provider, ok := s.providerInterfaces[providerInterfaceKey{
+		pkg: packageID, id: interfaceID, major: major,
+	}]
+	if !ok {
+		return EventDefinition{}, false
+	}
+	event, ok := s.Event(interfaceID, major, eventID)
+	if !ok {
+		return EventDefinition{}, false
+	}
+	event.KernelBuiltin = provider.def.KernelBuiltin
+	event.ProviderGeneration = provider.def.DefinitionGeneration
+	return event, true
 }
 
 func (s *Snapshot) ProviderMethod(
@@ -511,6 +576,14 @@ func cloneProviderInterface(in ProviderInterface) ProviderInterface {
 func clonePermissionDefinition(in PermissionDefinition) PermissionDefinition {
 	out := in
 	out.Owner = cloneOwner(in.Owner)
+	return out
+}
+
+func cloneEventDefinition(in EventDefinition) EventDefinition {
+	out := in
+	if in.Meta != nil {
+		out.Meta = proto.Clone(in.Meta).(*ipcv1.EventMeta)
+	}
 	return out
 }
 
