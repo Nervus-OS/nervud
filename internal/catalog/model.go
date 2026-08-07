@@ -29,6 +29,13 @@ const (
 	InterfaceTransferControl = "nervus.interface.transfer.control"
 	InterfacePower           = "nervus.interface.power"
 
+	// InterfaceResourceDirectory 是 Catalog 自己的只读视图。
+	//
+	// 它列在这里而 nervus.interface.camera 不在，区别不是「谁更重要」：目录
+	// 描述的是 Catalog 本身，除了内核没有第二个实现者；而摄像头是一项能力，
+	// 由签名的系统服务用 ProviderArtifacts 声明，内核不该认识它。
+	InterfaceResourceDirectory = "nervus.interface.resource.directory"
+
 	ResourceMotionBase     = "nervus.resource.motion.base"
 	ResourceManipulatorArm = "nervus.resource.manipulator.arm"
 )

@@ -30,6 +30,7 @@ import (
 	"github.com/nervus-os/nervud/internal/power"
 	"github.com/nervus-os/nervud/internal/preflight"
 	"github.com/nervus-os/nervud/internal/resource"
+	"github.com/nervus-os/nervud/internal/resourcedir"
 	"github.com/nervus-os/nervud/internal/safety"
 	"github.com/nervus-os/nervud/internal/scheduler"
 	"github.com/nervus-os/nervud/internal/service"
@@ -469,6 +470,22 @@ func assemble(
 	}
 	logger.Info("endpoint: builtin registered", "interface", power.BuiltinInterfaceID)
 
+	// 资源目录：Catalog 自己的只读视图，补的是「有哪些设备」这个枚举缺口。
+	// 没有它，App 只能靠反复 Resolve 试探，而失败的 Resolve 分不清
+	// 「没有这个设备」和「有但我没权限」。
+	//
+	// 注册失败同样是硬错误，但理由与上面两条不同：它不是安全通道，而是
+	// 【bootstrap 契约与本二进制不一致】的信号——接口在 Catalog 里、handler
+	// 却装不上，说明两边已经漂移，后面的任何 Resolve 结果都不再可信。
+	resourceDirMod := resourcedir.New(definitions, logger)
+	if err := epMod.RegisterBuiltin(
+		resourcedir.BuiltinInterfaceID, 1, 0, resourceDirMod.BuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf(
+			"register builtin %s: %w", resourcedir.BuiltinInterfaceID, err)
+	}
+	logger.Info("endpoint: builtin registered", "interface", resourcedir.BuiltinInterfaceID)
+
 	k.Register(epMod)
 
 	// Operation Manager：给机械臂轨迹/回零/移到位姿这类系统协调长任务一个由 nervud
@@ -514,7 +531,8 @@ func assemble(
 		// control 模块虽然完整，却没有任何入口——App 拿不到运动 lease。
 		Leases: ctl,
 		// Resources 让 AcquireControl 的 selector 能解析成 resource_handle，
-		// 与 ResolveEndpoint 用同一张表、同一套隐式默认。
+		// 与 ResolveEndpoint 用同一张表、同一套匹配规则。空 selector 在 v2 里
+		// 不再有隐式默认，两条路径一起 fail closed。
 		Resources: resMod,
 		Transfer:  transferMgr,
 		// Launcher 接通 LaunchComponent（envelope 80/81）：Launcher 点开一个 App、

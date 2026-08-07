@@ -31,22 +31,14 @@ func SelectResources(
 		return nil, false
 	}
 
-	var matched []ResourceDefinition
-	for _, def := range snapshot.resources {
-		if !matchesSelector(def, sel) {
-			continue
-		}
-		matched = append(matched, cloneResourceDefinition(def))
+	if sel == nil {
+		// 空 selector 在 v2 里【不再】隐式指向底盘。没有目标就是没有目标。
+		return nil, false
 	}
+	matched := FilterResources(snapshot, sel.GetType(), sel.GetRole(), sel.GetLabels())
 	if len(matched) == 0 {
 		return nil, false
 	}
-	sort.Slice(matched, func(i, j int) bool {
-		if matched[i].ResourceType != matched[j].ResourceType {
-			return matched[i].ResourceType < matched[j].ResourceType
-		}
-		return matched[i].StableRole < matched[j].StableRole
-	})
 
 	switch sel.GetPolicy() {
 	case ipcv1.ResourceSelectionPolicy_RESOURCE_SELECTION_POLICY_SYSTEM_PREFERRED:
@@ -64,17 +56,57 @@ func SelectResources(
 	}
 }
 
-func matchesSelector(def ResourceDefinition, sel *ipcv1.ResourceSelector) bool {
-	if sel == nil {
+// FilterResources 列出全部匹配项，【不做】「多候选挑哪一个」的裁决。
+//
+// 与 SelectResources 分开是因为两者回答的是不同的问题。SelectResources 回答
+// 「把我接到哪一个上」，多候选是个必须被解决的歧义；FilterResources 回答
+// 「有哪些」，多候选正是答案本身。让枚举也走 policy，就得给它硬塞一个
+// SYSTEM_PREFERRED——那会让「列出全部摄像头」返回一个。
+//
+// 顺序按 (ResourceType, StableRole) 字典序。Go 的 map 迭代顺序是随机化的，
+// 直接返回遍历结果会让同一份 Catalog 在两次调用上给出不同顺序，UI 里的表现
+// 是设备列表每次刷新都在跳——而这种问题几乎不会有人报成 bug。
+func FilterResources(
+	snapshot *Snapshot,
+	resourceType string,
+	stableRole string,
+	labels map[string]string,
+) []ResourceDefinition {
+	if snapshot == nil {
+		return nil
+	}
+	var matched []ResourceDefinition
+	for _, def := range snapshot.resources {
+		if !matchesFields(def, resourceType, stableRole, labels) {
+			continue
+		}
+		matched = append(matched, cloneResourceDefinition(def))
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].ResourceType != matched[j].ResourceType {
+			return matched[i].ResourceType < matched[j].ResourceType
+		}
+		return matched[i].StableRole < matched[j].StableRole
+	})
+	return matched
+}
+
+// matchesFields 是匹配规则的唯一实现，SelectResources 与 FilterResources 共用。
+//
+// 空字段 = 不过滤；labels 全部键值都要命中（AND）。
+func matchesFields(
+	def ResourceDefinition,
+	resourceType string,
+	stableRole string,
+	labels map[string]string,
+) bool {
+	if resourceType != "" && def.ResourceType != resourceType {
 		return false
 	}
-	if t := sel.GetType(); t != "" && def.ResourceType != t {
+	if stableRole != "" && def.StableRole != stableRole {
 		return false
 	}
-	if r := sel.GetRole(); r != "" && def.StableRole != r {
-		return false
-	}
-	for key, want := range sel.GetLabels() {
+	for key, want := range labels {
 		got, ok := def.Labels[key]
 		if !ok || got != want {
 			return false

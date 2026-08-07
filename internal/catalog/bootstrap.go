@@ -6,6 +6,7 @@ import (
 	basemotionv1 "github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
 	manipulatorv1 "github.com/nervus-os/nervus-ipc/protocol/interface/manipulatorv1"
 	pkgmanagerv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
+	resourcedirv1 "github.com/nervus-os/nervus-ipc/protocol/interface/resourcedirv1"
 	safetyv1 "github.com/nervus-os/nervus-ipc/protocol/interface/safetyv1"
 	transferv1 "github.com/nervus-os/nervus-ipc/protocol/interface/transferv1"
 	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
@@ -37,6 +38,7 @@ func DefaultBootstrap() ([]Source, error) {
 		Exports: []ExportBinding{
 			{ComponentID: "builtin.safety", InterfaceID: InterfaceSafetyControl},
 			{ComponentID: "builtin.transfer", InterfaceID: InterfaceTransferControl},
+			{ComponentID: "builtin.resourcedir", InterfaceID: InterfaceResourceDirectory},
 		},
 		Artifacts: artifacts,
 		KernelBuiltins: []KernelBuiltin{{
@@ -91,6 +93,11 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("catalog: build transfer bootstrap schema: %w", err)
 	}
+	resourceDirBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfaceResourceDirectory, 1, resourcedirv1.ResourceDirectoryMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build resource-directory bootstrap schema: %w", err)
+	}
 
 	descriptor := &ipcv1.ProviderDescriptor{
 		PackageId: KernelPackageID,
@@ -140,6 +147,17 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 				"",
 				"",
 			),
+			// 资源目录【不绑任何资源】：它描述的就是资源本身。
+			// 绑一个资源会让「列出全部摄像头」先要求解析到某一个摄像头。
+			bootstrapInterface(
+				InterfaceResourceDirectory,
+				resourceDirBundle,
+				"perm.resource.query",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
 		},
 		Resources: []*ipcv1.ManagedResource{
 			{
@@ -163,6 +181,7 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 		packageBundle,
 		safetyBundle,
 		transferBundle,
+		resourceDirBundle,
 	}}
 	return parseArtifacts(descriptor, bundles, "bootstrap")
 }
@@ -383,6 +402,23 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			"",
 			"代表系统执行装包与权限管理",
 			"Administer packages and grants on behalf of the system",
+		),
+		// perm.resource.query 是【设备发现】的门槛。
+		//
+		// 与 perm.diagnostics.read / perm.pkg.query 同一档（NORMAL + Ordinary）：
+		// 它暴露的是「这台机器上有哪些硬件」，而那件事 App 靠反复 Resolve 试探
+		// 本来也能问出来——目录只是把试探变成一次查询，没有放大暴露面。
+		//
+		// 真正的门槛在【用】上：拿到摄像头列表不等于能取流，那要 perm.camera.capture。
+		bootstrapPermission(
+			"perm.resource.query",
+			ipcv1.GrantMode_GRANT_MODE_NORMAL,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"",
+			"查看设备上有哪些硬件资源",
+			"List hardware resources on this device",
 		),
 		bootstrapPermission(
 			"perm.pkg.query",
