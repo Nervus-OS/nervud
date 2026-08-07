@@ -482,19 +482,19 @@ func indexExports(exports []ExportBinding) (map[string]string, error) {
 	return out, nil
 }
 
+// interfaceVersions 把接口声明的各 major 展开成 major -> 契约哈希。
+//
+// 只认 interface_versions：v1 的 versions/schema_hash 组合已移除（proto 里
+// 那两个字段号已 reserved）。registry.ParseProviderArtifacts 已经做过同样的
+// 校验，这里再走一遍是因为 Builder 也接受 kernel bootstrap 那条不经 Parse 的路径。
 func interfaceVersions(wire *ipcv1.ProvidedInterface) (map[uint32][]byte, error) {
-	out := make(map[uint32][]byte)
-	if len(wire.GetInterfaceVersions()) != 0 {
-		for _, version := range wire.GetInterfaceVersions() {
-			out[version.GetMajor()] = append([]byte(nil), version.GetSchemaHash()...)
-		}
-		return out, nil
-	}
-	for _, major := range wire.GetVersions() {
-		out[major] = append([]byte(nil), wire.GetSchemaHash()...)
-	}
-	if len(out) == 0 {
+	versions := wire.GetInterfaceVersions()
+	if len(versions) == 0 {
 		return nil, errors.New("no interface versions")
+	}
+	out := make(map[uint32][]byte, len(versions))
+	for _, version := range versions {
+		out[version.GetMajor()] = append([]byte(nil), version.GetSchemaHash()...)
 	}
 	return out, nil
 }

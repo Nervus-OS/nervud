@@ -36,9 +36,14 @@ import (
 // nervud 只实现这一个 major；minor 只增不减，握手时在客户端声明的范围内取交集。
 // 重大不兼容提升 major 并拒绝无法协商的连接
 const (
-	protocolMajor                 = 1
-	protocolMinorMax              = 1
-	executionContextProtocolMinor = 1
+	// protocolMajor = 2：v2 不向下兼容 v1。
+	//
+	// 断 wire 的是两条隐式默认的移除：ResolveEndpoint 与 AcquireControl 的空
+	// selector 不再隐式指向 {nervus.resource.motion.base, main}。一个 v1 客户端
+	// 留空 selector 去申请底盘租约，在 v2 上会拿到「解析不到」而不是底盘——
+	// 那种静默的语义变化比拒绝连接危险得多，所以必须靠 major 拒掉。
+	protocolMajor    = 2
+	protocolMinorMax = 0
 )
 
 // 握手/分派阶段发现的、需要关闭连接的情形。分成两类哨兵是为了让离线审计规则
@@ -676,45 +681,41 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE)))
 	}
-	if requiresControl && target.negMinor < executionContextProtocolMinor {
+	// 【每个 Dispatch 都带 ExecutionContext】，无条件。
+	//
+	// v1 曾按协商 minor 决定带不带，并为此在控制方法上多一道「minor 太低就拒」
+	// 的分支。v2 从第一天起就带，两条分支一起移除——一个「有时带有时不带」的
+	// 字段会让 Provider 侧不得不写两套处理，而漏写那一套只在特定对端版本下暴露。
+	if (route.ResourceHandle == "") != (route.ResourceGeneration == 0) {
 		co.releaseRequest(req.GetRequestId())
 		return co.enqueue(responseEnvelope(failureResponse(
-			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
 	}
-
-	var execution *ipcv1.ExecutionContext
-	if target.negMinor >= executionContextProtocolMinor {
-		if (route.ResourceHandle == "") != (route.ResourceGeneration == 0) {
+	deadlineNanos, deadlineErr := co.s.monotonicDeadlineNanos(deadline)
+	if deadlineErr != nil {
+		co.log.Error("ipc: project Dispatch monotonic deadline", "err", deadlineErr)
+		co.releaseRequest(req.GetRequestId())
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
+	}
+	execution := &ipcv1.ExecutionContext{
+		DeadlineNanos:      deadlineNanos,
+		ResourceHandle:     route.ResourceHandle,
+		ResourceGeneration: route.ResourceGeneration,
+	}
+	if requiresControl {
+		leaseID, found := co.wireLeaseHandle(leaseProof.ID)
+		controllerClass, validClass := classToWire(leaseProof.Class)
+		if !found || !validClass || leaseProof.Epoch == 0 ||
+			leaseProof.Resource != route.ResourceHandle ||
+			leaseProof.ResourceGeneration != route.ResourceGeneration {
 			co.releaseRequest(req.GetRequestId())
 			return co.enqueue(responseEnvelope(failureResponse(
-				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
+				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
 		}
-		deadlineNanos, deadlineErr := co.s.monotonicDeadlineNanos(deadline)
-		if deadlineErr != nil {
-			co.log.Error("ipc: project Dispatch monotonic deadline", "err", deadlineErr)
-			co.releaseRequest(req.GetRequestId())
-			return co.enqueue(responseEnvelope(failureResponse(
-				req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_INTERNAL)))
-		}
-		execution = &ipcv1.ExecutionContext{
-			DeadlineNanos:      deadlineNanos,
-			ResourceHandle:     route.ResourceHandle,
-			ResourceGeneration: route.ResourceGeneration,
-		}
-		if requiresControl {
-			leaseID, found := co.wireLeaseHandle(leaseProof.ID)
-			controllerClass, validClass := classToWire(leaseProof.Class)
-			if !found || !validClass || leaseProof.Epoch == 0 ||
-				leaseProof.Resource != route.ResourceHandle ||
-				leaseProof.ResourceGeneration != route.ResourceGeneration {
-				co.releaseRequest(req.GetRequestId())
-				return co.enqueue(responseEnvelope(failureResponse(
-					req.GetRequestId(), ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)))
-			}
-			execution.LeaseId = leaseID
-			execution.ControllerClass = controllerClass
-			execution.MotionEpoch = leaseProof.Epoch
-		}
+		execution.LeaseId = leaseID
+		execution.ControllerClass = controllerClass
+		execution.MotionEpoch = leaseProof.Epoch
 	}
 
 	routeID, publishStatus := co.s.dispatch.publishDispatchAtEpoch(
@@ -780,6 +781,7 @@ func (co *conn) handleDispatchResult(dr *ipcv1.DispatchResult) bool {
 		co.s.transfer.CloseRoute(e.routeID)
 		return resolveRoute(e, failureResponse(
 			e.sourceRequestID, ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED))
+	case completeOK:
 	}
 
 	resp, valid := co.s.validateDispatchResult(e, dr)

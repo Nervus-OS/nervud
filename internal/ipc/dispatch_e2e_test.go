@@ -287,53 +287,11 @@ func TestDispatch_ControlExecutionContextUsesLeaseProof(t *testing.T) {
 	}
 }
 
-func TestDispatch_ControlMethodRejectsMinorZeroProvider(t *testing.T) {
-	re := &routingEndpoints{
-		registerResult: registerSuccessResult(55),
-		resourceHandle: "base.main",
-		resourceGen:    11,
-		requiresLease:  true,
-	}
-	leases := &fakeLeases{}
-	_, sock := newRoutingTestServer(t, re, leases)
-
-	svc := dial(t, sock)
-	serviceHello := helloEnv()
-	serviceHello.GetHello().DeclaredComponentId = "test-service"
-	serviceHello.GetHello().MaxProtocolMinor = 0
-	if err := WriteFrame(svc, mustMarshal(t, serviceHello)); err != nil {
-		t.Fatal(err)
-	}
-	if got := readEnv(t, svc).GetHelloAck().GetSuccess().GetProtocolMinor(); got != 0 {
-		t.Fatalf("provider minor = %d, want 0", got)
-	}
-	registerService(t, svc, 55)
-
-	caller := dial(t, sock)
-	handshake(t, caller)
-	if err := WriteFrame(caller, mustMarshal(t, acquireEnv(
-		1, ipcv1.ControllerClass_CONTROLLER_CLASS_AI, nil,
-	))); err != nil {
-		t.Fatal(err)
-	}
-	if lease := readEnv(t, caller).GetAcquireControlResult().GetSuccess(); lease == nil {
-		t.Fatal("control lease was not acquired")
-	}
-	request := &ipcv1.Envelope{Body: &ipcv1.Envelope_Request{Request: &ipcv1.Request{
-		RequestId: 2, EndpointId: 1, MethodId: 1,
-	}}}
-	if err := WriteFrame(caller, mustMarshal(t, request)); err != nil {
-		t.Fatal(err)
-	}
-	response := readEnv(t, caller).GetResponse()
-	if code := response.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("response code = %v, want FAILED_PRECONDITION", code)
-	}
-	_ = svc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	if _, err := ReadFrameHeader(svc); err == nil {
-		t.Fatal("minor 0 Provider received a controlled Dispatch")
-	}
-}
+// v1 曾按协商 minor 决定 Dispatch 带不带 ExecutionContext，因此需要一条
+// 「minor 0 的 Provider 拿不到控制方法」的规则，以及它对应的测试。
+//
+// v2 从第一天起无条件携带，那条规则与测试一并移除。控制方法的准入现在只看
+// 租约证明本身（见 TestDispatch_ControlExecutionContextUsesLeaseProof）。
 
 func TestDispatch_ProviderPublicMessageNotForwarded(t *testing.T) {
 	re := &routingEndpoints{registerResult: registerSuccessResult(1)}

@@ -164,11 +164,18 @@ func (f *fakeLeases) firstIssued() (control.Request, bool) {
 	return f.issued[0], true
 }
 
+// 测试用的资源坐标。v2 起没有隐式默认——每次 AcquireControl 都要显式给出
+// selector，因此这两个常量只是测试自己约定的取值，不再是协议的一部分。
+const (
+	testResourceTypeBase = "nervus.resource.motion.base"
+	testResourceRoleMain = "main"
+)
+
 // fakeResources 是 ResourceResolver 的测试替身。
 type fakeResources struct{}
 
 func (fakeResources) ResolveControl(typ, role string) (string, uint64, bool) {
-	if typ == defaultResourceType && role == defaultResourceRole {
+	if typ == testResourceTypeBase && role == testResourceRoleMain {
 		return "base.main", 11, true
 	}
 	if typ == "nervus.resource.manipulator.arm" && role == "main" {
@@ -192,7 +199,7 @@ type mutableResources struct {
 func (r *mutableResources) ResolveControl(typ, role string) (string, uint64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if typ != defaultResourceType || role != defaultResourceRole || r.generation == 0 {
+	if typ != testResourceTypeBase || role != testResourceRoleMain || r.generation == 0 {
 		return "", 0, false
 	}
 	return "base.main", r.generation, true
@@ -279,12 +286,55 @@ func dialHandshaked(t *testing.T, sock string) net.Conn {
 	return c
 }
 
+// acquireEnv 造一个 AcquireControl。
+//
+// sel 为 nil 时补上底盘的显式 selector：v2 起没有隐式默认，而本文件绝大多数
+// 用例验的是【租约状态机】（抢占、撤销、世代、deadman），不是 selector 语义。
+// 让每个用例都手写一遍 selector 只会淹没它们各自要断言的那件事。
+//
+// 「空 selector 必须被拒」由 TestAcquireControl_EmptySelectorRejected 单独锁住。
 func acquireEnv(reqID uint64, class ipcv1.ControllerClass, sel *ipcv1.ResourceSelector) *ipcv1.Envelope {
+	if sel == nil {
+		sel = &ipcv1.ResourceSelector{
+			Type: testResourceTypeBase, Role: testResourceRoleMain,
+		}
+	}
 	return &ipcv1.Envelope{Body: &ipcv1.Envelope_AcquireControl{AcquireControl: &ipcv1.AcquireControl{
 		RequestId:       reqID,
 		ControllerClass: class,
 		Resource:        sel,
 	}}}
+}
+
+// 【v2 移除了隐式默认】：空 selector 不再指向 {motion.base, main}。
+//
+// v1 那条默认让「我没写 selector」和「我要底盘」变成同一件事——一个忘了填的
+// 调用会静默拿到底盘的控制租约。对机器人来说这是最不该有的那种默认，
+// 因此它是本次 major 提升的直接原因。
+func TestAcquireControl_EmptySelectorRejected(t *testing.T) {
+	sock, _ := newLeaseServer(t, &fakeLeases{})
+	c := dialHandshaked(t, sock)
+
+	// 刻意绕过 acquireEnv 的补默认逻辑，直接发一个空 selector
+	env := &ipcv1.Envelope{Body: &ipcv1.Envelope_AcquireControl{
+		AcquireControl: &ipcv1.AcquireControl{
+			RequestId:       1,
+			ControllerClass: ipcv1.ControllerClass_CONTROLLER_CLASS_HUMAN,
+		},
+	}}
+	if err := WriteFrame(c, mustMarshal(t, env)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	res := readEnv(t, c).GetAcquireControlResult()
+	if res == nil {
+		t.Fatal("want AcquireControlResult")
+	}
+	if res.GetSuccess() != nil {
+		t.Fatal("空 selector 拿到了租约——隐式默认没有真正移除")
+	}
+	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
+		t.Fatalf("code = %v, want FAILED_PRECONDITION", code)
+	}
 }
 
 func TestAcquireControl_Success(t *testing.T) {

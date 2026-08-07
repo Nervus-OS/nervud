@@ -1143,31 +1143,19 @@ type ResourceResolver interface {
 	ResolveControlBySelector(sel *ipcv1.ResourceSelector) (handle string, generation uint64, ok bool)
 }
 
-// 协议规定的隐式默认 Resource（envelope.proto: ResolveEndpoint.selector
-// 「[REWRITE-v1] 固定 BaseMotion 可以留空，由 nervud 隐式取
-// {type=nervus.resource.motion.base, role=main}」）。
-//
-// AcquireControl 沿用同一默认：同一个「留空」在两条路径上必须是同一个含义，
-// 否则是最容易写出 bug 的那类不一致。
-const (
-	defaultResourceType = "nervus.resource.motion.base"
-	defaultResourceRole = "main"
-)
-
 // resolveLeaseResource 把 AcquireControl 的 selector 解析成 resource_handle。
+//
+// 【空 selector 一律拒绝】。v1 曾在这里隐式取 {motion.base, main}，那条默认已
+// 移除：它让「我没写 selector」和「我要底盘」变成同一件事，一个忘了填的调用
+// 会静默地拿到底盘的控制租约——对机器人来说这是最不该有的那种默认。
 func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, uint64, bool) {
 	if s.resources == nil {
-		// No resource directory means no lease authority, including the legacy
-		// default. Production assembly injects the catalog-backed module.
+		// 没有 Resource 目录就没有租约权威。生产装配注入 catalog 支撑的模块
 		return "", 0, false
 	}
-	// 完全空的 selector 沿用协议规定的隐式默认（envelope.proto: 固定 BaseMotion
-	// 可以留空）。同一个「留空」在 Resolve 与 AcquireControl 上必须是同一个含义。
-	// 【V2-10 会去掉这条隐式默认】——那是本轮唯一真正断 wire 的变更。
 	if catalog.SelectorIsEmpty(sel) {
-		return s.resources.ResolveControl(defaultResourceType, defaultResourceRole)
+		return "", 0, false
 	}
-	// 非空 selector 走完整选择：labels 过滤 + 多候选策略
 	return s.resources.ResolveControlBySelector(sel)
 }
 

@@ -331,10 +331,15 @@ func resolveInterfaceResource(
 	if snapshot == nil {
 		return "", 0, false
 	}
-	// 空 selector 回落到接口声明的默认资源（语义由接口数据决定，不由内核写死）
+	// 空 selector 回落到【接口自己声明的】默认资源。
+	//
+	// 这与 v1 那条隐式默认不是一回事：v1 由内核写死 {motion.base, main}，
+	// 任何接口留空都拿到底盘；这里的默认由接口的 ProviderDescriptor 声明，
+	// 没声明就是没有默认，解析不到。语义由接口数据决定，不由内核写死。
 	if catalog.SelectorIsEmpty(sel) {
 		resourceType, role := def.DefaultResourceType, def.DefaultResourceRole
 		if resourceType == "" && role == "" {
+			// 不绑资源的接口：留空即正确。绑资源却没声明默认的接口：必须显式给 selector
 			return "", 0, len(def.CompatibleResourceTypes) == 0
 		}
 		if len(def.CompatibleResourceTypes) == 0 {

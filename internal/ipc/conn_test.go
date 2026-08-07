@@ -174,8 +174,11 @@ func TestHandshake_VersionMismatchSendsFailureThenCloses(t *testing.T) {
 	s, sock, _ := newTestServer(t, inv, DefaultLimits())
 
 	c := dial(t, sock)
+	// 只接受 major 3 的客户端：nervud 实现 major 2，协商不出交集。
+	// 【不要用 2】——那正是本 build 支持的版本，会握手成功
 	bad := &ipcv1.Envelope{Body: &ipcv1.Envelope_Hello{Hello: &ipcv1.Hello{
-		MinProtocolMajor: 2, MaxProtocolMajor: 2, MaxProtocolMinor: 0,
+		MinProtocolMajor: protocolMajor + 1, MaxProtocolMajor: protocolMajor + 1,
+		MaxProtocolMinor: 0,
 	}}}
 	if err := WriteFrame(c, mustMarshal(t, bad)); err != nil {
 		t.Fatal(err)
