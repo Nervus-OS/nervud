@@ -51,12 +51,25 @@ func (f *fakeLister) List() []pkgregistry.Entry { return f.entries }
 type fakePermSetter struct {
 	calls []string // "pkg perm state"
 	err   error
+	// granted 是 "pkg perm" -> 已授予。准入判定用它，模拟 permission.Registry
+	granted map[string]bool
 }
 
 func (f *fakePermSetter) SetRuntimeState(pkg, perm string, state permission.GrantState) error {
 	f.calls = append(f.calls, pkg+" "+perm)
 	_ = state
 	return f.err
+}
+
+func (f *fakePermSetter) Allowed(pkg, perm string) bool {
+	return f.granted[pkg+" "+perm]
+}
+
+func (f *fakePermSetter) grant(pkg, perm string) {
+	if f.granted == nil {
+		f.granted = make(map[string]bool)
+	}
+	f.granted[pkg+" "+perm] = true
 }
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -301,66 +314,126 @@ func TestRejectsNonAdminUID(t *testing.T) {
 	}
 }
 
-// ---- ServiceUID 放行（pkgmanagerd 装包链路的准入）------------------------
+// ---- 按权限放行（装包链路的准入）----------------------------------------
 
-// newServerWithServiceUID 构造一个 Server 并【模拟 Start 时的服务 UID 解析】。
+// newServerWithAdmittedPackage 构造一个 Server 并【模拟 Start 时的按权限解析】。
 //
 // 不真的 Start：chown 到一个不存在的 GID 需要 root，普通开发机跑不了。
-// 这里直接调 resolveServiceUID，验的是解析与集合合并本身。
-func newServerWithServiceUID(t *testing.T, adminUID, serviceUID uint32) *Server {
+// 这里直接调 admitPermittedPackages，验的是解析与集合合并本身。
+func newServerWithAdmittedPackage(t *testing.T, adminUID, serviceUID uint32) *Server {
 	t.Helper()
 	dir := t.TempDir()
 
 	reg := &fakeLister{}
+	perms := &fakePermSetter{}
 	if serviceUID != 0 {
 		reg.entries = []pkgregistry.Entry{{
 			Manifest: pkgregistry.Manifest{PackageID: testServicePkgID},
 			UID:      serviceUID,
 		}}
+		perms.grant(testServicePkgID, PermissionPackageAdmin)
 	}
 	srv, err := New(Config{
-		SockPath:         filepath.Join(dir, "s.sock"),
-		StagingRoot:      filepath.Join(dir, "staging"),
-		AdminUID:         adminUID,
-		ServicePackageID: testServicePkgID,
-		Packages:         &fakePkgService{},
-		Registry:         reg,
-		Permissions:      &fakePermSetter{},
-		Auditor:          audit.New(discardLog()),
-		Log:              discardLog(),
+		SockPath:    filepath.Join(dir, "s.sock"),
+		StagingRoot: filepath.Join(dir, "staging"),
+		AdminUID:    adminUID,
+		Packages:    &fakePkgService{},
+		Registry:    reg,
+		Permissions: perms,
+		Auditor:     audit.New(discardLog()),
+		Log:         discardLog(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// Start 里做的那一步。真实路径上它跑在启动扫描【之后】——装配期查不到 UID，
-	// 那正是这个改动要修的 bug。
-	srv.resolveServiceUID()
+	// Start 里做的那一步。真实路径上它跑在启动扫描【之后】——装配期 UID 与
+	// 权限裁决结果都还不存在。
+	srv.admitPermittedPackages()
 	return srv
 }
 
 const testServicePkgID = "nervus.pkgmanagerd"
 
-func TestServiceUID_AdmittedAlongsideAdmin(t *testing.T) {
-	srv := newServerWithServiceUID(t, 0, 20001)
+// 装了包但没授予 perm.pkg.admin 时不得放行。这条断言是本次改造的核心：
+// 准入依据是权限，不是包名——哪怕这个包正好叫 nervus.pkgmanagerd。
+func TestAdmission_RequiresPermissionNotPackageName(t *testing.T) {
+	dir := t.TempDir()
+	reg := &fakeLister{entries: []pkgregistry.Entry{{
+		Manifest: pkgregistry.Manifest{PackageID: testServicePkgID},
+		UID:      20001,
+	}}}
+	srv, err := New(Config{
+		SockPath:    filepath.Join(dir, "s.sock"),
+		StagingRoot: filepath.Join(dir, "staging"),
+		AdminUID:    1000,
+		Packages:    &fakePkgService{},
+		Registry:    reg,
+		// 刻意不 grant PermissionPackageAdmin
+		Permissions: &fakePermSetter{},
+		Auditor:     audit.New(discardLog()),
+		Log:         discardLog(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if admitted := srv.admitPermittedPackages(); len(admitted) != 0 {
+		t.Fatalf("未授权的包被放行: %v", admitted)
+	}
+	if _, ok := srv.allowedUIDs[20001]; ok {
+		t.Error("包名匹配但无权限，不得进入 allowedUIDs")
+	}
+}
+
+// 任意包名只要持有权限就能连——内核不认识具体的 Package ID。
+func TestAdmission_AnyPackageHoldingPermission(t *testing.T) {
+	dir := t.TempDir()
+	const otherPkg = "com.vendor.installerd"
+	reg := &fakeLister{entries: []pkgregistry.Entry{{
+		Manifest: pkgregistry.Manifest{PackageID: otherPkg},
+		UID:      31337,
+	}}}
+	perms := &fakePermSetter{}
+	perms.grant(otherPkg, PermissionPackageAdmin)
+	srv, err := New(Config{
+		SockPath:    filepath.Join(dir, "s.sock"),
+		StagingRoot: filepath.Join(dir, "staging"),
+		AdminUID:    1000,
+		Packages:    &fakePkgService{},
+		Registry:    reg,
+		Permissions: perms,
+		Auditor:     audit.New(discardLog()),
+		Log:         discardLog(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.admitPermittedPackages()
+	if _, ok := srv.allowedUIDs[31337]; !ok {
+		t.Error("持有 perm.pkg.admin 的包必须被放行，与包名无关")
+	}
+}
+
+func TestAdmittedUID_AdmittedAlongsideAdmin(t *testing.T) {
+	srv := newServerWithAdmittedPackage(t, 0, 20001)
 
 	for _, uid := range []uint32{0, 20001} {
 		if _, ok := srv.allowedUIDs[uid]; !ok {
 			t.Errorf("uid %d should be admitted", uid)
 		}
 	}
-	// 别的包（哪怕也在 App 段）不能连：放行的是一个特定服务，不是一个区段
+	// 别的包（哪怕也在 App 段）不能连：放行的是持有权限的那个包，不是一个区段
 	if _, ok := srv.allowedUIDs[20002]; ok {
 		t.Error("a different package UID must not be admitted")
 	}
 }
 
-func TestServiceUID_ZeroDoesNotAdmitRootThroughBackDoor(t *testing.T) {
-	// ServiceUID 由 Registry 查询结果填充，查不到时零值恰好是 0。若把它无条件
-	// 加进允许集合，一个「包没装」的普通状况就会静默地把 root 从服务这条口子
-	// 又放进来一次——而 root 只应通过 AdminUID 这条明确路径进入。
+func TestAdmittedUID_ZeroDoesNotAdmitRootThroughBackDoor(t *testing.T) {
+	// 没有包持有权限时，被放行的 UID 集合应当只剩运维身份。若把「查不到」的
+	// 零值无条件加进允许集合，一个「包没装」的普通状况就会静默地把 root 从
+	// 服务这条口子又放进来一次——而 root 只应通过 AdminUID 这条明确路径进入。
 	//
-	// 这里 AdminUID 取一个非 0 值，断言 0 没有被 ServiceUID=0 带进来。
-	srv := newServerWithServiceUID(t, 1000, 0)
+	// 这里 AdminUID 取一个非 0 值，断言 0 没有被带进来。
+	srv := newServerWithAdmittedPackage(t, 1000, 0)
 
 	if _, ok := srv.allowedUIDs[0]; ok {
 		t.Fatal("uid 0 must not be admitted via ServiceUID=0")
@@ -373,39 +446,83 @@ func TestServiceUID_ZeroDoesNotAdmitRootThroughBackDoor(t *testing.T) {
 	}
 }
 
-func TestServiceUID_ResolvedAtStartNotAssembly(t *testing.T) {
-	// 这条锁住本次修的 bug：UID 是启动扫描时才分配的，装配期查不到。
+func TestAdmission_ResolvedAtStartNotAssembly(t *testing.T) {
+	// UID 是启动扫描时才分配的、权限是那之后才裁决的，装配期两者都查不到。
 	// 构造完但还没解析时，允许集合里只该有运维身份。
 	dir := t.TempDir()
 	reg := &fakeLister{entries: []pkgregistry.Entry{{
 		Manifest: pkgregistry.Manifest{PackageID: testServicePkgID},
 		UID:      20001,
 	}}}
+	perms := &fakePermSetter{}
+	perms.grant(testServicePkgID, PermissionPackageAdmin)
 	srv, err := New(Config{
 		SockPath: filepath.Join(dir, "s.sock"), StagingRoot: filepath.Join(dir, "staging"),
-		AdminUID: 1000, ServicePackageID: testServicePkgID,
-		Packages: &fakePkgService{}, Registry: reg, Permissions: &fakePermSetter{},
+		AdminUID: 1000,
+		Packages: &fakePkgService{}, Registry: reg, Permissions: perms,
 		Auditor: audit.New(discardLog()), Log: discardLog(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if _, ok := srv.allowedUIDs[20001]; ok {
-		t.Error("构造期不该已经解析出服务 UID（那时扫描还没跑）")
+		t.Error("构造期不该已经解析（那时扫描与权限裁决都还没跑）")
 	}
-	srv.resolveServiceUID()
+	srv.admitPermittedPackages()
 	if _, ok := srv.allowedUIDs[20001]; !ok {
-		t.Error("Start 时的解析没有把服务 UID 补进允许集合")
-	}
-	if srv.serviceUID != 20001 {
-		t.Errorf("serviceUID = %d, want 20001", srv.serviceUID)
+		t.Error("Start 时的解析没有把持有权限的包补进允许集合")
 	}
 }
 
-func TestServiceUID_ZeroKeepsSocketPrivate(t *testing.T) {
-	// 没有服务放行时，socket 必须保持 0600。放宽到 0660 却没有对应的组归属，
+// 多个包持有 perm.pkg.admin 时必须 fail closed：一个 Unix socket 只有一个组，
+// 挑一个会让其余的包「权限对了却连不上」——最难查的一类症状。
+func TestAdmission_MultipleHoldersFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	reg := &fakeLister{entries: []pkgregistry.Entry{
+		{Manifest: pkgregistry.Manifest{PackageID: "a.installerd"}, UID: 20001},
+		{Manifest: pkgregistry.Manifest{PackageID: "b.installerd"}, UID: 20002},
+	}}
+	perms := &fakePermSetter{}
+	perms.grant("a.installerd", PermissionPackageAdmin)
+	perms.grant("b.installerd", PermissionPackageAdmin)
+
+	adminUID := uint32(os.Getuid())
+	srv, err := New(Config{
+		SockPath: filepath.Join(dir, "s.sock"), StagingRoot: filepath.Join(dir, "staging"),
+		AdminUID: adminUID,
+		Packages: &fakePkgService{}, Registry: reg, Permissions: perms,
+		Auditor: audit.New(discardLog()), Log: discardLog(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	if len(srv.allowedUIDs) != 1 {
+		t.Fatalf("allowed set = %v, want only the admin uid", srv.allowedUIDs)
+	}
+	if _, ok := srv.allowedUIDs[adminUID]; !ok {
+		t.Error("运维身份必须仍可用")
+	}
+	if srv.admittedUID != 0 {
+		t.Errorf("admittedUID = %d, want 0（不该挑一个）", srv.admittedUID)
+	}
+	fi, err := os.Stat(srv.sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != socketMode {
+		t.Fatalf("socket mode = %o, want %o", got, socketMode)
+	}
+}
+
+func TestAdmission_NoHolderKeepsSocketPrivate(t *testing.T) {
+	// 没有包被放行时，socket 必须保持 0600。放宽到 0660 却没有对应的组归属，
 	// 等于把连接权发给 nervud 主组（生产是 root 组）的全部成员。
-	srv := newServerWithServiceUID(t, uint32(os.Getuid()), 0)
+	srv := newServerWithAdmittedPackage(t, uint32(os.Getuid()), 0)
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

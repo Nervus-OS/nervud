@@ -335,7 +335,10 @@ func (m *Manager) backoffWait(backoff *time.Duration, inst *Instance) bool {
 // 【权限与挂载是两道独立的门】。此前只做了属主那道，装包卡在这道上。
 func (m *Manager) readWritePaths(e pkgregistry.Entry, dataDir string) []string {
 	paths := []string{dataDir}
-	if m.stagingPkgID != "" && m.stagingRoot != "" && e.Manifest.PackageID == m.stagingPkgID {
+	// staging 根：判据是 perm.pkg.admin，与管理通道的准入判据同源。
+	// 用 Allowed 而不是包名比对，内核因此不需要认识任何具体的包
+	if m.stagingRoot != "" && m.perms != nil &&
+		m.perms.Allowed(e.Manifest.PackageID, PermissionPackageAdmin) {
 		paths = append(paths, m.stagingRoot)
 	}
 	// 共享用户文档区：声明了 perm.storage.user 的包才拿得到。文件管理器、

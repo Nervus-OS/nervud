@@ -1,4 +1,17 @@
+//go:build linux
+
 // Package sysprobe 集中纯观察性系统调用：向 Linux 内核询问事实但不改变任何系统状态
+//
+// # 本包整体只在 Linux 上编译
+//
+// 这里【不提供】非 Linux 的兜底实现。曾经有一个 monotonic_unsupported.go 在
+// 非 Linux 上返回 ErrUnsupportedPlatform，已经删除：nervud 只跑在 Linux 上，
+// 一个「能编译但每个调用都返回错误」的假实现没有任何用户，只会让
+// 「这个包依赖 Linux」这条事实从编译期问题退化成运行期问题。
+//
+// 现在在非 Linux 上构建会得到
+// "build constraints exclude all Go files in internal/sysprobe" —— 这正是想要的
+// 那句话。开发与测试请在 Linux 或 WSL 上做。
 //
 // 为什么不放进 authority
 //

@@ -28,23 +28,30 @@ import (
 // preflight 负责在启动时把它建好（0700、属主 nervud）。
 const DefaultStagingDir = "/var/lib/nervus/staging"
 
-// socketMode 是没有放行系统服务时的 socket 权限：0600，只有属主（运行 nervud
+// PermissionPackageAdmin 是连接本通道所需的权限。它定义在内核 catalog bootstrap
+// 里（SYSTEM_ONLY + PLATFORM 信任 + platform-release 签名角色）。
+//
+// 【内核不认识任何具体的 Package ID】：以前这里是 main.go 的一个
+// "nervus.pkgmanagerd" 常量，现在换成一条包必须显式声明、且经过裁决的权限。
+const PermissionPackageAdmin = "perm.pkg.admin"
+
+// socketMode 是没有放行任何包时的 socket 权限：0600，只有属主（运行 nervud
 // 的账户，生产为 root）能连。这是第一道 FS 层过滤；真正的准入是 accept 后的
 // SO_PEERCRED 校验（见 handleConn）。
 const socketMode fs.FileMode = 0o600
 
-// socketModeWithService 是放行了系统服务（pkgmanagerd）时的 socket 权限：0660，
-// 配合把 socket 的【组】chown 成该服务的 GID。
+// socketModeWithService 是放行了一个包时的 socket 权限：0660，配合把 socket 的
+// 【组】chown 成该包的 GID。
 //
-// 为什么必须动 FS 层：0600 之下 pkgmanagerd（UID 20000+）连 connect() 都过不了，
+// 为什么必须动 FS 层：0600 之下装包服务（UID 20000+）连 connect() 都过不了，
 // SO_PEERCRED 校验根本没机会执行——只在 handleConn 里放行 UID 是无效的。
 //
 // 为什么不用 0666 让 SO_PEERCRED 独自把关：那样任何本地进程都能连上再被拒，
 // FS 这一层就退化成摆设，还白送一个消耗连接槽的口子。0660 + 组精确地只放
-// 「root 与那一个服务」两者。
+// 「root 与那一个包」两者。
 //
 // 本系统里 Package 的 GID 恒等于其 UID（见 service.buildStartReq 的
-// GID: e.UID），所以组直接取 ServiceUID 即可，不需要额外的组管理。
+// GID: e.UID），所以组直接取该包的 UID，不需要额外的组管理。
 const socketModeWithService fs.FileMode = 0o660
 
 // PackageService 是本包对 pkgregistry.Module 的窄接口依赖：装包/卸载/停用启用。
@@ -63,9 +70,11 @@ type PackageLister interface {
 }
 
 // PermissionSetter 是对 permission.Registry 的窄接口依赖：设置运行期授予状态
-// （grant/revoke）。*permission.Registry 隐式满足。
+// （grant/revoke），以及查询某个包是否持有某项权限（准入判定用）。
+// *permission.Registry 隐式满足。
 type PermissionSetter interface {
 	SetRuntimeState(packageID, permission string, state permission.GrantState) error
+	Allowed(packageID, permission string) bool
 }
 
 // Config 是管理服务的装配输入。
@@ -78,36 +87,6 @@ type Config struct {
 	// os.Geteuid = 运行 nervud 的账户，生产为 0/root）；不设默认，因为 0 本身
 	// 是合法值，无法用零值区分未设置。
 	AdminUID uint32
-
-	// ServicePackageID 是唯一被额外放行的系统服务的 Package ID
-	// （生产为 nervus.pkgmanagerd）。空表示不放行任何服务。
-	//
-	// 【存 Package ID 而不是 UID】。UID 是启动扫描时才分配的，而装配期
-	// （main.go 的 assemble）扫描还没跑——k.Register 只是登记，Start 要等
-	// k.Run 才执行。在装配期查 UID 永远查不到，那样写出来的放行逻辑是死代码：
-	// 日志里会一直是 service_uid=0，而 pkgmanagerd 连不上管理通道。
-	//
-	// 改为存 ID、在 Start 里解析：admin 注册在 pkgregistry 之后，Start 也就
-	// 在扫描之后跑，那时 UID 已经分配并持久化。
-	// 为什么需要它：装包必须由一个【系统服务】对 App 提供（App 不可能是 root），
-	// 而系统服务跑在 App UID 段（20000-59999），按单值 root 判定连不上本通道。
-	//
-	// 为什么不让 pkgmanagerd 直接以 root 跑：那会让它脱离包体系——拿不到稳定
-	// UID、不受 identity 的 UID↔Package 一一对应约束、也不在 pkgregistry 保护
-	// 名单的语义之内。而那份名单里明写着 "nervus.pkgmanagerd/main"，设计意图
-	// 就是它是一个包。
-	//
-	// 为什么是单个而不是一组：这条通道能做的事（装包、卸载、授撤权限）是全系统
-	// 最敏感的一批，放行面越窄越好。真出现第二个需要它的服务时，应当先问
-	// 「它凭什么」，而不是往列表里再加一行。
-	//
-	// 【安全边界没有放宽】：放行的是「谁能连上这条 socket」，不是「连上能做什么」。
-	// 全部命令仍旧只是把请求投递给同进程的 pkgregistry.Module，签名、digest、
-	// 升级裁决、权限交集一律在那里复核。pkgmanagerd 不做任何安全判定。
-	//
-	// 未安装该包时（最小镜像、开发机）Start 里查不到，本通道退回只认运维身份
-	// ——不报错，也不放宽。这条链路缺失只意味着「装不了包」，不该拖垮内核启动。
-	ServicePackageID string
 
 	Packages    PackageService
 	Registry    PackageLister
@@ -122,14 +101,19 @@ type Server struct {
 	sockPath    string
 	stagingRoot string
 	adminUID    uint32
-	// servicePkgID 是配置给的 Package ID；serviceUID 是 Start 时解析出的结果。
-	// 分成两个字段是因为解析必须推迟到启动扫描之后（见 Config.ServicePackageID）。
-	servicePkgID string
-	serviceUID   uint32
-	// allowedUIDs 是 adminUID + serviceUID 的合并集合，构造时冻结、运行期只读。
-	// 用 map 而不是两次比较：判定在每条连接上执行，集合语义更直白，
-	// 将来真要放宽也不必改判定逻辑。
+	// allowedUIDs 是运维 UID 加上全部持有 PermissionPackageAdmin 的包 UID。
+	// 在 Start 里一次算好、之后只读。
+	//
+	// 用 map 而不是逐个比较：判定在每条连接上执行，集合语义更直白。
 	allowedUIDs map[uint32]struct{}
+
+	// admittedUID 是被放行的那个包的 UID，Start 里解析。socket 的组与 staging
+	// 目录的属主都取它——两者必须是同一个值，否则会出现「连得上但写不进
+	// staging」这类分裂状态。
+	//
+	// 0 表示没有包被放行（最小镜像、开发机，或出现多个持有者时的 fail closed）。
+	// 那时只有 root 用这条通道，不需要转交属主。
+	admittedUID uint32
 
 	pkgs  PackageService
 	reg   PackageLister
@@ -175,23 +159,23 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Log == nil {
 		return nil, errors.New("admin: Log is required")
 	}
-	// 允许集合此刻只含运维身份。服务 UID 在 Start 里解析后补入——装配期
-	// 启动扫描还没跑，这里查不到（见 Config.ServicePackageID）。
+	// 允许集合此刻只含运维身份。持有 perm.pkg.admin 的包在 Start 里补入——
+	// 装配期启动扫描还没跑，UID 与权限裁决结果都还不存在
+	// （见 admitPermittedPackages）。
 	allowed := map[uint32]struct{}{cfg.AdminUID: {}}
 
 	return &Server{
-		sockPath:     cfg.SockPath,
-		stagingRoot:  filepath.Clean(cfg.StagingRoot),
-		adminUID:     cfg.AdminUID,
-		servicePkgID: cfg.ServicePackageID,
-		allowedUIDs:  allowed,
-		pkgs:         cfg.Packages,
-		reg:          cfg.Registry,
-		perms:        cfg.Permissions,
-		aud:          cfg.Auditor,
-		log:          cfg.Log,
-		quit:         make(chan struct{}),
-		fatal:        make(chan error, 1),
+		sockPath:    cfg.SockPath,
+		stagingRoot: filepath.Clean(cfg.StagingRoot),
+		adminUID:    cfg.AdminUID,
+		allowedUIDs: allowed,
+		pkgs:        cfg.Packages,
+		reg:         cfg.Registry,
+		perms:       cfg.Permissions,
+		aud:         cfg.Auditor,
+		log:         cfg.Log,
+		quit:        make(chan struct{}),
+		fatal:       make(chan error, 1),
 	}, nil
 }
 
@@ -232,9 +216,9 @@ func (s *Server) Start(context.Context) error {
 	}
 	ln.SetUnlinkOnClose(true)
 
-	// 解析服务 UID。【必须在这里而不是装配期】：本模块注册在 pkgregistry 之后，
-	// 因此本函数跑在启动扫描之后，那时 UID 已经分配并持久化。
-	s.resolveServiceUID()
+	// 按权限放行。【必须在这里而不是装配期】：本模块注册在 pkgregistry 之后，
+	// 因此本函数跑在启动扫描之后，那时 UID 已分配、权限已裁决。
+	admitted := s.admitPermittedPackages()
 
 	// 顺序要紧：先 chown 组、再放宽 mode。
 	//
@@ -242,17 +226,34 @@ func (s *Server) Start(context.Context) error {
 	// nervud 的主组（生产为 root 组），0660 等于把连接权发给了 root 组的全部
 	// 成员。窗口再短也是真实可利用的，而调换顺序的成本为零。
 	mode := socketMode
-	if s.serviceUID != 0 {
-		// 本系统 Package 的 GID 恒等于 UID，故组直接取 serviceUID。
-		// -1 表示不改属主，只改组。
-		if err := os.Chown(s.sockPath, -1, int(s.serviceUID)); err != nil {
+	switch len(admitted) {
+	case 0:
+		// 只有运维身份，保持 0600
+	case 1:
+		s.admittedUID = admitted[0]
+		// 本系统 Package 的 GID 恒等于 UID。-1 表示不改属主，只改组
+		if err := os.Chown(s.sockPath, -1, int(s.admittedUID)); err != nil {
 			_ = ln.Close()
-			return fmt.Errorf("admin: chown group %s to %d: %w", s.sockPath, s.serviceUID, err)
+			return fmt.Errorf("admin: chown group %s to %d: %w", s.sockPath, s.admittedUID, err)
 		}
 		mode = socketModeWithService
+	default:
+		// 【一个 Unix socket 只有一个组】，表达不了「放行多个包」。
+		//
+		// 这里 fail closed 保持 0600 而不是随便挑一个：挑一个会让另外那些包
+		// 在 allowedUIDs 里看着被放行、实际却连 connect() 都过不去，症状是
+		// 「权限配对了但连不上」——那是最难查的一类。
+		//
+		// 正常情况下不会走到这里：perm.pkg.admin 是 SYSTEM_ONLY + PLATFORM +
+		// platform-release，出现第二个持有者说明平台构建配错了。
+		// 只影响装包，运维通道仍可用，因此不拖垮内核启动。
+		s.log.Error("admin: multiple packages hold "+PermissionPackageAdmin+
+			"; a Unix socket has only one group, refusing all of them",
+			"uids", admitted, "permission", PermissionPackageAdmin)
+		s.allowedUIDs = map[uint32]struct{}{s.adminUID: {}}
 	}
 
-	// bind 时权限受 umask 削减，这里显式设定。没有服务放行时是 0600。
+	// bind 时权限受 umask 削减，这里显式设定。没有包被放行时是 0600。
 	if err := os.Chmod(s.sockPath, mode); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("admin: chmod %s: %w", s.sockPath, err)
@@ -264,7 +265,7 @@ func (s *Server) Start(context.Context) error {
 
 	s.log.Info("admin: listening",
 		"sock", s.sockPath, "mode", mode.String(),
-		"admin_uid", s.adminUID, "service_uid", s.serviceUID)
+		"admin_uid", s.adminUID, "admitted_uid", s.admittedUID)
 	return nil
 }
 
@@ -407,25 +408,44 @@ func (s *Server) audit(action, subject string, denied bool, err error, detail st
 // UID 0 一律丢弃——root 只能通过 AdminUID 这条明确路径进来，绝不接受从
 // 「服务放行」这个口子悄悄混进一个 root。这不是理论风险：查不到时的零值
 // 恰好就是 0。
-func (s *Server) resolveServiceUID() {
-	if s.servicePkgID == "" {
-		return
-	}
+// admitPermittedPackages 把每一个持有 PermissionPackageAdmin 的包的 UID 加进
+// 放行集合。
+//
+// 【判据是权限，不是 Package ID】。以前这里比对的是装配期硬编码的
+// "nervus.pkgmanagerd"；现在内核不认识任何具体的包名，只认「谁在 manifest 里
+// 声明了 perm.pkg.admin 并通过了裁决」。
+//
+// 放行面并没有因此变宽：perm.pkg.admin 是 SYSTEM_ONLY + PLATFORM 信任 +
+// platform-release 签名角色，IntersectAt 会把动态安装包、OEM 包和开发构建里
+// 降级到 Ordinary 的包全部挡在外面。区别只是这条约束现在写在权限目录里，
+// 可以被审计、被测试，而不是散落在 main.go 的一个常量上。
+//
+// 【必须在 Start 里调用而不是装配期】：本模块注册在 pkgregistry 之后，因此
+// 本函数跑在启动扫描之后，那时 UID 已分配、权限已裁决。装配期两者都还不存在。
+func (s *Server) admitPermittedPackages() []uint32 {
+	var admitted []uint32
 	for _, e := range s.reg.List() {
-		if e.Manifest.PackageID != s.servicePkgID {
+		pkgID := e.Manifest.PackageID
+		if !s.perms.Allowed(pkgID, PermissionPackageAdmin) {
 			continue
 		}
+		// UID 0 说明启动扫描没给这个包分配到 UID。放行 0 等于放行 root，
+		// 而 root 的准入由 adminUID 单独表达——这里必须拒绝，否则一个
+		// 分配失败的包会静默获得运维身份
 		if e.UID == 0 {
-			s.log.Warn("admin: service package has uid 0; refusing to admit",
-				"package_id", s.servicePkgID)
-			return
+			s.log.Warn("admin: package holds "+PermissionPackageAdmin+" but has uid 0; refusing to admit",
+				"package_id", pkgID)
+			continue
 		}
-		s.serviceUID = e.UID
 		s.allowedUIDs[e.UID] = struct{}{}
-		s.log.Info("admin: service package admitted",
-			"package_id", s.servicePkgID, "uid", e.UID)
-		return
+		admitted = append(admitted, e.UID)
+		s.log.Info("admin: package admitted by permission",
+			"package_id", pkgID, "uid", e.UID, "permission", PermissionPackageAdmin)
 	}
-	s.log.Info("admin: service package not installed; channel is operator-only",
-		"package_id", s.servicePkgID)
+	if len(admitted) == 0 {
+		// 最小镜像或开发机上没有装包服务是正常的：本通道退回只认运维身份。
+		// 不报错也不放宽——这条链路缺失只意味着「装不了包」，不该拖垮内核启动
+		s.log.Info("admin: no package holds " + PermissionPackageAdmin + "; channel is operator-only")
+	}
+	return admitted
 }

@@ -7,7 +7,6 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/catalog"
-	"github.com/nervus-os/nervud/internal/identity"
 )
 
 var (
@@ -21,8 +20,6 @@ var (
 	ErrCatalogPublishConflict = errors.New("pkgregistry: catalog candidate base is stale")
 )
 
-const legacyPackageManagerID = "nervus.pkgmanagerd"
-
 // projectCatalogSources converts only kernel-verified Entry state into the
 // neutral catalog model. Source kind and signer identity are never taken from
 // manifest fields or from the persisted grant ledger.
@@ -34,36 +31,32 @@ func projectCatalogSources(entries []Entry) ([]catalog.Source, error) {
 			continue
 		}
 
+		// 逐包失败一律包成 catalog.SourceError：启动扫描据此隔离肇事者而不是
+		// 整体失败（见 Module.prepareEntriesQuarantining）。SourceError.Unwrap
+		// 保留内层 error，errors.Is(err, ErrProviderArtifactsRequired) 仍成立。
+		pkgID := entry.Manifest.PackageID
 		kind, err := catalogSourceKind(entry.Source)
 		if err != nil {
-			return nil, fmt.Errorf("package %q: %w", entry.Manifest.PackageID, err)
+			return nil, &catalog.SourceError{PackageID: pkgID, Err: err}
 		}
 		evidence := projectSignerEvidence(entry)
 		source := catalog.Source{
-			PackageID: entry.Manifest.PackageID,
+			PackageID: pkgID,
 			Kind:      kind,
 			Trust:     entry.Trust,
 			Signers:   evidence,
 			Exports:   projectExports(entry.Manifest),
 		}
-		switch {
-		case entry.provider != nil:
-			if entry.provider.parsed == nil {
-				return nil, fmt.Errorf("%w: package %q has no parsed artifacts",
-					ErrInvalidProviderArtifacts, entry.Manifest.PackageID)
-			}
-			source.Artifacts = entry.provider.parsed
-		case legacyPackageManagerEligible(entry):
-			artifacts, bridgeErr := catalog.LegacyPackageManagerArtifacts()
-			if bridgeErr != nil {
-				return nil, fmt.Errorf("package %q: legacy package-manager artifacts: %w",
-					entry.Manifest.PackageID, bridgeErr)
-			}
-			source.Artifacts = artifacts
-		default:
-			return nil, fmt.Errorf("%w: package %q",
-				ErrProviderArtifactsRequired, entry.Manifest.PackageID)
+		if entry.provider == nil {
+			return nil, &catalog.SourceError{PackageID: pkgID, Err: ErrProviderArtifactsRequired}
 		}
+		if entry.provider.parsed == nil {
+			return nil, &catalog.SourceError{
+				PackageID: pkgID,
+				Err:       fmt.Errorf("%w: no parsed artifacts", ErrInvalidProviderArtifacts),
+			}
+		}
+		source.Artifacts = entry.provider.parsed
 		out = append(out, source)
 	}
 	return out, nil
@@ -115,30 +108,6 @@ func projectExports(manifest Manifest) []catalog.ExportBinding {
 		}
 	}
 	return out
-}
-
-// legacyPackageManagerEligible is deliberately the only artifact-less provider
-// bridge. It requires an exact package/component/interface shape and an actual
-// verified platform-release key identity; role text alone is insufficient.
-func legacyPackageManagerEligible(entry Entry) bool {
-	if entry.Manifest.PackageID != legacyPackageManagerID ||
-		entry.Source != SourceSystemImage ||
-		entry.Trust != identity.TrustPlatform ||
-		entry.Manifest.Provider != nil {
-		return false
-	}
-	exports := projectExports(entry.Manifest)
-	if len(exports) != 1 ||
-		exports[0].ComponentID != "main" ||
-		exports[0].InterfaceID != catalog.InterfacePackageManager {
-		return false
-	}
-	for _, signer := range entry.VerifiedSigners {
-		if signer.Role == RolePlatformRelease && signer.KeyID != "" {
-			return true
-		}
-	}
-	return false
 }
 
 type preparedEntries struct {

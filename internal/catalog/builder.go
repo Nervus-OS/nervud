@@ -1,7 +1,6 @@
 package catalog
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -64,7 +63,7 @@ func (b *Builder) Build(previous *Snapshot, sources []Source) (*Snapshot, error)
 	for i, source := range sources {
 		ordered[i] = normalizeSource(cloneSource(source))
 		if err := validateSourceShape(ordered[i]); err != nil {
-			return nil, err
+			return nil, &SourceError{PackageID: ordered[i].PackageID, Err: err}
 		}
 	}
 	sort.Slice(ordered, func(i, j int) bool {
@@ -87,26 +86,26 @@ func (b *Builder) Build(previous *Snapshot, sources []Source) (*Snapshot, error)
 	seenPackages := make(map[string]struct{}, len(ordered))
 	for _, source := range ordered {
 		if _, duplicate := seenPackages[source.PackageID]; duplicate {
-			return nil, fmt.Errorf("catalog: duplicate source package %q", source.PackageID)
+			return nil, sourceErrorf(source.PackageID, "duplicate source package")
 		}
 		seenPackages[source.PackageID] = struct{}{}
 
 		if source.Artifacts != nil {
 			if err := b.addArtifacts(next, source); err != nil {
-				return nil, fmt.Errorf("catalog: source %q: %w", source.PackageID, err)
+				return nil, &SourceError{PackageID: source.PackageID, Err: err}
 			}
 		} else if source.Kind != SourceKindKernel && len(source.Exports) != 0 {
-			return nil, fmt.Errorf("catalog: source %q exports interfaces without ProviderArtifacts", source.PackageID)
+			return nil, sourceErrorf(source.PackageID, "exports interfaces without ProviderArtifacts")
 		}
 
 		if len(source.KernelBuiltins) != 0 {
 			if source.Kind != SourceKindKernel {
-				return nil, fmt.Errorf("catalog: non-kernel source %q declares kernel builtins", source.PackageID)
+				return nil, sourceErrorf(source.PackageID, "non-kernel source declares kernel builtins")
 			}
 			for _, builtin := range source.KernelBuiltins {
 				if err := b.addKernelBuiltin(next, source, builtin); err != nil {
-					return nil, fmt.Errorf("catalog: source %q builtin %q: %w",
-						source.PackageID, builtin.InterfaceID, err)
+					return nil, sourceErrorf(source.PackageID,
+						"builtin %q: %w", builtin.InterfaceID, err)
 				}
 			}
 		}
@@ -921,6 +920,6 @@ func buildResourceHandleIndex(snapshot *Snapshot) error {
 }
 
 // EqualSchemaHash is a small consumer helper for RegisterEndpoint checks.
-func EqualSchemaHash(def InterfaceDefinition, candidate []byte) bool {
+/*func EqualSchemaHash(def InterfaceDefinition, candidate []byte) bool {
 	return bytes.Equal(def.SchemaHash, candidate)
-}
+}*/

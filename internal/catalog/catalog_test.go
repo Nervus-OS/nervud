@@ -78,60 +78,6 @@ func TestDefaultBootstrapContainsStandardAndKernelDefinitions(t *testing.T) {
 	}
 }
 
-func TestLegacyPackageManagerArtifactsOnlyBindCanonicalInterface(t *testing.T) {
-	artifacts, err := LegacyPackageManagerArtifacts()
-	if err != nil {
-		t.Fatalf("LegacyPackageManagerArtifacts: %v", err)
-	}
-	if artifacts.Descriptor.GetPackageId() != "nervus.pkgmanagerd" ||
-		len(artifacts.Descriptor.GetInterfaces()) != 1 ||
-		len(artifacts.Descriptor.GetPermissions()) != 0 ||
-		len(artifacts.Descriptor.GetResources()) != 0 ||
-		artifacts.Schemas.Len() != 1 {
-		t.Fatalf("legacy package-manager artifacts = %+v", artifacts.Descriptor)
-	}
-
-	registry := mustDefaultRegistry(t)
-	candidate, err := registry.Prepare([]Source{{
-		PackageID: "nervus.pkgmanagerd",
-		Kind:      SourceKindSystemImage,
-		Trust:     identity.TrustPlatform,
-		Signers: SignerEvidence{
-			Roles: []string{rolePlatformRelease},
-			VerifiedSigners: []VerifiedSigner{{
-				Role: rolePlatformRelease, KeyID: "platform-release-key",
-			}},
-		},
-		Exports: []ExportBinding{{
-			ComponentID: "main",
-			InterfaceID: InterfacePackageManager,
-		}},
-		Artifacts: artifacts,
-	}})
-	if err != nil {
-		t.Fatalf("Prepare legacy package manager: %v", err)
-	}
-	method, ok := candidate.Snapshot().ProviderMethod(
-		"nervus.pkgmanagerd", InterfacePackageManager, 1, 1)
-	if !ok || method.Request == nil ||
-		string(method.Request.FullName()) != "nervus.interface.pkgmanager.v1.InstallRequest" {
-		t.Fatalf("legacy package-manager method = %+v, %v", method, ok)
-	}
-	iface, ok := candidate.Snapshot().Interface(InterfacePackageManager, 1)
-	if !ok || iface.RequiredPermission != "perm.pkg.query" {
-		t.Fatalf("package-manager interface permission = %q, %v; want perm.pkg.query",
-			iface.RequiredPermission, ok)
-	}
-	query, ok := candidate.Snapshot().Permission("perm.pkg.query")
-	if !ok || query.GrantMode != ipcv1.GrantMode_GRANT_MODE_NORMAL {
-		t.Fatalf("package query permission = %+v, %v", query, ok)
-	}
-	install, ok := candidate.Snapshot().Permission("perm.pkg.install")
-	if !ok || install.GrantMode != ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
-		t.Fatalf("package install permission = %+v, %v", install, ok)
-	}
-}
-
 func TestOEMPrivateProviderBuildsWithoutKernelSpecificCode(t *testing.T) {
 	registry := mustDefaultRegistry(t)
 	source := mustOEMSource(t)

@@ -94,9 +94,23 @@ func (m *Module) Start(ctx context.Context) error {
 		}
 	}
 
-	prepared, err := m.prepareEntries(ctx, result.Entries)
+	// 【隔离而不是整体失败】。Scan 的逐包跳过只覆盖 manifest/digest/验签那一层；
+	// Catalog 层的冲突（资源多管理者、接口契约不一致、命名空间越权）如果也让
+	// Start 返回错误，一个配错的厂商包就能让整台机器起不来——那与本函数注释
+	// 承诺的「一个坏包不该拖垮内核启动」直接矛盾。
+	//
+	// 安装路径（install.go）不走这里，保持全有全无：新包有问题就拒绝新包。
+	prepared, quarantined, err := m.prepareEntriesQuarantining(ctx, result.Entries)
 	if err != nil {
 		return err
+	}
+	if len(quarantined) != 0 && m.log != nil {
+		ids := make([]string, 0, len(quarantined))
+		for _, e := range quarantined {
+			ids = append(ids, e.Manifest.PackageID)
+		}
+		m.log.Error("pkgregistry: boot continued without quarantined packages",
+			"count", len(ids), "packages", ids)
 	}
 
 	// 补齐运行前置：系统用户 + 私有数据目录。

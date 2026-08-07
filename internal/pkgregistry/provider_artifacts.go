@@ -50,11 +50,13 @@ func manifestExports(m Manifest) bool {
 	return false
 }
 
-func loadRequiredProviderArtifacts(root string, m Manifest, allowLegacyBridge bool) (*loadedProviderArtifacts, error) {
+// loadRequiredProviderArtifacts 强制「导出接口的包必须带 Provider 契约」。
+//
+// 这里没有任何例外通道：曾经有一条只给 nervus.pkgmanagerd 的兼容桥，在
+// 打包链（nervus-system-server 的 providergen）能产出 ProviderArtifacts 之后
+// 已经整段移除。内核不再按 package ID 给任何一个包开口子。
+func loadRequiredProviderArtifacts(root string, m Manifest) (*loadedProviderArtifacts, error) {
 	if manifestExports(m) && m.Provider == nil {
-		if allowLegacyBridge {
-			return nil, nil
-		}
 		return nil, ErrProviderArtifactsRequired
 	}
 	return loadProviderArtifacts(root, m)

@@ -12,13 +12,6 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-const (
-	legacyPackageManagerPackage   = "nervus.pkgmanagerd"
-	legacyPackageManagerComponent = "main"
-	legacyPackageManagerMajor     = uint32(1)
-	platformReleaseSignerRole     = "platform-release"
-)
-
 // RegisterEndpoint 处理一次 Service 报到
 func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *ipcv1.RegisterEndpoint) *ipcv1.RegisterEndpointResult {
 	reqID := req.GetRequestId()
@@ -108,9 +101,11 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 			"resource_handle is absent, unknown, or incompatible with the interface")
 	}
 
+	// schema hash 必须与 Catalog 里那份逐字节相等。曾经有一条只放行
+	// nervus.pkgmanagerd 空 schema 的兼容桥，在打包链能产出 ProviderArtifacts
+	// 之后已经移除——现在所有 Provider 一视同仁。
 	reportedSchema := req.GetInterfaceSchemaHash()
-	if !bytes.Equal(reportedSchema, provider.Definition.SchemaHash) &&
-		!allowLegacyPackageManagerEmptySchema(caller, req, provider) {
+	if !bytes.Equal(reportedSchema, provider.Definition.SchemaHash) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 			"interface schema hash does not match the catalog")
 	}
@@ -159,23 +154,6 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	return &ipcv1.RegisterEndpointResult{RequestId: reqID, Outcome: &ipcv1.RegisterEndpointResult_Success{
 		Success: &ipcv1.RegisterEndpointSuccess{EndpointId: reg.id},
 	}}
-}
-
-func allowLegacyPackageManagerEmptySchema(
-	caller identity.Caller,
-	req *ipcv1.RegisterEndpoint,
-	provider catalog.ProviderInterface,
-) bool {
-	return len(req.GetInterfaceSchemaHash()) == 0 &&
-		caller.PackageID == legacyPackageManagerPackage &&
-		caller.ComponentID == legacyPackageManagerComponent &&
-		req.GetInterfaceId() == catalog.InterfacePackageManager &&
-		req.GetInterfaceMajor() == legacyPackageManagerMajor &&
-		provider.PackageID == legacyPackageManagerPackage &&
-		provider.ComponentID == legacyPackageManagerComponent &&
-		provider.ProviderOwner.Kind == catalog.SourceKindSystemImage &&
-		provider.ProviderOwner.Trust == identity.TrustPlatform &&
-		provider.ProviderOwner.Signers.HasRole(platformReleaseSignerRole)
 }
 
 func registrationResource(

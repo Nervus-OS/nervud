@@ -101,65 +101,30 @@ func TestConflictingProviderDefinitionsRejectWholeBatch(t *testing.T) {
 	}
 }
 
-func TestLegacyPackageManagerBridgeIsExactAndIdentityBacked(t *testing.T) {
+// 曾经有一条只给 nervus.pkgmanagerd 的无契约兼容桥。它已随打包链
+// （nervus-system-server 的 providergen）落地而整段移除。
+//
+// 本测试断言【那条桥真的没了】：即便把身份条件全部凑齐——正确的 package ID、
+// 正确的组件与接口、系统镜像来源、Platform 信任、已验证的 platform-release
+// 签名者——只要没有 Provider 契约，projectCatalogSources 就必须拒绝。
+//
+// 反过来说：内核不再存在任何一条「因为你是某个特定的包，所以可以少交东西」的路径。
+func TestNoPackageIDGetsAnArtifactLessBridge(t *testing.T) {
 	base := legacyPackageManagerEntry()
-	sources, err := projectCatalogSources([]Entry{base})
-	if err != nil {
-		t.Fatalf("eligible legacy bridge: %v", err)
-	}
-	if len(sources) != 1 || sources[0].Artifacts == nil ||
-		sources[0].Artifacts.Descriptor.GetPackageId() != legacyPackageManagerID {
-		t.Fatalf("legacy sources = %+v", sources)
+
+	if _, err := projectCatalogSources([]Entry{base}); !errors.Is(
+		err, ErrProviderArtifactsRequired,
+	) {
+		t.Fatalf("身份条件齐备的 pkgmanagerd 仍被放行，兼容桥没有真正移除: err = %v", err)
 	}
 
-	tests := []struct {
-		name   string
-		mutate func(*Entry)
-	}{
-		{
-			name: "ordinary trust",
-			mutate: func(entry *Entry) {
-				entry.Trust = identity.TrustOrdinary
-			},
-		},
-		{
-			name: "role without verified identity",
-			mutate: func(entry *Entry) {
-				entry.VerifiedSigners = nil
-			},
-		},
-		{
-			name: "wrong component",
-			mutate: func(entry *Entry) {
-				entry.Manifest.Components[0].ID = "other"
-			},
-		},
-		{
-			name: "extra export",
-			mutate: func(entry *Entry) {
-				entry.Manifest.Components[0].Exports = append(
-					entry.Manifest.Components[0].Exports,
-					Export{Interface: "nervus.interface.other"},
-				)
-			},
-		},
-		{
-			name: "dynamic source",
-			mutate: func(entry *Entry) {
-				entry.Source = SourceDynamicInstall
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry := cloneEntry(base)
-			tt.mutate(&entry)
-			if _, err := projectCatalogSources([]Entry{entry}); !errors.Is(
-				err, ErrProviderArtifactsRequired,
-			) {
-				t.Fatalf("projectCatalogSources error = %v, want artifacts required", err)
-			}
-		})
+	// 换成任意别的 package ID 同样是拒绝——拒绝的理由与包名无关
+	other := cloneEntry(base)
+	other.Manifest.PackageID = "com.example.provider"
+	if _, err := projectCatalogSources([]Entry{other}); !errors.Is(
+		err, ErrProviderArtifactsRequired,
+	) {
+		t.Fatalf("projectCatalogSources error = %v, want artifacts required", err)
 	}
 }
 
@@ -444,10 +409,12 @@ func testPermissionProviderEntry(
 	}
 }
 
+// legacyPackageManagerEntry 造一个「身份条件全部齐备、只差 Provider 契约」的
+// pkgmanagerd Entry。兼容桥还在时它能被放行；现在它只用来证明放行路径已消失。
 func legacyPackageManagerEntry() Entry {
 	return Entry{
 		Manifest: Manifest{
-			PackageID: legacyPackageManagerID,
+			PackageID: "nervus.pkgmanagerd",
 			Components: []Component{{
 				ID: "main",
 				Exports: []Export{{

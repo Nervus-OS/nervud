@@ -135,17 +135,7 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 				"package_id", m.PackageID)
 		}
 
-		legacyEntry := Entry{
-			Manifest:        m,
-			Trust:           pkgTrust,
-			Source:          SourceSystemImage,
-			SignerRoles:     signerRoles,
-			VerifiedSigners: verifiedSigners,
-			DeveloperRootID: developerRootID,
-		}
-		provider, err := loadRequiredProviderArtifacts(
-			pkgDir, m, legacyPackageManagerEligible(legacyEntry),
-		)
+		provider, err := loadRequiredProviderArtifacts(pkgDir, m)
 		if err != nil {
 			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
 			continue
@@ -289,7 +279,7 @@ func scanDynamicInstalls(
 			continue
 		}
 
-		provider, err := loadRequiredProviderArtifacts(filepath.Dir(manifestPath), m, false)
+		provider, err := loadRequiredProviderArtifacts(filepath.Dir(manifestPath), m)
 		if err != nil {
 			skipped = append(skipped, SkippedPackage{Path: manifestPath, Err: err})
 			continue
@@ -315,13 +305,13 @@ func scanDynamicInstalls(
 	return entries, skipped
 }
 
-func readManifest(path string) (Manifest, error) {
+/*func readManifest(path string) (Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pkgregistry: read manifest %s: %w", path, err)
 	}
 	return ParseManifest(data)
-}
+}*/
 
 // stableUID 返回 packageID 已持久化的 UID；若这是第一次见到该 Package，
 // 分配一个新的并原子写入记账文件

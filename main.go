@@ -64,6 +64,12 @@ func main() {
 	// 开发机没有 /usr/libexec/nervus 等只读镜像路径，需显式跳过才能起来
 	skipPreflight := flag.Bool("dev-skip-preflight", false,
 		"[DEV] Skip the filesystem preflight self-check (production must run it)")
+	// 仅供开发机：没有内嵌平台根时，用系统包 manifest.sig 里内嵌的公钥当信任锚。
+	// 验签、key_id 与 digest 仍然全部照做，放松的只有「这把钥匙是否由平台根授权」。
+	// 不开它的话，开发构建下每个系统包都 fail-closed 到 Ordinary，而
+	// perm.service.register 要 OEM，于是任何导出公共接口的系统服务都注册不了
+	devTrustSystemPackages := flag.Bool("dev-trust-system-packages", false,
+		"[DEV] Anchor system-image packages on their own embedded signer keys (no platform root)")
 	flag.Parse()
 
 	logger, closeLog := newLogger(*logLevel)
@@ -84,7 +90,7 @@ func main() {
 
 	// 把逻辑放进 run 是为了能用 return error - main 里一旦 os.Exit，defer 不会执行
 	err := run(ctx, *sockPath, *transferSockPath, *adminSockPath,
-		*allowSchedDegrade, *skipPreflight, logger)
+		*allowSchedDegrade, *skipPreflight, *devTrustSystemPackages, logger)
 	if err != nil {
 		logger.Error("nervud exited", "err", err)
 	} else {
@@ -139,13 +145,6 @@ func newLogger(level string) (*slog.Logger, func() uint64) {
 // MCU （微控制器） 的安全机制 用于内核退出后的兜底
 const laneStopTimeout = 2 * time.Second
 
-// pkgManagerPackageID 是软件安装系统服务的 Package ID。
-//
-// 与 pkgregistry 保护名单里的 "nervus.pkgmanagerd/main" 同源（见
-// internal/pkgregistry/lifecycle.go 的 isProtectedComponent）。写成常量而不是
-// 配置项：它是哪个包能连管理通道的依据，可配置等于把这条准入交给配置文件。
-const pkgManagerPackageID = "nervus.pkgmanagerd"
-
 // run 完成内核装配并阻塞运行，直到 ctx 被取消或某个模块启动失败
 // 具体的装配步骤拆到下面的 assemble，让装配与运行/收尾分层清晰
 //
@@ -165,7 +164,7 @@ const pkgManagerPackageID = "nervus.pkgmanagerd"
 func run(
 	ctx context.Context,
 	sockPath, transferSockPath, adminSockPath string,
-	allowSchedDegrade, skipPreflight bool,
+	allowSchedDegrade, skipPreflight, devTrustSystemPackages bool,
 	logger *slog.Logger,
 ) (err error) {
 	sched := scheduler.New(logger, allowSchedDegrade)
@@ -185,7 +184,8 @@ func run(
 	}()
 
 	k, cleanup, aerr := assemble(
-		ctx, sched, sockPath, transferSockPath, adminSockPath, skipPreflight, logger)
+		ctx, sched, sockPath, transferSockPath, adminSockPath,
+		skipPreflight, devTrustSystemPackages, logger)
 	if aerr != nil {
 		return aerr
 	}
@@ -207,7 +207,7 @@ func assemble(
 	ctx context.Context,
 	sched *scheduler.Scheduler,
 	sockPath, transferSockPath, adminSockPath string,
-	skipPreflight bool,
+	skipPreflight, devTrustSystemPackages bool,
 	logger *slog.Logger,
 ) (*kernel.Kernel, func(), error) {
 	// cleanup 汇集设施级需要在停机时释放的资源（当前只有 systemd D-Bus 连接）。
@@ -334,6 +334,27 @@ func assemble(
 	trustStore, terr := pkgregistry.LoadTrustStore(pkgregistry.DefaultTrustDir)
 	if terr != nil {
 		logger.Warn("pkgregistry: trust store unavailable; non-Ordinary trust disabled", "err", terr)
+		// 开发降级：用系统包自带的内嵌公钥当锚。只在真的没有可用信任库时才尝试——
+		// 一旦生产信任库加载成功，这个开关就没有任何效果，不存在「用 flag 覆盖掉
+		// 已验证信任根」的路径
+		if devTrustSystemPackages {
+			devStore, derr := pkgregistry.LoadDevTrustStore(
+				pkgregistry.DefaultSystemPackagesDir, logger)
+			if derr != nil {
+				logger.Warn("pkgregistry: dev trust anchors unavailable; staying fail-closed",
+					"err", derr)
+			} else {
+				trustStore = devStore
+				logger.Warn("pkgregistry: DEV TRUST ACTIVE (dev-trust-system-packages) - never in production")
+				// 审计而不只是日志：这条改变了整机的信任裁决前提，必须留在
+				// 不受日志级别过滤的通道里
+				aud.Record(ctx, audit.Event{
+					Action:  "pkgregistry.DevTrustAnchors",
+					Subject: "kernel",
+					Detail:  "system-image packages anchored on embedded signer keys (no platform root)",
+				})
+			}
+		}
 	}
 	pkgMod := pkgregistry.New(auth, idReg, permReg, pkgReg, definitions, trustStore, aud, logger,
 		pkgregistry.DefaultRegistryStateDir, pkgregistry.DefaultSystemPackagesDir,
@@ -382,7 +403,10 @@ func assemble(
 	// 装包服务额外可写 staging 根：nervud 在那底下给它建 stage-* 目录让它解包，
 	// 而沙箱的 ProtectSystem=strict 让整个文件系统只读。这是唯一一条这类例外，
 	// 放在装配处显式写出来，别处不再有第二个地方能给出可写路径。
-	svcMgr.GrantStagingAccess(pkgManagerPackageID, admin.DefaultStagingDir)
+	//
+	// 【谁能拿到由 perm.pkg.admin 决定，不由包名决定】——内核不认识任何具体的
+	// Package ID，判据与管理通道的准入是同一条。
+	svcMgr.GrantStagingAccess(admin.DefaultStagingDir)
 	k.Register(svcMgr)
 
 	// Health 聚合器：现读 safety/control/service 三个权威源合成整机一句话健康档位。
@@ -525,22 +549,21 @@ func assemble(
 	// euid（生产为 0/root） - 只有运行 nervud 的运维身份可发命令，配合 socket 0600。
 	// StagingRoot 留空 = admin.DefaultStagingDir（/var/lib/nervus/staging，由 preflight
 	// 建好，与 PackageRoot 同一文件系统，安装期 renameat2 才不跨盘）
-	// pkgmanagerd 需要连管理通道才能替 App 装包（App 不可能是 root，而系统服务
+	// 装包服务需要连管理通道才能替 App 装包（App 不可能是 root，而系统服务
 	// 跑在 App UID 段）。
 	//
-	// 【这里只传 Package ID，不传 UID】。UID 是启动扫描时才分配的，而扫描发生在
-	// pkgregistry 的 Start 里——k.Register 只是登记，Start 要等 k.Run 才执行，
-	// 那时 assemble 早已返回。在这里查 UID 永远查不到，写出来的放行逻辑是死代码。
-	// admin 自己在 Start 里解析（它注册在 pkgregistry 之后，那时扫描已完成）。
+	// 【这里不出现任何 Package ID】。谁能连由 admin.PermissionPackageAdmin
+	// （perm.pkg.admin）决定，admin 自己在 Start 里按权限解析——它注册在
+	// pkgregistry 之后，那时启动扫描已完成、UID 已分配、权限已裁决。
+	// 装配期这三样都还不存在，在这里判定写出来的会是死代码。
 	adminSrv, err := admin.New(admin.Config{
-		SockPath:         adminSockPath,
-		AdminUID:         uint32(os.Geteuid()),
-		ServicePackageID: pkgManagerPackageID,
-		Packages:         pkgMod,
-		Registry:         pkgReg,
-		Permissions:      permReg,
-		Auditor:          aud,
-		Log:              logger,
+		SockPath:    adminSockPath,
+		AdminUID:    uint32(os.Geteuid()),
+		Packages:    pkgMod,
+		Registry:    pkgReg,
+		Permissions: permReg,
+		Auditor:     aud,
+		Log:         logger,
 	})
 	if err != nil {
 		return nil, cleanup, err

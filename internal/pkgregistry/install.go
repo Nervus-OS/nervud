@@ -201,7 +201,7 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		return Entry{}, err
 	}
 
-	provider, err := loadRequiredProviderArtifacts(tx.StagingDir, manifest, false)
+	provider, err := loadRequiredProviderArtifacts(tx.StagingDir, manifest)
 	if err != nil {
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err

@@ -28,13 +28,24 @@ func TestReadWritePaths_DefaultIsDataDirOnly(t *testing.T) {
 	}
 }
 
-// 装包服务拿到 staging 根。
+// newStagingManager 造一个已注入 staging 根、并把 perm.pkg.admin 授予 holder 的
+// Manager。holder 为空表示谁都没拿到那条权限。
+func newStagingManager(holder string) *Manager {
+	perms := &fakePermissions{}
+	if holder != "" {
+		perms.set(holder, PermissionPackageAdmin, true)
+	}
+	m := &Manager{inv: authority.DefaultInvariants(), perms: perms}
+	m.GrantStagingAccess("/var/lib/nervus/staging")
+	return m
+}
+
+// 持有 perm.pkg.admin 的包拿到 staging 根。
 //
 // 少了它，装包会在解包那一步以 read-only file system 失败——而属主与权限
 // 都是对的，所以第一反应会去查 chown，查不出问题。
-func TestReadWritePaths_StagingPackageGetsStagingRoot(t *testing.T) {
-	m := newPathsManager()
-	m.GrantStagingAccess("nervus.pkgmanagerd", "/var/lib/nervus/staging")
+func TestReadWritePaths_PermissionHolderGetsStagingRoot(t *testing.T) {
+	m := newStagingManager("nervus.pkgmanagerd")
 
 	got := m.readWritePaths(entryFor("nervus.pkgmanagerd"), "/data/nervus.pkgmanagerd")
 	want := []string{"/data/nervus.pkgmanagerd", "/var/lib/nervus/staging"}
@@ -43,10 +54,30 @@ func TestReadWritePaths_StagingPackageGetsStagingRoot(t *testing.T) {
 	}
 }
 
-// 例外【只给】那一个包。别的包拿到 staging 写权限等于可以篡改正在安装的包。
+// 【判据是权限不是包名】：叫 nervus.pkgmanagerd 但没拿到权限，一样没有 staging。
+// 这条锁住本次改造——内核不再认识任何具体的 Package ID。
+func TestReadWritePaths_PackageNameAloneGrantsNothing(t *testing.T) {
+	m := newStagingManager("") // 谁都没授予
+
+	got := m.readWritePaths(entryFor("nervus.pkgmanagerd"), "/data/nervus.pkgmanagerd")
+	if slices.Contains(got, "/var/lib/nervus/staging") {
+		t.Fatalf("包名匹配但无权限，不该拿到 staging: %v", got)
+	}
+}
+
+// 任意包名只要持有权限就拿得到——与包名无关。
+func TestReadWritePaths_AnyPermissionHolderGetsStaging(t *testing.T) {
+	m := newStagingManager("com.vendor.installerd")
+
+	got := m.readWritePaths(entryFor("com.vendor.installerd"), "/data/x")
+	if !slices.Contains(got, "/var/lib/nervus/staging") {
+		t.Fatalf("持有权限的包必须拿到 staging: %v", got)
+	}
+}
+
+// 例外只给持有者。别的包拿到 staging 写权限等于可以篡改正在安装的包。
 func TestReadWritePaths_OtherPackagesDoNotGetStaging(t *testing.T) {
-	m := newPathsManager()
-	m.GrantStagingAccess("nervus.pkgmanagerd", "/var/lib/nervus/staging")
+	m := newStagingManager("nervus.pkgmanagerd")
 
 	for _, pkg := range []string{"com.example.app", "nervus.safety.recovery", ""} {
 		got := m.readWritePaths(entryFor(pkg), "/data/x")
@@ -56,19 +87,23 @@ func TestReadWritePaths_OtherPackagesDoNotGetStaging(t *testing.T) {
 	}
 }
 
-// 只注入了包名没注入根（或反之）时不能给出半个例外。
+// 没注入根时，即便持有权限也不能给出半个例外。
 func TestReadWritePaths_PartialGrantIsNoGrant(t *testing.T) {
-	cases := []struct{ pkg, root string }{
+	cases := []struct{ holder, root string }{
 		{"nervus.pkgmanagerd", ""},
 		{"", "/var/lib/nervus/staging"},
 	}
 	for _, tc := range cases {
-		m := newPathsManager()
-		m.GrantStagingAccess(tc.pkg, tc.root)
+		perms := &fakePermissions{}
+		if tc.holder != "" {
+			perms.set(tc.holder, PermissionPackageAdmin, true)
+		}
+		m := &Manager{inv: authority.DefaultInvariants(), perms: perms}
+		m.GrantStagingAccess(tc.root)
 		got := m.readWritePaths(entryFor("nervus.pkgmanagerd"), "/data/x")
 		if len(got) != 1 {
-			t.Errorf("GrantStagingAccess(%q, %q) → readWritePaths = %v, want data dir only",
-				tc.pkg, tc.root, got)
+			t.Errorf("holder=%q root=%q → readWritePaths = %v, want data dir only",
+				tc.holder, tc.root, got)
 		}
 	}
 }

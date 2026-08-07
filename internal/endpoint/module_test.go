@@ -2,12 +2,12 @@ package endpoint
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	basemotionv1 "github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
+	pkgmanagerv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
 	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 	ipcregistry "github.com/nervus-os/nervus-ipc/registry"
 	"google.golang.org/protobuf/proto"
@@ -25,7 +25,7 @@ const (
 	testMotionPermission  = "perm.motion.control"
 )
 
-var errComponentDisabledStub = errors.New("component disabled (stub)")
+//var errComponentDisabledStub = errors.New("component disabled (stub)")
 
 type fakePkgs struct {
 	mu      sync.Mutex
@@ -215,28 +215,56 @@ func motionSource(t *testing.T, pkg, comp, keyID string) catalog.Source {
 	}
 }
 
-func legacyPackageManagerSource(t *testing.T) catalog.Source {
+const (
+	packageManagerPackage   = "nervus.pkgmanagerd"
+	packageManagerComponent = "main"
+	packageManagerMajor     = uint32(1)
+	platformReleaseRole     = "platform-release"
+)
+
+// packageManagerSource 复刻 nervus-system-server 的 pkgmanagerd/providergen
+// 随包分发的契约。返回的 schemaHash 是 RegisterEndpoint 必须原样带上的那份——
+// 空 hash 的兼容桥已经移除，现在所有 Provider 一视同仁。
+func packageManagerSource(t *testing.T) (catalog.Source, []byte) {
 	t.Helper()
-	artifacts, err := catalog.LegacyPackageManagerArtifacts()
+	bundle, err := ipcregistry.BuildSchemaBundle(
+		catalog.InterfacePackageManager,
+		1,
+		pkgmanagerv1.PackageManagerMethod(0).Descriptor(),
+	)
 	if err != nil {
-		t.Fatalf("LegacyPackageManagerArtifacts: %v", err)
+		t.Fatalf("BuildSchemaBundle: %v", err)
 	}
-	return catalog.Source{
-		PackageID: legacyPackageManagerPackage,
+	descriptor := &ipcv1.ProviderDescriptor{
+		PackageId: packageManagerPackage,
+		Interfaces: []*ipcv1.ProvidedInterface{{
+			InterfaceId: catalog.InterfacePackageManager,
+			InterfaceVersions: []*ipcv1.ProvidedInterfaceVersion{{
+				Major:      1,
+				SchemaHash: append([]byte(nil), bundle.GetSchemaHash()...),
+			}},
+			RequiredPermission: "perm.pkg.query",
+		}},
+	}
+	source := catalog.Source{
+		PackageID: packageManagerPackage,
 		Kind:      catalog.SourceKindSystemImage,
 		Trust:     identity.TrustPlatform,
 		Signers: catalog.SignerEvidence{
-			Roles: []string{platformReleaseSignerRole},
+			Roles: []string{platformReleaseRole},
 			VerifiedSigners: []catalog.VerifiedSigner{{
-				Role: platformReleaseSignerRole, KeyID: "platform-key",
+				Role: platformReleaseRole, KeyID: "platform-key",
 			}},
 		},
 		Exports: []catalog.ExportBinding{{
-			ComponentID: legacyPackageManagerComponent,
+			ComponentID: packageManagerComponent,
 			InterfaceID: catalog.InterfacePackageManager,
 		}},
-		Artifacts: artifacts,
+		Artifacts: mustArtifacts(t, descriptor, &ipcv1.InterfaceSchemaBundleSet{
+			Bundles: []*ipcv1.InterfaceSchemaBundle{bundle},
+		}),
 	}
+	return source, append([]byte(nil), bundle.GetSchemaHash()...)
 }
 
 func mustArtifacts(
@@ -404,70 +432,75 @@ func TestRegisterEndpointRejectsComponentOutsideCatalogMembership(t *testing.T) 
 	}
 }
 
-func TestLegacyPackageManagerEmptySchemaBridgeIsNarrow(t *testing.T) {
+// 曾经有一条只放行 nervus.pkgmanagerd 空 schema hash 的兼容桥，已随打包链落地
+// 而移除。本测试断言它真的没了：即便是身份完全正确的 pkgmanagerd，空 hash 也必须
+// 被拒；只有带上 Catalog 里那份真实 hash 才放行。
+func TestPackageManagerGetsNoSchemaHashExemption(t *testing.T) {
 	definitions := defaultCatalog(t)
-	publishSources(t, definitions, legacyPackageManagerSource(t))
+	source, schemaHash := packageManagerSource(t)
+	publishSources(t, definitions, source)
 	permissions := newFakePerm()
-	permissions.grant(legacyPackageManagerPackage, permServiceRegister)
+	permissions.grant(packageManagerPackage, permServiceRegister)
 	module := testModule(
 		t,
 		definitions,
 		newFakePkgs(serviceEntry(
-			legacyPackageManagerPackage,
-			legacyPackageManagerComponent,
+			packageManagerPackage,
+			packageManagerComponent,
 			catalog.InterfacePackageManager,
 			pkgregistry.VisibilityPublic,
 		)),
 		permissions,
 		&fakeStarter{},
 	)
-
-	result := module.RegisterEndpoint(
-		"legacy",
-		identity.Caller{
-			PackageID:   legacyPackageManagerPackage,
-			ComponentID: legacyPackageManagerComponent,
-		},
-		&ipcv1.RegisterEndpoint{
-			RequestId:      1,
-			InterfaceId:    catalog.InterfacePackageManager,
-			InterfaceMajor: legacyPackageManagerMajor,
-		},
-	)
-	if result.GetSuccess() == nil {
-		t.Fatalf("legacy empty hash rejected: %+v", result.GetFailure())
+	caller := identity.Caller{
+		PackageID:   packageManagerPackage,
+		ComponentID: packageManagerComponent,
 	}
 
-	wrong := module.RegisterEndpoint(
-		"legacy-wrong",
-		identity.Caller{
-			PackageID:   legacyPackageManagerPackage,
-			ComponentID: legacyPackageManagerComponent,
-		},
-		&ipcv1.RegisterEndpoint{
-			RequestId:           2,
-			InterfaceId:         catalog.InterfacePackageManager,
-			InterfaceMajor:      legacyPackageManagerMajor,
-			InterfaceSchemaHash: []byte("wrong"),
-		},
-	)
+	empty := module.RegisterEndpoint("empty", caller, &ipcv1.RegisterEndpoint{
+		RequestId:      1,
+		InterfaceId:    catalog.InterfacePackageManager,
+		InterfaceMajor: packageManagerMajor,
+	})
+	if code := empty.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
+		t.Fatalf("空 schema hash 仍被放行，兼容桥没有真正移除: code = %v", code)
+	}
+
+	wrong := module.RegisterEndpoint("wrong", caller, &ipcv1.RegisterEndpoint{
+		RequestId:           2,
+		InterfaceId:         catalog.InterfacePackageManager,
+		InterfaceMajor:      packageManagerMajor,
+		InterfaceSchemaHash: []byte("wrong"),
+	})
 	if code := wrong.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("wrong non-empty legacy hash code = %v, want FAILED_PRECONDITION", code)
+		t.Fatalf("wrong hash code = %v, want FAILED_PRECONDITION", code)
+	}
+
+	ok := module.RegisterEndpoint("ok", caller, &ipcv1.RegisterEndpoint{
+		RequestId:           3,
+		InterfaceId:         catalog.InterfacePackageManager,
+		InterfaceMajor:      packageManagerMajor,
+		InterfaceSchemaHash: schemaHash,
+	})
+	if ok.GetSuccess() == nil {
+		t.Fatalf("带上真实 schema hash 仍被拒: %+v", ok.GetFailure())
 	}
 }
 
 func TestPackageManagerQueryDoesNotRequireInstallPermission(t *testing.T) {
 	definitions := defaultCatalog(t)
-	publishSources(t, definitions, legacyPackageManagerSource(t))
+	source, schemaHash := packageManagerSource(t)
+	publishSources(t, definitions, source)
 	permissions := newFakePerm()
-	permissions.grant(legacyPackageManagerPackage, permServiceRegister)
+	permissions.grant(packageManagerPackage, permServiceRegister)
 	permissions.grant(testCallerPackage, "perm.pkg.query")
 	module := testModule(
 		t,
 		definitions,
 		newFakePkgs(serviceEntry(
-			legacyPackageManagerPackage,
-			legacyPackageManagerComponent,
+			packageManagerPackage,
+			packageManagerComponent,
 			catalog.InterfacePackageManager,
 			pkgregistry.VisibilityPublic,
 		)),
@@ -478,13 +511,14 @@ func TestPackageManagerQueryDoesNotRequireInstallPermission(t *testing.T) {
 	registered := module.RegisterEndpoint(
 		"service",
 		identity.Caller{
-			PackageID:   legacyPackageManagerPackage,
-			ComponentID: legacyPackageManagerComponent,
+			PackageID:   packageManagerPackage,
+			ComponentID: packageManagerComponent,
 		},
 		&ipcv1.RegisterEndpoint{
-			RequestId:      1,
-			InterfaceId:    catalog.InterfacePackageManager,
-			InterfaceMajor: legacyPackageManagerMajor,
+			RequestId:           1,
+			InterfaceId:         catalog.InterfacePackageManager,
+			InterfaceMajor:      packageManagerMajor,
+			InterfaceSchemaHash: schemaHash,
 		},
 	)
 	if registered.GetSuccess() == nil {
@@ -497,8 +531,8 @@ func TestPackageManagerQueryDoesNotRequireInstallPermission(t *testing.T) {
 		&ipcv1.ResolveEndpoint{
 			RequestId:         2,
 			InterfaceId:       catalog.InterfacePackageManager,
-			MinInterfaceMajor: legacyPackageManagerMajor,
-			MaxInterfaceMajor: legacyPackageManagerMajor,
+			MinInterfaceMajor: packageManagerMajor,
+			MaxInterfaceMajor: packageManagerMajor,
 		},
 	)
 	if resolved.GetSuccess() == nil {

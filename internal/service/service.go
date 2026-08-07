@@ -185,11 +185,11 @@ type Manager struct {
 	stopped      bool
 	stopComplete bool
 
-	// stagingPkgID/stagingRoot 是「装包服务额外可写 staging 根」这条例外。
+	// stagingRoot 是「装包服务额外可写 staging 根」这条例外的路径。
 	// 经 GrantStagingAccess 注入，不注入则为空、无任何组件拿到额外可写路径。
+	// 【谁能拿到】由 PermissionPackageAdmin 决定，不由包名决定。
 	// 装配期一次性写入，Start 之后只读，故不受 mu 保护。
-	stagingPkgID string
-	stagingRoot  string
+	stagingRoot string
 
 	// sandboxReloadMu serializes package restarts caused by upgrades and runtime
 	// permission projection. It is deliberately independent from mu: both paths
@@ -197,16 +197,28 @@ type Manager struct {
 	sandboxReloadMu sync.Mutex
 }
 
-// GrantStagingAccess 让 packageID 的组件对 stagingRoot 可写。
+// PermissionPackageAdmin 是持有者可获得 staging 根可写权的权限。与
+// admin.PermissionPackageAdmin 同一个 ID：能连管理通道下装包指令的包，
+// 正是需要在 staging 里解包的那个。
 //
-// 这是【唯一】一条「某个包比别人多一个可写目录」的例外，因此做成显式注入而不是
+// 两处各自写一份常量而不是共享：service 不 import admin（依赖方向相反），
+// 而为一个字符串开一个公共包会让依赖图多一个节点。两者不同步会让装包
+// 在「连得上但写不进去」处失败，permission_test.go 的断言锁住这一点。
+const PermissionPackageAdmin = "perm.pkg.admin"
+
+// GrantStagingAccess 打开「持有 PermissionPackageAdmin 的包对 stagingRoot 可写」
+// 这条例外。
+//
+// 这是【唯一】一条「某些包比别人多一个可写目录」的例外，因此做成显式注入而不是
 // 从别处推断：装包服务要在 nervud 分配的 staging 目录里解包，而 ProtectSystem=strict
-// 让整个文件系统只读。谁有这个例外必须在装配处一眼可见（main.go），不该藏在
-// 某个按 package_id 猜测的条件里。
+// 让整个文件系统只读。这条例外的存在必须在装配处一眼可见（main.go）。
+//
+// 【判据是权限，不是包名】。以前这里收一个 packageID，由 main.go 传
+// "nervus.pkgmanagerd"；现在只收路径，谁能用由权限裁决决定——与管理通道的
+// 准入判据是同一条，不会出现「能连通道却写不进 staging」的错配。
 //
 // 必须在 Start 之前调用。
-func (m *Manager) GrantStagingAccess(packageID, stagingRoot string) {
-	m.stagingPkgID = packageID
+func (m *Manager) GrantStagingAccess(stagingRoot string) {
 	m.stagingRoot = stagingRoot
 }
 

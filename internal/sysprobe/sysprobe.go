@@ -1,8 +1,8 @@
+//go:build linux
+
 // sysprobe 是叶子包：不 import 任何兄弟模块（ipc/identity 反过来 import 它）
 // 依赖箭头永远指向 sysprobe，结构上不可能出现 import cycle
 package sysprobe
-
-import "errors"
 
 // Ucred 是 UDS 对端的内核可信凭证，对应 Linux 的 struct ucred。
 //
@@ -18,5 +18,3 @@ type Ucred struct {
 	UID uint32
 	GID uint32
 }
-
-var ErrUnsupportedPlatform = errors.New("sysprobe: operation requires linux")

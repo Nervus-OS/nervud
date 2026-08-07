@@ -21,9 +21,8 @@ const (
 )
 
 var (
-	ErrUnsupportedPlatform = errors.New("transfer: data plane requires linux")
-	ErrStopped             = errors.New("transfer: manager is not running")
-	ErrInvalidHandle       = errors.New("transfer: response contains an invalid transfer handle")
+	ErrStopped       = errors.New("transfer: manager is not running")
+	ErrInvalidHandle = errors.New("transfer: response contains an invalid transfer handle")
 )
 
 // ConnID is the kernel-assigned identity of one control-plane connection.

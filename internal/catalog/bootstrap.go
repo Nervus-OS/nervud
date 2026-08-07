@@ -65,39 +65,6 @@ func BootstrapSources() ([]Source, error) {
 	return DefaultBootstrap()
 }
 
-// LegacyPackageManagerArtifacts returns the only schema bridge for a provider
-// that predates signed ProviderArtifacts. The caller must still restrict its
-// use to the platform-release-signed nervus.pkgmanagerd system-image package.
-//
-// This function deliberately carries no permission or resource definitions:
-// it only lets that legacy package bind the canonical package-manager
-// interface already defined by the kernel bootstrap.
-func LegacyPackageManagerArtifacts() (*ipcregistry.ProviderArtifacts, error) {
-	bundle, err := ipcregistry.BuildSchemaBundle(
-		InterfacePackageManager, 1, pkgmanagerv1.PackageManagerMethod(0).Descriptor())
-	if err != nil {
-		return nil, fmt.Errorf("catalog: build legacy package-manager schema: %w", err)
-	}
-	return parseArtifacts(
-		&ipcv1.ProviderDescriptor{
-			PackageId: "nervus.pkgmanagerd",
-			Interfaces: []*ipcv1.ProvidedInterface{bootstrapInterface(
-				InterfacePackageManager,
-				bundle,
-				"perm.pkg.query",
-				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
-				nil,
-				"",
-				"",
-			)},
-		},
-		&ipcv1.InterfaceSchemaBundleSet{
-			Bundles: []*ipcv1.InterfaceSchemaBundle{bundle},
-		},
-		"legacy package-manager",
-	)
-}
-
 func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 	baseBundle, err := ipcregistry.BuildSchemaBundle(
 		InterfaceMotionBase, 1, basemotionv1.BaseMotionMethod(0).Descriptor())
@@ -374,6 +341,29 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			"",
 			"安装或卸载软件",
 			"Install or uninstall packages",
+		),
+		// perm.pkg.admin 取代了曾经写死在 main.go 里的「哪个 Package ID 能连
+		// 管理通道」。持有它的包可以连上 admin UDS 并获得可写 staging 目录。
+		//
+		// 三重收紧与 perm.safety.rearm 同款，这不是巧合——两者都是「一旦拿到就
+		// 能改变整机状态」的能力：
+		//   SYSTEM_ONLY  -> IntersectAt 要求来源必须是系统镜像包
+		//   PLATFORM     -> 开发构建降级到 Ordinary 的包拿不到
+		//   platform-release 签名角色 -> 必须由平台发布密钥签过
+		//
+		// 【安全边界与之前完全一致】：放行的仍然只是「谁能连上这条 socket」。
+		// 全部命令依旧投递给同进程的 pkgregistry.Module 复核签名、digest、
+		// 升级裁决与权限交集。变的只是「凭什么放行」——从内核硬编码的包名，
+		// 变成一条包必须在 manifest 里显式声明、且经过裁决的权限。
+		bootstrapPermission(
+			"perm.pkg.admin",
+			ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY,
+			ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
+			rolePlatformRelease,
+			"",
+			"代表系统执行装包与权限管理",
+			"Administer packages and grants on behalf of the system",
 		),
 		bootstrapPermission(
 			"perm.pkg.query",

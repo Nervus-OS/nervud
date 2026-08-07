@@ -56,7 +56,7 @@ func (b *backend) Uninstall(_ context.Context, pkgID string) error {
 	return nil
 }
 
-func (b *backend) SetComponentEnabled(_ context.Context, pkg, comp string, _ bool) error {
+func (b *backend) SetComponentEnabled(_ context.Context, pkg, _ string, _ bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.packages[pkg]; !ok {
@@ -76,6 +76,9 @@ func (b *backend) List() []pkgregistry.Entry {
 }
 
 func (b *backend) SetRuntimeState(string, string, permission.GrantState) error { return nil }
+
+// Allowed 恒为 false：本测试只走运维（root）这条路径，不模拟按权限放行的包。
+func (b *backend) Allowed(string, string) bool { return false }
 
 func startAdmin(t *testing.T, b *backend) string {
 	t.Helper()
