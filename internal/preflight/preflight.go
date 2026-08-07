@@ -120,6 +120,13 @@ func DefaultConfig(log *slog.Logger) Config {
 			// sticky 位不可省：没有它，任何一个包都能删掉其它包（以及用户）的文件。
 			{Path: inv.UserDataRoot, Kind: kindDir, Perm: 0o1777, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/jvm-cache", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
+			// 审计目录。0700：审计里有 package id、uid、拒绝原因，它的读者是
+			// 运维，不是机器上的 App。
+			//
+			// 【与其它可写区不同，这个目录本身就是安全控制的一部分】：它是
+			// 事后回答「谁在什么时候被拒绝了什么」的唯一地方。权限放宽等于让
+			// 被审计的对象能读到自己的审计。
+			{Path: "/var/lib/nervus/audit", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
 			// 服务间共享区的两个根。0755 而不是 UserDataRoot 的 01777：
 			// 这两个根【本身】只由 nervud 写（provisionAll 在其下按包建子目录），
 			// 包只往自己那个子目录里写。根开放写权限等于允许任意包在根下造目录，

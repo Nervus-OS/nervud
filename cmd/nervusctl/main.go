@@ -38,6 +38,7 @@ Commands:
   disable <package_id> <component>  Disable a Component
   grant <package_id> <permission>   Grant a runtime (dangerous) permission
   revoke <package_id> <permission>  Revoke a runtime permission
+  audit-verify [dir]                Verify the audit hash chain
 
 Options:
   --sock PATH   Admin channel socket path
@@ -78,6 +79,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdSetPermission(client, cmdArgs, stdout, adminwire.GrantStateGranted)
 	case "revoke":
 		err = cmdSetPermission(client, cmdArgs, stdout, adminwire.GrantStateDenied)
+	case "audit-verify":
+		// 【不连管理通道】：它读的是本机文件，而审计恰恰要在 nervud 起不来
+		// 或者行为可疑的时候仍然查得了。
+		err = cmdAuditVerify(cmdArgs, stdout)
 	case "help", "-h", "--help":
 		outf(stdout, "%s", usage)
 		return 0

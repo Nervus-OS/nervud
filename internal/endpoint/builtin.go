@@ -52,8 +52,29 @@ type BuiltinCall struct {
 }
 
 type BuiltinResult struct {
+	// Payload 是【成功】时的响应载荷，类型由 MethodMeta.response_type 决定。
 	Payload []byte
-	Code    ipcv1.StatusCode
+
+	// ErrorDetail 是【失败】时的 typed 细因，类型由 MethodMeta.error_detail_type
+	// 决定。空表示只有 Code，没有更细的原因。
+	//
+	// # 为什么不复用 Payload
+	//
+	// 复用的话，「这段字节该按 response_type 还是 error_detail_type 解」就取决于
+	// Code——而那是一个要靠读实现才知道的约定。分成两个字段之后，填错的是
+	// 类型不匹配，编译期或校验期就会暴露。
+	//
+	// # 内建为什么可以带 detail，而外部 Provider 不行
+	//
+	// Provider 的 error_detail 当前被内核整条拒绝（见 method_gate.go）：
+	// StatusCode 与 domain reason 之间没有机器可读的授权关系，一份来自外部
+	// 进程的 detail 看起来「已认证」却语义无据。
+	//
+	// 内建不同——detail 由内核代码生成，与 Code 出自同一处判定。这不是给
+	// 内建开后门，是那条顾虑在这里根本不成立。
+	ErrorDetail []byte
+
+	Code ipcv1.StatusCode
 }
 
 // BuiltinHandler executes one in-kernel endpoint method. The handler returns a

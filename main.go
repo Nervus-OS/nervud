@@ -71,6 +71,12 @@ func main() {
 	// perm.service.register 要 OEM，于是任何导出公共接口的系统服务都注册不了
 	devTrustSystemPackages := flag.Bool("dev-trust-system-packages", false,
 		"[DEV] Anchor system-image packages on their own embedded signer keys (no platform root)")
+	// 审计目录。生产固定 /var/lib/nervus/audit（由 preflight 建好并设成 0700）。
+	//
+	// 开发机上那个路径未必可写，而「审计打不开就起不来」这条【不退让成静默
+	// 降级】——一个跑着但不记审计的系统比一个起不来的更糟。给一个显式开关，
+	// 而不是让它在某些环境下悄悄变成只写 slog。
+	auditDir := flag.String("audit-dir", audit.DefaultDir, "audit chain directory")
 	flag.Parse()
 
 	logger, closeLog := newLogger(*logLevel)
@@ -90,7 +96,7 @@ func main() {
 	}()
 
 	// 把逻辑放进 run 是为了能用 return error - main 里一旦 os.Exit，defer 不会执行
-	err := run(ctx, *sockPath, *transferSockPath, *adminSockPath,
+	err := run(ctx, *sockPath, *transferSockPath, *adminSockPath, *auditDir,
 		*allowSchedDegrade, *skipPreflight, *devTrustSystemPackages, logger)
 	if err != nil {
 		logger.Error("nervud exited", "err", err)
@@ -164,7 +170,7 @@ const laneStopTimeout = 2 * time.Second
 // Lane 是最底层基建，因此在所有模块停完之后才回收
 func run(
 	ctx context.Context,
-	sockPath, transferSockPath, adminSockPath string,
+	sockPath, transferSockPath, adminSockPath, auditDir string,
 	allowSchedDegrade, skipPreflight, devTrustSystemPackages bool,
 	logger *slog.Logger,
 ) (err error) {
@@ -185,7 +191,7 @@ func run(
 	}()
 
 	k, cleanup, aerr := assemble(
-		ctx, sched, sockPath, transferSockPath, adminSockPath,
+		ctx, sched, sockPath, transferSockPath, adminSockPath, auditDir,
 		skipPreflight, devTrustSystemPackages, logger)
 	if aerr != nil {
 		return aerr
@@ -207,7 +213,7 @@ func run(
 func assemble(
 	ctx context.Context,
 	sched *scheduler.Scheduler,
-	sockPath, transferSockPath, adminSockPath string,
+	sockPath, transferSockPath, adminSockPath, auditDir string,
 	skipPreflight, devTrustSystemPackages bool,
 	logger *slog.Logger,
 ) (*kernel.Kernel, func(), error) {
@@ -235,9 +241,30 @@ func assemble(
 	//
 	// 装配顺序 = 依赖顺序，与 Kernel 的启停顺序无关
 	//
-	// audit 现为设施形态（Record 落 slog）；将来若需要落盘 writer 的启停
-	// 同时注册成 Module 且放最后一位 = 最后关闭，保证关停过程也有审计
-	aud := audit.New(logger)
+	// 审计：append-only 的哈希链文件 + slog 镜像。
+	//
+	// 【打不开就起不来】。一个跑着但不记审计的系统比一个起不来的更糟——
+	// 前者会让人以为有审计，而事后什么都查不到。
+	//
+	// 【不注册成 Module】：Module 的 Stop 在反序停机链里，而审计必须活到
+	// 最后一条停机记录写完之后。用 defer 关，它排在 cleanup 之后执行。
+	aud, err := audit.NewFileRecorder(audit.FileConfig{
+		Dir: auditDir,
+		Log: logger,
+	})
+	if err != nil {
+		return nil, cleanup, err
+	}
+	closers = append(closers, func() {
+		if n := aud.Dropped(); n > 0 {
+			// 丢弃意味着链上有缺口。它已经作为 ChainGap 落进文件，这里再报
+			// 一次是为了让运维在 journal 里直接看见，不必去读审计文件。
+			logger.Warn("audit: records were dropped under back-pressure", "dropped", n)
+		}
+		if cerr := aud.Close(); cerr != nil {
+			logger.Error("audit: close", "err", cerr)
+		}
+	})
 
 	// systemd D-Bus 连接：起进程（StartSandboxedProcess）的后端。
 	// 连不上（开发机无 D-Bus / 权限不足）时 fail-closed：spawner=nil，authority 的

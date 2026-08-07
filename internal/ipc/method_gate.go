@@ -164,7 +164,38 @@ func (s *Server) validateBuiltinResult(
 		s.operations != nil); err != nil {
 		return internalResponse(requestID), false
 	}
-	return failureResponse(requestID, result.Code), true
+
+	// 内建的 typed error_detail。【与外部 Provider 的处置不同】：那一侧整条
+	// 拒绝（StatusCode 与 domain reason 之间没有机器可读的授权关系，一份来自
+	// 外部进程的 detail 看起来已认证却语义无据）；内建的 detail 由内核代码
+	// 生成，与 Code 出自同一处判定，那条顾虑不成立。
+	if len(result.ErrorDetail) == 0 {
+		return failureResponse(requestID, result.Code), true
+	}
+	if route.Method.Meta.GetErrorDetailType() == "" {
+		// 契约没声明 error_detail_type，内建却给了一份。转发它等于让调用方
+		// 拿到一段【不知道该按什么类型解】的字节——而它多半会去猜。
+		// 当作内核装配 bug 拒掉，理由与 Provider 侧同源。
+		s.log.Error("ipc: builtin produced an error detail for a method that declares none",
+			"interface", route.InterfaceID, "method_id", route.Method.MethodID)
+		return internalResponse(requestID), false
+	}
+	detail, err := protocheck.ValidateFailureDetail(
+		route.Method.Meta, route.Method.ErrorDetail, result.ErrorDetail)
+	if err != nil {
+		s.log.Error("ipc: builtin error detail failed validation",
+			"interface", route.InterfaceID, "method_id", route.Method.MethodID, "err", err)
+		return internalResponse(requestID), false
+	}
+	return &ipcv1.Response{
+		RequestId: requestID,
+		Outcome: &ipcv1.Response_Failure{Failure: &ipcv1.Failure{
+			Code: result.Code,
+			// PublicMessage 仍然留空：协议规定它只能由 nervud 从受审计模板
+			// 生成，而 typed detail 已经承载了可区分的原因。
+			ErrorDetail: detail,
+		}},
+	}, true
 }
 
 func (s *Server) rejectProviderResult(

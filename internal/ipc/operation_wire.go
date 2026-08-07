@@ -148,7 +148,9 @@ func operationFailure(
 		// code 本身携带了最要紧的信息（该不该重试），保住它。
 		return endpoint.BuiltinResult{Code: code}
 	}
-	return endpoint.BuiltinResult{Payload: detail, Code: code}
+	// 【ErrorDetail 而不是 Payload】：后者是成功时的响应载荷，类型由
+	// response_type 决定。放错字段的表现是调用方按错误的类型去解一段字节。
+	return endpoint.BuiltinResult{ErrorDetail: detail, Code: code}
 }
 
 // operationErrToResult 把 operation 包的哨兵错误翻成 (code, typed reason)。

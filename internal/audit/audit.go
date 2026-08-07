@@ -1,4 +1,5 @@
-// audit 不 import 任何兄弟模块。依赖箭头永远指向 audit，结构上不可能出现 import cycle
+// 本文件是共用类型（Event / Recorder）与只写 slog 的最小实现。
+// 包说明见 doc.go。
 package audit
 
 import (
@@ -24,10 +25,13 @@ type Recorder interface {
 	Record(ctx context.Context, ev Event)
 }
 
-// New 返回的最小实现
+// New 返回只写 slog 的最小实现。
 //
-// TODO(rewrite): 换成独立的 append-only 审计文件 + 轮转 + 完整性保护
-// 审计与普通日志混在一起会被日志级别过滤掉，也无法保证不被覆盖
+// 【生产用 NewFileRecorder】：审计与普通日志混在一起会被日志级别过滤掉，
+// 会被轮转策略覆盖，也没有任何东西能证明它没被改过。file.go 那一份补齐了
+// 这三件事，并且仍然照写 slog。
+//
+// 本实现留给测试与不需要留证的最小装配。
 func New(log *slog.Logger) Recorder { return &slogRecorder{log: log} }
 
 type slogRecorder struct{ log *slog.Logger }
