@@ -407,6 +407,13 @@ func assemble(
 	// 【谁能拿到由 perm.pkg.admin 决定，不由包名决定】——内核不认识任何具体的
 	// Package ID，判据与管理通道的准入是同一条。
 	svcMgr.GrantStagingAccess(admin.DefaultStagingDir)
+	// 服务间共享区：每个包在两个根下各有一个属主为自己、0755 的子目录。
+	// preflight 建根，pkgregistry 的启动扫描按包建子目录，service 把本包那个
+	// 子目录放进 ReadWritePaths。三处用的是同一份 Invariants，路径不会分叉。
+	pkgMod.SetSharedRoots(
+		authority.DefaultInvariants().SharedRuntimeRoot,
+		authority.DefaultInvariants().SharedPersistRoot,
+	)
 	k.Register(svcMgr)
 
 	// Health 聚合器：现读 safety/control/service 三个权威源合成整机一句话健康档位。

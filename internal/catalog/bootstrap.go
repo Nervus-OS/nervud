@@ -242,6 +242,25 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			"注册公共系统服务",
 			"Register a public system service",
 		),
+		// perm.storage.shared 是【服务之间】交换配置、模型、缓存的门槛。
+		//
+		// 与 perm.storage.user 刻意分开：那是「用户的文档」，语义面向 App 与
+		// 文件选择器，因此是 USER_CONSENT + PRIVACY_SENSITIVE；而两个服务想放个
+		// 中间文件，不该变成「要用户同意访问他的文档」。
+		//
+		// GRANT_MODE_NORMAL + Ordinary：共享区里本就只该放「拿到这条权限就有资格
+		// 看」的东西。需要更细门槛的数据（摄像头帧一类）必须走 Transfer 的内存
+		// 句柄——那里句柄本身就是凭证，没有文件系统路径可绕。
+		bootstrapPermission(
+			"perm.storage.shared",
+			ipcv1.GrantMode_GRANT_MODE_NORMAL,
+			ipcv1.RiskClass_RISK_CLASS_NORMAL,
+			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
+			"",
+			"storage",
+			"读写服务间共享区",
+			"Read and write the inter-service shared area",
+		),
 		bootstrapPermission(
 			"perm.storage.user",
 			ipcv1.GrantMode_GRANT_MODE_USER_CONSENT,

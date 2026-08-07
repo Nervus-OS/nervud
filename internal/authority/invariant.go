@@ -45,8 +45,31 @@ type Invariants struct {
 	// 只有声明了 perm.storage.user 的包才会拿到它（见 service.readWritePaths）；
 	// 没声明的包在 ProtectSystem=strict 下连写都写不进去。
 	UserDataRoot string
-	MinAppUID    uint32 // App UID/GID 下界，低于此值属系统保留
-	MaxAppUID    uint32
+
+	// SharedRuntimeRoot / SharedPersistRoot 是【服务之间】交换数据的公共区，
+	// 每个包在其下有一个属主为自己、模式 0755 的子目录。
+	//
+	// 与 UserDataRoot 的区别：那是「用户的文档」，语义面向 App 与文件选择器，
+	// 门槛是 USER_CONSENT 的 perm.storage.user；这两个是服务之间交换配置、模型、
+	// 缓存的地方，门槛是 perm.storage.shared。两者混用会让「服务想放个中间文件」
+	// 变成「要用户同意访问他的文档」。
+	//
+	// 0755 而不是 0777：谁都能读、只有属主能写，这正是需要的语义，
+	// 不需要把写权限敞开给所有人。按包细粒度授予写权限（ACL）留待 v2。
+	//
+	// 【边界】：本区只放「拿到 perm.storage.shared 就有资格看」的东西。跨包读
+	// 隔离在本系统里只靠数据目录的 0700 实现（见 service.buildStartReq 的
+	// InaccessiblePaths 只列了 registry），因此 0755 的共享区是全系统可读的——
+	// 需要更细权限门槛的数据（摄像头帧一类）必须走 Transfer 的内存句柄，
+	// 那里句柄本身就是凭证，没有文件系统路径可绕。
+	//
+	// SharedRuntimeRoot 在 tmpfs 上：运行期交换，重启即失，写它不磨损 eMMC。
+	// SharedPersistRoot 在磁盘上：跨重启保留的配置与缓存。
+	SharedRuntimeRoot string
+	SharedPersistRoot string
+
+	MinAppUID uint32 // App UID/GID 下界，低于此值属系统保留
+	MaxAppUID uint32
 }
 
 // DefaultInvariants 是生产镜像的固定取值。不做成配置文件读取
@@ -59,6 +82,10 @@ func DefaultInvariants() *Invariants {
 		PackageRoot:       "/var/lib/nervus/packages",
 		SystemPackageRoot: "/usr/lib/nervus/system-packages",
 		UserDataRoot:      "/var/lib/nervus/user-data",
+		// /run 是 tmpfs：写它不落盘、不磨损 eMMC。摄像头这类高吞吐的中间数据
+		// 若落到 eMMC 上，持续写入会直接烧闪存寿命
+		SharedRuntimeRoot: "/run/nervus/shared",
+		SharedPersistRoot: "/var/lib/nervus/shared",
 		MinAppUID:         20000, // 避开发行版的系统和普通用户段
 		MaxAppUID:         59999,
 	}

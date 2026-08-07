@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/godbus/dbus/v5 v5.2.2
-	github.com/nervus-os/nervus-ipc v0.0.0-20260807085529-e1b25e6faed5
+	github.com/nervus-os/nervus-ipc v0.0.0-20260807123524-c69dccb1120a
 	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.11
 )

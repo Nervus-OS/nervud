@@ -366,6 +366,7 @@ func (b *Builder) addResource(
 		StableRole:   wire.GetStableRole(),
 		AccessMode:   wire.GetAccessMode(),
 		RiskClass:    wire.GetRiskClass(),
+		Labels:       cloneLabels(wire.GetLabels()),
 		Owner:        owner,
 	}
 	if source.Kind != SourceKindKernel {
@@ -639,6 +640,10 @@ func authorizeResource(source Source, next *Snapshot, wire *ipcv1.ManagedResourc
 		return fmt.Errorf("resource type=%q role=%q: %w",
 			wire.GetResourceType(), wire.GetStableRole(), err)
 	}
+	if err := authorizeResourceLabels(source, wire); err != nil {
+		return fmt.Errorf("resource type=%q role=%q: %w",
+			wire.GetResourceType(), wire.GetStableRole(), err)
+	}
 	if !isPlatformNamespace(wire.GetResourceType()) {
 		if !strings.HasPrefix(wire.GetResourceType(), source.PackageID+".") {
 			return fmt.Errorf("private resource type %q is outside package namespace %q",
@@ -656,6 +661,32 @@ func authorizeResource(source Source, next *Snapshot, wire *ipcv1.ManagedResourc
 	if !catalogKnowsResourceType(next, wire.GetResourceType()) {
 		return fmt.Errorf("OEM source cannot introduce unknown standard resource type %q",
 			wire.GetResourceType())
+	}
+	return nil
+}
+
+// authorizeResourceLabels 对标签键施加与接口/权限同一套命名空间规则。
+//
+// 标签是【App 选设备的依据】：一个厂商如果能随手声明 nervus.camera.facing=front，
+// 它就能把自己的摄像头伪装成平台语义下的前视摄像头，让按标准标签选设备的 App
+// 选到它。所以平台标签只有 platform-release 能定义，私有标签必须在自己命名空间下——
+// 与接口、权限、资源类型完全同规。
+func authorizeResourceLabels(source Source, wire *ipcv1.ManagedResource) error {
+	for key := range wire.GetLabels() {
+		if key == "" {
+			return errors.New("label key is empty")
+		}
+		if isPlatformNamespace(key) {
+			if !isPlatformRelease(source) {
+				return fmt.Errorf(
+					"source lacks platform-release authority to define standard label %q", key)
+			}
+			continue
+		}
+		if !strings.HasPrefix(key, source.PackageID+".") {
+			return fmt.Errorf("private label %q is outside package namespace %q",
+				key, source.PackageID)
+		}
 	}
 	return nil
 }
@@ -808,7 +839,10 @@ func sameResourceContract(left, right ResourceDefinition) bool {
 		left.ResourceType == right.ResourceType &&
 		left.StableRole == right.StableRole &&
 		left.AccessMode == right.AccessMode &&
-		left.RiskClass == right.RiskClass
+		left.RiskClass == right.RiskClass &&
+		// 标签也算契约的一部分：两个 Provider 声明同一个资源却给了不同标签，
+		// App 按标签选到哪一个就取决于发布顺序了
+		sameLabels(left.Labels, right.Labels)
 }
 
 func assignDefinitionGenerations(previous, next *Snapshot) {

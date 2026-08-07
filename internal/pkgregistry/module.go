@@ -34,6 +34,10 @@ type Module struct {
 	systemPackagesDir string // /usr/lib/nervus/system-packages
 	packageRoot       string // authority.DefaultInvariants.PackageRoot
 	dataRoot          string // authority.DefaultInvariants.DataRoot
+	// 服务间共享区的两个根。空值表示不启用（测试与最小装配）。
+	// 每个包在其下有一个属主为自己、0755 的子目录，见 provisionEntry。
+	sharedRuntimeRoot string // authority.DefaultInvariants.SharedRuntimeRoot（tmpfs）
+	sharedPersistRoot string // authority.DefaultInvariants.SharedPersistRoot（磁盘）
 
 	// mu 串行化全部状态变更（Install / Uninstall / SetComponentEnabled）。	// 没有它，并发安装会争抢 UID 分配器（_allocator.json 的 read-modify-write）、
 	// 并让 commit 的 List -> Replace 丢更新，导致 registry/identity/permission 三份投影
@@ -71,6 +75,15 @@ func New(
 		stateDir: stateDir, systemPackagesDir: systemPackagesDir,
 		packageRoot: packageRoot, dataRoot: dataRoot,
 	}
+}
+
+// SetSharedRoots 启用服务间共享区。装配期一次性设置，Start 之后只读。
+//
+// 与 New 分开而不是加两个形参：New 已有 12 个参数，而共享区是可选设施——
+// 最小装配与大量测试并不需要它，让它们被迫传两个空串只会让调用点更难读。
+func (m *Module) SetSharedRoots(runtimeRoot, persistRoot string) {
+	m.sharedRuntimeRoot = runtimeRoot
+	m.sharedPersistRoot = persistRoot
 }
 
 func (m *Module) Name() string { return "pkgregistry" }

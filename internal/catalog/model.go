@@ -232,6 +232,12 @@ type ResourceDefinition struct {
 	Owner            DefinitionOwner
 	ManagerOwner     DefinitionOwner
 
+	// Labels 是该资源的语义标签，供 ResourceSelector.labels 匹配。
+	//
+	// StableRole 是板级配置的产物（这块板上前视摄像头叫 cam.front 还是
+	// camera0），App 不该依赖它。标签让 App 按语义选设备，换板不用改 App。
+	Labels map[string]string
+
 	DefinitionGeneration uint64
 }
 
@@ -512,7 +518,35 @@ func cloneResourceDefinition(in ResourceDefinition) ResourceDefinition {
 	out := in
 	out.Owner = cloneOwner(in.Owner)
 	out.ManagerOwner = cloneOwner(in.ManagerOwner)
+	out.Labels = cloneLabels(in.Labels)
 	return out
+}
+
+// cloneLabels 深拷贝标签 map。Snapshot 是不可变的，返回内部 map 会让消费者
+// 能就地改写一份已发布的 Catalog。
+func cloneLabels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// sameLabels 比较两组标签。用于 sameResourceContract——两个 Provider 声明同一个
+// 资源时，标签也必须一致，否则 App 按标签选到的会是哪一个取决于发布顺序。
+func sameLabels(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for k, v := range left {
+		if other, ok := right[k]; !ok || other != v {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneMethodMetas(in []*ipcv1.MethodMeta) []*ipcv1.MethodMeta {

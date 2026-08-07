@@ -177,6 +177,13 @@ func (fakeResources) ResolveControl(typ, role string) (string, uint64, bool) {
 	return "", 0, false
 }
 
+// ResolveControlBySelector 在替身里退化成 type/role 查表：本包的测试关心的是
+// AcquireControl 的状态机，labels 与多候选策略由 catalog.SelectResources 自己
+// 的测试覆盖。
+func (f fakeResources) ResolveControlBySelector(sel *ipcv1.ResourceSelector) (string, uint64, bool) {
+	return f.ResolveControl(sel.GetType(), sel.GetRole())
+}
+
 type mutableResources struct {
 	mu         sync.Mutex
 	generation uint64
@@ -189,6 +196,10 @@ func (r *mutableResources) ResolveControl(typ, role string) (string, uint64, boo
 		return "", 0, false
 	}
 	return "base.main", r.generation, true
+}
+
+func (r *mutableResources) ResolveControlBySelector(sel *ipcv1.ResourceSelector) (string, uint64, bool) {
+	return r.ResolveControl(sel.GetType(), sel.GetRole())
 }
 
 func (r *mutableResources) setGeneration(generation uint64) {

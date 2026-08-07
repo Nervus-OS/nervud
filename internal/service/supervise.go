@@ -39,6 +39,10 @@ const (
 	// permStorageUser 是访问共享用户文档区（Invariants.UserDataRoot）所需的权限。
 	// 与中央 catalog bootstrap 里的条目【必须同名】——那边是定义，这边是执法点
 	permStorageUser = "perm.storage.user"
+	// permStorageShared 是访问服务间共享区（Invariants.SharedRuntimeRoot /
+	// SharedPersistRoot）所需的权限。与中央 catalog bootstrap 里的条目
+	// 【必须同名】——那边是定义，这边是执法点
+	permStorageShared = "perm.storage.shared"
 
 	// x11SocketDir 是 X11 显示服务器的 unix socket 目录。
 	//
@@ -357,7 +361,35 @@ func (m *Manager) readWritePaths(e pkgregistry.Entry, dataDir string) []string {
 		m.perms.Allowed(e.Manifest.PackageID, permStorageUser) {
 		paths = append(paths, m.inv.UserDataRoot)
 	}
+	// 服务间共享区：本包【自己那个子目录】可写。
+	//
+	// 给的是子目录而不是根：根可写等于允许任意包在根下造目录，那就绕开了
+	// 「一个包一个目录、属主即写权」这条结构。读别人的目录不需要 ReadWritePaths
+	// ——ProtectSystem=strict 只让文件系统只读，不阻止读；跨包读的隔离在本系统里
+	// 只靠数据目录的 0700 实现，而共享子目录是 0755，本就设计成可读。
+	//
+	// 判据同 perm.storage.user：GrantedPermissions（安装资格）与运行期 Allowed
+	// 都要过。只看前者会在用户拒绝后仍把目录绑进 mount namespace。
+	if hasPermission(e, permStorageShared) &&
+		m.perms != nil &&
+		m.perms.Allowed(e.Manifest.PackageID, permStorageShared) {
+		paths = append(paths, m.sharedDirsFor(e.Manifest.PackageID)...)
+	}
 	return paths
+}
+
+// sharedDirsFor 给出该包在共享区里可写的两个子目录。与
+// pkgregistry.provisionEntry 建的是同一批路径——两处对不上时症状是
+// 「目录建了但写不进去」，因此路径拼接必须只有这一种写法。
+func (m *Manager) sharedDirsFor(packageID string) []string {
+	var out []string
+	if m.inv.SharedRuntimeRoot != "" {
+		out = append(out, filepath.Join(m.inv.SharedRuntimeRoot, packageID))
+	}
+	if m.inv.SharedPersistRoot != "" {
+		out = append(out, filepath.Join(m.inv.SharedPersistRoot, packageID))
+	}
+	return out
 }
 
 // hasPermission 报告某 Package 是否已被授予某权限。

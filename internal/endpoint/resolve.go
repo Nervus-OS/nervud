@@ -174,6 +174,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 				m.audit(caller, "endpoint.ResolveEndpoint", true, errInterfaceNotFound, interfaceID)
 				return resolveFailure(reqID, ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 					ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_INTERFACE_NOT_FOUND)
+			case onDemandAuthorized:
 			}
 
 			attemptedStart = true
@@ -330,21 +331,35 @@ func resolveInterfaceResource(
 	if snapshot == nil {
 		return "", 0, false
 	}
-	resourceType, role := "", ""
-	if sel == nil || (sel.GetType() == "" && sel.GetRole() == "") {
-		resourceType, role = def.DefaultResourceType, def.DefaultResourceRole
-	} else {
-		resourceType, role = sel.GetType(), sel.GetRole()
+	// 空 selector 回落到接口声明的默认资源（语义由接口数据决定，不由内核写死）
+	if catalog.SelectorIsEmpty(sel) {
+		resourceType, role := def.DefaultResourceType, def.DefaultResourceRole
+		if resourceType == "" && role == "" {
+			return "", 0, len(def.CompatibleResourceTypes) == 0
+		}
+		if len(def.CompatibleResourceTypes) == 0 {
+			return "", 0, false
+		}
+		resource, ok := snapshot.ResolveResource(resourceType, role)
+		if !ok || !compatibleResource(def, resource.ResourceType) {
+			return "", 0, false
+		}
+		return resource.Handle, resource.DefinitionGeneration, true
 	}
 
-	if resourceType == "" && role == "" {
-		return "", 0, len(def.CompatibleResourceTypes) == 0
-	}
-	if len(def.CompatibleResourceTypes) == 0 || resourceType == "" || role == "" {
+	// 非空 selector 走完整选择：type / role 精确匹配 + labels AND 过滤 +
+	// 多候选策略（未指定 fail closed 为 REQUIRE_UNIQUE）
+	if len(def.CompatibleResourceTypes) == 0 {
 		return "", 0, false
 	}
-	resource, ok := snapshot.ResolveResource(resourceType, role)
-	if !ok || !compatibleResource(def, resource.ResourceType) {
+	matched, ok := catalog.SelectResources(snapshot, sel)
+	if !ok {
+		// 命中 0 个，或命中多个而策略要求唯一。两种都是调用方要改的事，
+		// 统一以「解析不到」表达——ResolveEndpoint 会回 FAILED_PRECONDITION
+		return "", 0, false
+	}
+	resource := matched[0]
+	if !compatibleResource(def, resource.ResourceType) {
 		return "", 0, false
 	}
 	return resource.Handle, resource.DefinitionGeneration, true

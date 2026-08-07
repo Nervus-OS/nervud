@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	basemotionv1 "github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
-	pkgmanagerv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
-	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	"github.com/nervus-os/nervus-ipc/protocol/interface/basemotionv1"
+	"github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
+	"github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 	ipcregistry "github.com/nervus-os/nervus-ipc/registry"
 	"google.golang.org/protobuf/proto"
 

@@ -21,10 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 )
+
+// PermissionStorageShared 是服务间共享区的门槛。与中央 catalog bootstrap 里的
+// 条目【必须同名】——那边是定义，这边决定要不要给这个包建目录。
+const PermissionStorageShared = "perm.storage.shared"
 
 // provisionEntry 确保 e 对应的系统用户与私有数据目录存在。幂等。
 //
@@ -55,7 +60,55 @@ func (m *Module) provisionEntry(ctx context.Context, e Entry) error {
 	if err != nil && !errors.Is(err, authority.ErrAlreadyExists) {
 		return fmt.Errorf("ensure data dir for %s: %w", e.Manifest.PackageID, err)
 	}
+
+	// 3. 服务间共享区的两个子目录。【只给申请了 perm.storage.shared 的包建】。
+	//
+	// 为什么由内核建而不是让服务自己 mkdir：让服务自己建就要求根可写，那样任何
+	// 包都能【抢先创建别人的目录名】——恶意包先建 nervus.camerad/ 并占为己有，
+	// camerad 起来时发现自己的路径写不进去。sticky 位防的是「删别人的」，
+	// 防不了「抢先占名」。根保持 nervud 独占可写，这条攻击就不存在。
+	//
+	// 为什么按需而不是都建：多数服务用不上共享区。给每个包都建等于在 tmpfs 上
+	// 白占一批 inode，还让 ls 出来的目录列表与「谁真的在用」对不上。
+	//
+	// 【0755 而不是 0700】：这正是「谁都能读、只有属主能写」的语义，共享区存在
+	// 的全部意义就在这里。不用 0777——写权限敞开给所有人的话，任何包都能篡改
+	// 别人放出来的配置或模型。
+	//
+	// 无条件重建（而不是像数据目录那样只在首装时建）：SharedRuntimeRoot 在
+	// tmpfs 上，每次重启都是空的，不在启动扫描里补齐的话服务第一次写就 ENOENT。
+	for _, shared := range m.sharedDirsFor(e) {
+		_, err := m.auth.CreatePrivateDataDirectory(ctx, subj, authority.CreateDataDirRequest{
+			Path: shared, UID: e.UID, GID: e.UID, Perm: 0o755,
+		})
+		if err != nil && !errors.Is(err, authority.ErrAlreadyExists) {
+			return fmt.Errorf("ensure shared dir %s for %s: %w", shared, e.Manifest.PackageID, err)
+		}
+	}
 	return nil
+}
+
+// sharedDirsFor 给出该包在共享区里需要被创建的子目录。
+//
+// 返回空的三种情况，都不是错误：
+//   - 共享区未启用（根为空）——最小装配与大量测试
+//   - 该包没申请 perm.storage.shared——多数服务用不上共享区
+//   - 申请了但没被授予——权限裁决说了不算数
+//
+// 判据用 GrantedPermissions 而不是 manifest.Permissions：前者是内核裁决后的
+// 结论，后者只是申请。按申请建目录等于让任何包写一行 manifest 就占一个位置。
+func (m *Module) sharedDirsFor(e Entry) []string {
+	if !slices.Contains(e.GrantedPermissions, PermissionStorageShared) {
+		return nil
+	}
+	var out []string
+	if m.sharedRuntimeRoot != "" {
+		out = append(out, filepath.Join(m.sharedRuntimeRoot, e.Manifest.PackageID))
+	}
+	if m.sharedPersistRoot != "" {
+		out = append(out, filepath.Join(m.sharedPersistRoot, e.Manifest.PackageID))
+	}
+	return out
 }
 
 // provisionAll 对全部已装 Package 补齐运行前置，返回成功的数量。

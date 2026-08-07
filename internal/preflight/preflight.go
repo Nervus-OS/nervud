@@ -120,9 +120,20 @@ func DefaultConfig(log *slog.Logger) Config {
 			// sticky 位不可省：没有它，任何一个包都能删掉其它包（以及用户）的文件。
 			{Path: inv.UserDataRoot, Kind: kindDir, Perm: 0o1777, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/jvm-cache", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
+			// 服务间共享区的两个根。0755 而不是 UserDataRoot 的 01777：
+			// 这两个根【本身】只由 nervud 写（provisionAll 在其下按包建子目录），
+			// 包只往自己那个子目录里写。根开放写权限等于允许任意包在根下造目录，
+			// 那就绕开了「一个包一个目录、属主即写权」这条结构。
+			//
+			// 子目录的属主与权限见 pkgregistry.provisionAll。
+			{Path: inv.SharedPersistRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			// /run 是 tmpfs，chattr +i 不被支持；等价保护是父目录 sticky：01755 让
 			// 非 root 进程无法在其中 create/unlink 任何条目，socket 就删不掉、换不掉
 			{Path: "/run/nervus", Kind: kindDir, Perm: 0o1755, PermExact: true, Writable: true},
+			// 共享区的 tmpfs 根。放在 /run/nervus 之下 = 随 tmpfs 走，重启即失。
+			// 高吞吐的运行期交换（摄像头中间数据一类）必须落在这里而不是磁盘：
+			// 持续几十 MiB/s 写 eMMC 是在烧闪存寿命。
+			{Path: inv.SharedRuntimeRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 		},
 	}
 }

@@ -25,6 +25,7 @@ import (
 
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
+	"github.com/nervus-os/nervud/internal/catalog"
 	"github.com/nervus-os/nervud/internal/control"
 	"github.com/nervus-os/nervud/internal/endpoint"
 	"github.com/nervus-os/nervud/internal/identity"
@@ -1137,6 +1138,9 @@ type ComponentLauncher interface {
 // declared SHARED_OBSERVE can be routed but never leased.
 type ResourceResolver interface {
 	ResolveControl(resourceType, role string) (handle string, generation uint64, ok bool)
+	// ResolveControlBySelector 支持 labels 过滤与多候选策略。AcquireControl 走它；
+	// ResolveControl 保留给只有 type/role 的内部调用点
+	ResolveControlBySelector(sel *ipcv1.ResourceSelector) (handle string, generation uint64, ok bool)
 }
 
 // 协议规定的隐式默认 Resource（envelope.proto: ResolveEndpoint.selector
@@ -1152,16 +1156,19 @@ const (
 
 // resolveLeaseResource 把 AcquireControl 的 selector 解析成 resource_handle。
 func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, uint64, bool) {
-	typ, role := sel.GetType(), sel.GetRole()
-	if typ == "" && role == "" {
-		typ, role = defaultResourceType, defaultResourceRole
-	}
 	if s.resources == nil {
 		// No resource directory means no lease authority, including the legacy
 		// default. Production assembly injects the catalog-backed module.
 		return "", 0, false
 	}
-	return s.resources.ResolveControl(typ, role)
+	// 完全空的 selector 沿用协议规定的隐式默认（envelope.proto: 固定 BaseMotion
+	// 可以留空）。同一个「留空」在 Resolve 与 AcquireControl 上必须是同一个含义。
+	// 【V2-10 会去掉这条隐式默认】——那是本轮唯一真正断 wire 的变更。
+	if catalog.SelectorIsEmpty(sel) {
+		return s.resources.ResolveControl(defaultResourceType, defaultResourceRole)
+	}
+	// 非空 selector 走完整选择：labels 过滤 + 多候选策略
+	return s.resources.ResolveControlBySelector(sel)
 }
 
 // auditLaunch 记一条成功的组件启动。
