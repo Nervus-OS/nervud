@@ -154,7 +154,7 @@ func attachDirect(
 		TransferId: handle.GetTransferId(), AttachTicket: handle.GetAttachTicket(),
 		Role: handle.GetRole(),
 	}
-	_, id, active, err := m.attach(server, cred, req)
+	_, id, active, _, err := m.attach(server, cred, req)
 	if err != nil {
 		_ = server.Close()
 		_ = client.Close()

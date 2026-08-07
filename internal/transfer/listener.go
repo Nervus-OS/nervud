@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	"github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -82,7 +82,7 @@ func (m *Manager) serveAttach(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	success, id, active, err := m.attach(conn, credential, &req)
+	success, id, active, ring, err := m.attach(conn, credential, &req)
 	if err != nil {
 		_ = writeAttachFailure(conn, CodeOf(err))
 		_ = conn.Close()
@@ -96,11 +96,28 @@ func (m *Manager) serveAttach(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	// ring 模式：结果帧之后紧接着用 SCM_RIGHTS 送 memfd 与 eventfd。
+	//
+	// 【必须在结果帧之后】：对端要先从结果里读到 mode 与几何参数，才知道
+	// 该不该去收 fd、收到之后按什么尺寸映射。
+	if ring != nil {
+		if err := sendRingFDs(conn, ring); err != nil {
+			if m.log != nil {
+				m.log.Warn("transfer: failed to hand over ring descriptors",
+					"err", err)
+			}
+			m.closeID(id, terminalPeerClosed)
+			_ = conn.Close()
+			return
+		}
+	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		m.closeID(id, terminalPeerClosed)
 		return
 	}
-	if active {
+	// 【ring 模式不起 relay】：两端 mmap 同一块内存直接收发，nervud 不在
+	// 数据路径上。起了 relay 反而会把两条控制连接当成数据流去读
+	if active && success.GetMode() != ipcv1.TransferMode_TRANSFER_MODE_SHARED_MEMORY_RING {
 		m.startRelay(id)
 	}
 	// Manager owns conn after a successful attach.
@@ -117,11 +134,11 @@ func writeAttachFailure(conn net.Conn, code ipcv1.StatusCode) error {
 }
 
 func (m *Manager) attach(conn net.Conn, credential PeerCredential, req *ipcv1.AttachTransfer) (
-	*ipcv1.AttachTransferSuccess, transferID, bool, error,
+	*ipcv1.AttachTransferSuccess, transferID, bool, *ringResources, error,
 ) {
 	id, ok := parseTransferID(req.GetTransferId())
 	if !ok || len(req.GetAttachTicket()) < attachTicketBytes {
-		return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
+		return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
 			"transfer: invalid attachment credential")
 	}
 	digest := ticketDigest(req.GetAttachTicket())
@@ -130,7 +147,7 @@ func (m *Manager) attach(conn net.Conn, credential PeerCredential, req *ipcv1.At
 	r := m.records[id]
 	if r == nil || r.state == stateClosed || m.stopping {
 		m.mu.Unlock()
-		return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
+		return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
 			"transfer: invalid attachment credential")
 	}
 
@@ -145,32 +162,32 @@ func (m *Manager) attach(conn net.Conn, credential PeerCredential, req *ipcv1.At
 		side = &r.caller
 	default:
 		m.mu.Unlock()
-		return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
+		return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
 			"transfer: invalid attachment credential")
 	}
 	if side.consumed || side.conn != nil || req.GetRole() != side.role ||
 		side.owner.Credential != credential {
 		m.mu.Unlock()
-		return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
+		return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_UNAUTHENTICATED,
 			"transfer: invalid attachment credential")
 	}
 	if !now.Before(side.expiresAt) {
 		conns := m.closeLocked(r, terminalExpired, now)
 		m.mu.Unlock()
 		closeConns(conns)
-		return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED,
+		return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_DEADLINE_EXCEEDED,
 			"transfer: attachment ticket expired")
 	}
 	if provider {
 		if r.state != statePrepared {
 			m.mu.Unlock()
-			return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+			return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 				"transfer: provider attachment is not allowed in current state")
 		}
 	} else if r.state != stateCommitted {
 		// In particular, caller racing before Commit does not burn its ticket.
 		m.mu.Unlock()
-		return nil, id, false, status(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
+		return nil, id, false, nil, status(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 			"transfer: caller attachment requires Commit")
 	}
 
@@ -187,8 +204,13 @@ func (m *Manager) attach(conn net.Conn, credential PeerCredential, req *ipcv1.At
 		Mode: r.mode, MaxPacketBytes: r.maxPacket,
 		MaxBytesPerSecond: r.maxBPS,
 	}
+	var ring *ringResources
+	if r.mode == ipcv1.TransferMode_TRANSFER_MODE_SHARED_MEMORY_RING && r.ring != nil {
+		success.Ring = r.ring.config
+		ring = r.ring
+	}
 	m.mu.Unlock()
-	return success, id, active, nil
+	return success, id, active, ring, nil
 }
 
 func (m *Manager) reportFatal(err error) {
@@ -238,6 +260,7 @@ func (m *Manager) reap(now time.Time) {
 					}
 				}
 			}
+		case stateActive:
 		}
 	}
 	m.mu.Unlock()

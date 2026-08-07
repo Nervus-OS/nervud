@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	"github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 )
 
 type transferID [transferIDBytes]byte
@@ -86,6 +86,14 @@ type record struct {
 	done           chan struct{}
 	doneOnce       sync.Once
 	pacer          *pacer
+
+	// ring 只在 mode == SHARED_MEMORY_RING 时非空。持有 memfd 与 eventfd，
+	// 在 Transfer 关闭时释放。
+	//
+	// 【ring 模式下 nervud 不在数据路径上】：两端 mmap 同一块内存直接收发，
+	// 没有 relay goroutine，也没有逐帧的限速——限速在 ring 的几何上（slot 数 ×
+	// slot 大小就是最大在途量）。这正是它相对 FRAMED_RELAY 的意义。
+	ring *ringResources
 }
 
 func (r *record) peerUIDs() []uint32 {
