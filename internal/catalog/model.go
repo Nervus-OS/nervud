@@ -36,6 +36,15 @@ const (
 	// 由签名的系统服务用 ProviderArtifacts 声明, 内核不该认识它.
 	InterfaceResourceDirectory = "nervus.interface.resource.directory"
 
+	// InterfacePermissionAdmin 是 USER_CONSENT 权限授予状态的读写面.
+	//
+	// 与资源目录同理由列在这里: 授予状态就是 permission.Registry 自己的状态,
+	// 除了内核没有第二个实现者. 让一个系统服务来代管, 等于把"谁能改全系统的
+	// 危险权限"交给一个可以被替换的包 —— 而这条接口的门槛
+	//  (perm.permission.admin: SYSTEM_ONLY + PLATFORM + platform-release)
+	// 正是为了不让它被替换.
+	InterfacePermissionAdmin = "nervus.interface.permission.admin"
+
 	// InterfaceOperationControl 是长任务的查询/取消/回报面.
 	//
 	// 它与资源目录同理由列在这里: Operation 的状态机归内核所有, 除了 nervud

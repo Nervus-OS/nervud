@@ -26,6 +26,7 @@ import (
 	"github.com/nervus-os/nervud/internal/motiongate"
 	"github.com/nervus-os/nervud/internal/operation"
 	"github.com/nervus-os/nervud/internal/permission"
+	"github.com/nervus-os/nervud/internal/permissionadmin"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/power"
 	"github.com/nervus-os/nervud/internal/preflight"
@@ -518,6 +519,23 @@ func assemble(
 			"register builtin %s: %w", resourcedir.BuiltinInterfaceID, err)
 	}
 	logger.Info("endpoint: builtin registered", "interface", resourcedir.BuiltinInterfaceID)
+
+	// 授权面: USER_CONSENT 权限的授予状态读写. 补的是"装上了却永远拿不到"这个
+	// 缺口 —— 在它之前, 全系统能改运行期授予状态的只有管理通道上的
+	// SetRuntimeState, 实际只有 nervusctl 用得上, 于是普通应用申请的敏感权限
+	// 没有任何界面能批准.
+	//
+	// 由内核实现的理由与资源目录同款: 授予状态就是 permission.Registry 自己的
+	// 状态, 交给一个可替换的服务代管, 等于绕开 perm.permission.admin 那道
+	// platform-release 门槛. 注册失败同样是硬错误 (契约与二进制漂移).
+	permissionAdminMod := permissionadmin.New(definitions, pkgReg, permReg, logger)
+	if err := epMod.RegisterBuiltin(
+		permissionadmin.BuiltinInterfaceID, 1, 0, permissionAdminMod.BuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf(
+			"register builtin %s: %w", permissionadmin.BuiltinInterfaceID, err)
+	}
+	logger.Info("endpoint: builtin registered", "interface", permissionadmin.BuiltinInterfaceID)
 
 	k.Register(epMod)
 
