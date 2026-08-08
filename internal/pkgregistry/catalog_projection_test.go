@@ -101,24 +101,19 @@ func TestConflictingProviderDefinitionsRejectWholeBatch(t *testing.T) {
 	}
 }
 
-// 曾经有一条只给 nervus.pkgmanagerd 的无契约兼容桥。它已随打包链
-// （nervus-system-server 的 providergen）落地而整段移除。
 //
-// 本测试断言【那条桥真的没了】：即便把身份条件全部凑齐——正确的 package ID、
-// 正确的组件与接口、系统镜像来源、Platform 信任、已验证的 platform-release
-// 签名者——只要没有 Provider 契约，projectCatalogSources 就必须拒绝。
+
 //
-// 反过来说：内核不再存在任何一条「因为你是某个特定的包，所以可以少交东西」的路径。
+
 func TestNoPackageIDGetsAnArtifactLessBridge(t *testing.T) {
 	base := legacyPackageManagerEntry()
 
 	if _, err := projectCatalogSources([]Entry{base}); !errors.Is(
 		err, ErrProviderArtifactsRequired,
 	) {
-		t.Fatalf("身份条件齐备的 pkgmanagerd 仍被放行，兼容桥没有真正移除: err = %v", err)
+		t.Fatalf("unexpected package registry result; pkgmanagerd: err = %v", err)
 	}
 
-	// 换成任意别的 package ID 同样是拒绝——拒绝的理由与包名无关
 	other := cloneEntry(base)
 	other.Manifest.PackageID = "com.example.provider"
 	if _, err := projectCatalogSources([]Entry{other}); !errors.Is(
@@ -409,8 +404,6 @@ func testPermissionProviderEntry(
 	}
 }
 
-// legacyPackageManagerEntry 造一个「身份条件全部齐备、只差 Provider 契约」的
-// pkgmanagerd Entry。兼容桥还在时它能被放行；现在它只用来证明放行路径已消失。
 func legacyPackageManagerEntry() Entry {
 	return Entry{
 		Manifest: Manifest{
@@ -469,8 +462,8 @@ func testPermissionWire(
 		RiskClass:          risk,
 		MinimumTrust:       minimum,
 		RequiredSignerRole: role,
-		DisplayName:        &ipcv1.LocalizedText{ZhCn: "测试", En: "Test"},
-		Description:        &ipcv1.LocalizedText{ZhCn: "测试说明", En: "Test description"},
+		DisplayName:        &ipcv1.LocalizedText{ZhCn: "package registry test value 0b5d7e", En: "Test"},
+		Description:        &ipcv1.LocalizedText{ZhCn: "package registry test value 846068", En: "Test description"},
 	}
 }
 

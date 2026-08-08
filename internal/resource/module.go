@@ -66,12 +66,12 @@ func (m *Module) ResolveControl(
 	return definition.Handle, definition.DefinitionGeneration, true
 }
 
-// ResolveControlBySelector 是 ResolveControl 的 selector 版本：支持 labels 过滤
-// 与多候选策略（未指定 fail closed 为 REQUIRE_UNIQUE）。
+// ResolveControlBySelector 是 ResolveControl 的 selector 版本: 支持 labels 过滤
+// 与多候选策略 (未指定 fail closed 为 REQUIRE_UNIQUE).
 //
-// 与 ResolveControl 同样只放行 EXCLUSIVE_CONTROL 的资源：声明为 SHARED_OBSERVE
-// 的传感器可被路由，但永远拿不到控制租约。摄像头采集正属于后者——多个 App 同时
-// 读同一路摄像头是常态，而「独占控制」表达不了那个语义。
+// 与 ResolveControl 同样只放行 EXCLUSIVE_CONTROL 的资源: 声明为 SHARED_OBSERVE
+// 的传感器可被路由, 但永远拿不到控制租约. 摄像头采集正属于后者 - 多个 App 同时
+// 读同一路摄像头是常态, 而"独占控制"表达不了那个语义.
 func (m *Module) ResolveControlBySelector(
 	sel *ipcv1.ResourceSelector,
 ) (handle string, generation uint64, ok bool) {

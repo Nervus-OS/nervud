@@ -1,13 +1,13 @@
 // 本文件是进程生命周期与包树删除三个特权操作的请求契约与 Gate 方法
-// ：
+// :
 //
 //	StartSandboxedProcess 经 systemd StartTransientUnit 起一个沙箱进程
-//	StopProcess      停止该 unit
-//	RemovePackageTree   递归删除一个已安装 Package 的代码或数据目录（卸载用）
+//	StopProcess 停止该 unit
+//	RemovePackageTree 递归删除一个已安装 Package 的代码或数据目录 (卸载用)
 //
-// 起进程不由 authority 直接 fork/exec，而是委托 systemd：sandbox、cgroup
-// 限额、UID 降权全部交给 systemd 的 unit 属性，authority 只负责决定允不允许 +
-// 本地不变量校验 + 审计。真正的 D-Bus 在 internal/authority/systemd 子包。
+// 起进程不由 authority 直接 fork/exec, 而是委托 systemd: sandbox, cgroup
+// 限额, UID 降权全部交给 systemd 的 unit 属性, authority 只负责决定允不允许 +
+// 本地不变量校验 + 审计. 真正的 D-Bus 在 internal/authority/systemd 子包.
 package authority
 
 import (
@@ -17,14 +17,14 @@ import (
 	"github.com/nervus-os/nervud/internal/authority/systemd"
 )
 
-// PlatformJREExec 是平台内置 JRE 的固定 java 可执行路径。
-// runtime=jvm 的组件，ExecStart 必须恰好是它 - 被校验位置在包内的是 -jar 指向的
-// entry 与 native_lib_dir（由 ContainedPaths 承载）
+// PlatformJREExec 是平台内置 JRE 的固定 java 可执行路径.
+// runtime=jvm 的组件, ExecStart 必须恰好是它 - 被校验位置在包内的是 -jar 指向的
+// entry 与 native_lib_dir (由 ContainedPaths 承载)
 const PlatformJREExec = "/usr/lib/nervus/jre/bin/java"
 
-// Runtime 是进程入口的启动方式。authority 定义自己的小枚举而不 import pkgregistry
-// - pkgregistry 已经 import authority（装包时调 InstallVerifiedPackage），反向依赖
-// 会成环。service.Manager 负责把 pkgregistry.Runtime 翻成本类型
+// Runtime 是进程入口的启动方式. authority 定义自己的小枚举而不 import pkgregistry
+// - pkgregistry 已经 import authority (装包时调 InstallVerifiedPackage), 反向依赖
+// 会成环. service.Manager 负责把 pkgregistry.Runtime 翻成本类型
 type Runtime uint8
 
 const (
@@ -34,8 +34,8 @@ const (
 
 func (r Runtime) valid() bool { return r == RuntimeNative || r == RuntimeJVM }
 
-// ResourceLimits 是组件的资源上限。零值表示不设该项。
-// 内核按 trust 钳制上限由 service.Manager 负责，authority 只透传
+// ResourceLimits 是组件的资源上限. 零值表示不设该项.
+// 内核按 trust 钳制上限由 service.Manager 负责, authority 只透传
 type ResourceLimits struct {
 	MemoryMaxBytes  uint64
 	CPUQuotaPercent uint32
@@ -46,55 +46,55 @@ type ResourceLimits struct {
 
 // StartSandboxedProcessRequest 请求以瞬态 systemd unit 起一个沙箱进程
 type StartSandboxedProcessRequest struct {
-	UnitName string  // nervus-<pkgid>-<compid>.service（systemd 侧再白名单校验）
-	Desc     string  // 人类可读描述，仅供 systemd status
+	UnitName string  // nervus-<pkgid>-<compid>.service (systemd 侧再白名单校验)
+	Desc     string  // 人类可读描述, 仅供 systemd status
 	Runtime  Runtime // native | jvm
-	ExecPath string  // native=包内 ELF；jvm=PlatformJREExec
+	ExecPath string  // native=包内 ELF; jvm=PlatformJREExec
 	Args     []string
-	// ContainedPaths 是必须位于 PackageRoot 之内的包内路径（jvm 的 jar、native_lib_dir
-	// 等）。Validate 逐一 CheckContained，堵住java -jar /etc/shadow这类逃逸
+	// ContainedPaths 是必须位于 PackageRoot 之内的包内路径 (jvm 的 jar, native_lib_dir
+	// 等). Validate 逐一 CheckContained, 堵住java -jar /etc/shadow这类逃逸
 	ContainedPaths    []string
 	UID               uint32
 	GID               uint32
 	WorkingDir        string // 必须位于 DataRoot 之下
 	Env               []string
-	ReadWritePaths    []string // ProtectSystem=strict 下必须列出可写目录（私有数据目录）
+	ReadWritePaths    []string // ProtectSystem=strict 下必须列出可写目录 (私有数据目录)
 	ReadOnlyPaths     []string
 	InaccessiblePaths []string
 	Limits            ResourceLimits
-	// BindToUnit 非空时给组件 unit 绑定 owner-death：绑定 unit（生产为 nervud.service）
-	// 停/failed 即连带停组件，杜绝 nervud 被 SIGKILL 后组件仍归 systemd 持有
+	// BindToUnit 非空时给组件 unit 绑定 owner-death: 绑定 unit (生产为 nervud.service)
+	// 停/failed 即连带停组件, 杜绝 nervud 被 SIGKILL 后组件仍归 systemd 持有
 	BindToUnit string
-	// AllowDeviceAccess 放开该组件对宿主设备节点的访问（关 PrivateDevices、
-	// DevicePolicy=auto）。语义与约束见 systemd.Sandbox.AllowDeviceAccess。
+	// AllowDeviceAccess 放开该组件对宿主设备节点的访问 (关 PrivateDevices,
+	// DevicePolicy=auto). 语义与约束见 systemd.Sandbox.AllowDeviceAccess.
 	//
-	// Gate 不在这里二次裁决「谁配拿到它」——那是调用方（service.Manager）按
-	// Package 来源判定的策略，Gate 只负责把它如实翻给 systemd。Gate 守的是
-	// 不变量（路径包含、UID 区段），不是策略。
+	// Gate 不在这里二次裁决"谁配拿到它" - 那是调用方 (service.Manager) 按
+	// Package 来源判定的策略, Gate 只负责把它如实翻给 systemd. Gate 守的是
+	// 不变量 (路径包含, UID 区段), 不是策略.
 	AllowDeviceAccess bool
-	// BindReadOnlyPaths 只读绑定挂载进组件命名空间的宿主路径。
-	// 语义与约束见 systemd.Sandbox.BindReadOnlyPaths（当前唯一用途是把
-	// X11 socket 目录送进 PrivateTmp 之后的私有 /tmp）。
+	// BindReadOnlyPaths 只读绑定挂载进组件命名空间的宿主路径.
+	// 语义与约束见 systemd.Sandbox.BindReadOnlyPaths (当前唯一用途是把
+	// X11 socket 目录送进 PrivateTmp 之后的私有 /tmp).
 	//
-	// 【不】走 CheckContained：这些路径按定义就在 PackageRoot/DataRoot 之外，
-	// 那正是绑定挂载存在的理由。取值由 service.Manager 从固定清单给出，
-	// 不接受来自 manifest 的任意路径——否则一个包就能把宿主任意目录挂进自己
-	// 的命名空间。
+	// 不走 CheckContained: 这些路径按定义就在 PackageRoot/DataRoot 之外,
+	// 那正是绑定挂载存在的理由. 取值由 service.Manager 从固定清单给出,
+	// 不接受来自 manifest 的任意路径 - 否则一个包就能把宿主任意目录挂进自己
+	// 的命名空间.
 	BindReadOnlyPaths []string
 
-	// AmbientCapabilities 是要授予该组件的 Linux capability 名（如 CAP_NET_ADMIN）。
+	// AmbientCapabilities 是要授予该组件的 Linux capability 名 (如 CAP_NET_ADMIN).
 	//
-	// 组件以 App UID 运行、非 root，默认拿不到任何 capability——驱动无线电、
-	// 配置网络这类操作因此一律 EPERM。名字的合法性由 pkgregistry 的白名单保证
-	// （privilege.go），Gate 只如实转发：与 AllowDeviceAccess 同理，
-	// 「谁配拿到它」是调用方的策略，Gate 守的是不变量。
+	// 组件以 App UID 运行, 非 root, 默认拿不到任何 capability - 驱动无线电,
+	// 配置网络这类操作因此一律 EPERM. 名字的合法性由 pkgregistry 的白名单保证
+	//  (privilege.go), Gate 只如实转发: 与 AllowDeviceAccess 同理,
+	// "谁配拿到它"是调用方的策略, Gate 守的是不变量.
 	AmbientCapabilities []string
 
-	// ExtraAddressFamilies 是在基线（AF_UNIX/AF_INET/AF_INET6）之外额外放行的
-	// socket 地址族。
+	// ExtraAddressFamilies 是在基线 (AF_UNIX/AF_INET/AF_INET6) 之外额外放行的
+	// socket 地址族.
 	//
-	// 与 capability 是【两道互不相干的墙】：RestrictAddressFamilies 在 seccomp 层，
-	// 再多 capability 也绕不过去。
+	// 与 capability 是两道互不相干的墙: RestrictAddressFamilies 在 seccomp 层,
+	// 再多 capability 也绕不过去.
 	ExtraAddressFamilies []string
 }
 
@@ -102,16 +102,16 @@ func (StartSandboxedProcessRequest) Kind() Kind { return KindStartSandboxedProce
 
 func (r StartSandboxedProcessRequest) Detail() string { return r.UnitName }
 
-// Validate 按 runtime 分支（ 的关键点）：native 的 ExecPath 必须
-// 在包内，jvm 的 ExecPath 必须恰好是平台 JRE - 否则 jvm 组件永远过不了exec 在包内
-// 的检查，因为 java 本就在 /usr/lib/nervus/jre 而非包目录
+// Validate 按 runtime 分支 (的关键点): native 的 ExecPath 必须
+// 在包内, jvm 的 ExecPath 必须恰好是平台 JRE - 否则 jvm 组件永远过不了exec 在包内
+// 的检查, 因为 java 本就在 /usr/lib/nervus/jre 而非包目录
 func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 	if !r.Runtime.valid() {
 		return fmt.Errorf("%w: unknown runtime %d", ErrInvariantViolated, r.Runtime)
 	}
 	switch r.Runtime {
 	case RuntimeNative:
-		// 认两个代码根：动态安装的在 PackageRoot，系统镜像的在 SystemPackageRoot
+		// 认两个代码根: 动态安装的在 PackageRoot, 系统镜像的在 SystemPackageRoot
 		if err := inv.CheckContainedInCodeRoot(r.ExecPath); err != nil {
 			return err
 		}
@@ -120,13 +120,13 @@ func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 			return fmt.Errorf("%w: jvm exec must be %q, got %q", ErrInvariantViolated, PlatformJREExec, r.ExecPath)
 		}
 	}
-	// 包内路径（jar / native_lib_dir）必须落在某个代码根之内
+	// 包内路径 (jar / native_lib_dir) 必须落在某个代码根之内
 	for _, p := range r.ContainedPaths {
 		if err := inv.CheckContainedInCodeRoot(p); err != nil {
 			return err
 		}
 	}
-	// 工作目录必须是该包的私有数据目录（在 DataRoot 之下）
+	// 工作目录必须是该包的私有数据目录 (在 DataRoot 之下)
 	if err := inv.CheckContained(r.WorkingDir, inv.DataRoot); err != nil {
 		return err
 	}
@@ -136,11 +136,11 @@ func (r StartSandboxedProcessRequest) Validate(inv *Invariants) error {
 	return inv.CheckUID(r.GID)
 }
 
-// ProcessHandle 是一个已启动 unit 的不透明句柄。unit 名不导出 - 调用方只能把它
-// 原样交回 StopProcess/WaitProcess，不能自行构造一个指向任意 unit 的句柄
+// ProcessHandle 是一个已启动 unit 的不透明句柄. unit 名不导出 - 调用方只能把它
+// 原样交回 StopProcess/WaitProcess, 不能自行构造一个指向任意 unit 的句柄
 type ProcessHandle struct{ unit string }
 
-// Unit 返回句柄对应的 systemd unit 名，仅供审计/诊断
+// Unit 返回句柄对应的 systemd unit 名, 仅供审计/诊断
 func (h ProcessHandle) Unit() string { return h.unit }
 
 func (g *Gate) StartSandboxedProcess(
@@ -157,7 +157,7 @@ func (g *Gate) osStartSandboxedProcess(ctx context.Context, req StartSandboxedPr
 	if req.Runtime == RuntimeJVM {
 		rt = systemd.RuntimeJVM
 	}
-	_ = rt // systemd.UnitSpec 目前不需要 runtime 区分（ExecStart 已是最终命令）；保留翻译以备扩展
+	_ = rt // systemd.UnitSpec 目前不需要 runtime 区分 (ExecStart 已是最终命令); 保留翻译以备扩展
 	spec := systemd.UnitSpec{
 		Name:        req.UnitName,
 		Description: req.Desc,
@@ -221,14 +221,14 @@ func (g *Gate) osStopProcess(ctx context.Context, req StopProcessRequest) (struc
 
 // ---- WaitProcess ----------------------------------------------------------
 
-// ExitInfo 是一个进程到达终态时的退出信息，从 systemd unit 状态翻译而来
+// ExitInfo 是一个进程到达终态时的退出信息, 从 systemd unit 状态翻译而来
 type ExitInfo struct {
-	Terminal   bool   // 是否已终结（inactive/failed）
-	Result     string // systemd Result：success / exit-code / signal / oom-kill / ...
+	Terminal   bool   // 是否已终结 (inactive/failed)
+	Result     string // systemd Result: success / exit-code / signal / oom-kill /...
 	ExitStatus int
 }
 
-// WaitProcess 阻塞直到进程终结，返回退出信息。它是观察操作（不改变系统状态），
+// WaitProcess 阻塞直到进程终结, 返回退出信息. 它是观察操作 (不改变系统状态),
 // 因此不走 do 审计流水线 - 但仍要求 spawner 已配置
 func (g *Gate) WaitProcess(ctx context.Context, h ProcessHandle) (ExitInfo, error) {
 	if g.spawner == nil {
@@ -246,9 +246,9 @@ func (g *Gate) WaitProcess(ctx context.Context, h ProcessHandle) (ExitInfo, erro
 
 // ---- RemovePackageTree ----------------------------------------------------
 
-// RemovePackageTreeRequest 递归删除一个已安装 Package 的代码或数据目录（卸载用）
+// RemovePackageTreeRequest 递归删除一个已安装 Package 的代码或数据目录 (卸载用)
 //
-// Root 显式说明删的是 PackageRoot 还是 DataRoot - 不接受任意 root，避免一个字段
+// Root 显式说明删的是 PackageRoot 还是 DataRoot - 不接受任意 root, 避免一个字段
 // 就能递归删到 DataRoot/PackageRoot 之外
 type RemovePackageTreeRequest struct {
 	Root string // 必须等于inv.PackageRoot 或 inv.DataRoot
@@ -260,11 +260,11 @@ func (RemovePackageTreeRequest) Kind() Kind { return KindRemovePackageTree }
 func (r RemovePackageTreeRequest) Detail() string { return r.Path }
 
 func (r RemovePackageTreeRequest) Validate(inv *Invariants) error {
-	// Root 白名单：只能是这两个受管根之一
+	// Root 白名单: 只能是这两个受管根之一
 	if r.Root != inv.PackageRoot && r.Root != inv.DataRoot {
 		return fmt.Errorf("%w: remove root %q is neither PackageRoot nor DataRoot", ErrInvariantViolated, r.Root)
 	}
-	// Path 必须严格在 Root 之内（Root 自身不算 - 不允许删空整个根）
+	// Path 必须严格在 Root 之内 (Root 自身不算 - 不允许删空整个根)
 	return inv.CheckContained(r.Path, r.Root)
 }
 

@@ -1,11 +1,14 @@
-// 本文件是 manifest.json 的数据模型与结构性校验。
-// 这里只做形状是否合法的纯校验，不碰文件系统、不做签名/digest 复核
-// （签名见 signature.go/sigblock.go，digest 见 digest.go）
+// 本文件是 manifest.json 的数据模型与结构性校验.
+// 这里只做形状是否合法的纯校验, 不碰文件系统, 不做签名/digest 复核
 //
-// 安全边界：package_id / component.id 会被用作 UID 分配键、
-// 目录名、权限归属键与签名连续性键，且其中 package_id 会拼进记账文件名
-// （scan.go 的 stateFilePath）。因此这里对二者做严格字符集校验，把路径写逃逸
-// 这类洞堵在解析入口，而不是指望下游一定校验过
+//	(签名见 signature.go/sigblock.go, digest 见 digest.go)
+//
+// 安全边界: package_id / component.id 会被用作 UID 分配键,
+// 目录名, 权限归属键与签名连续性键, 且其中 package_id 会拼进记账文件名
+//
+//	(scan.go 的 stateFilePath). 因此这里对二者做严格字符集校验, 把路径写逃逸
+//
+// 这类洞堵在解析入口, 而不是指望下游一定校验过
 package pkgregistry
 
 import (
@@ -23,13 +26,13 @@ const manifestSchemaV1 = 1
 // CurrentAPILevel 是本内核实现的 Platform API Level
 //
 // manifest 的 min_nervus_api 高于它即无法在本机运行 - 两段解析的第一段会先
-// 用它给出 ErrPlatformTooOld，而不是让新 schema 的 manifest 撞上
+// 用它给出 ErrPlatformTooOld, 而不是让新 schema 的 manifest 撞上
 // DisallowUnknownFields 后报一个含义模糊的未知字段
 const CurrentAPILevel uint32 = 1
 
-// NSOS Package 的 canonical ABI token。这些是 NSOS 包格式标识，
-// 不是 Android NDK 名称（arm64-v8a 等），也不是裸 CPU 名（aarch64 等） - 后两类
-// 一律拒绝，不做归一化
+// NSOS Package 的 canonical ABI token. 这些是 NSOS 包格式标识,
+// 不是 Android NDK 名称 (arm64-v8a 等), 也不是裸 CPU 名 (aarch64 等) - 后两类
+// 一律拒绝, 不做归一化
 const (
 	ABILinuxArm64  = "linux-arm64"
 	ABILinuxArmv7  = "linux-armv7"
@@ -49,23 +52,23 @@ var (
 	// ErrEmptyPackageID manifest 缺少 Package ID
 	ErrEmptyPackageID = errors.New("pkgregistry: manifest has empty package id")
 
-	// ErrInvalidPackageID Package ID 含非法字符或形状（见 validPackageID）。
-	// 这不只是命名规范：package_id 会拼进记账文件名，非法字符等于路径写逃逸
+	// ErrInvalidPackageID Package ID 含非法字符或形状 (见 validPackageID).
+	// 这不只是命名规范: package_id 会拼进记账文件名, 非法字符等于路径写逃逸
 	ErrInvalidPackageID = errors.New("pkgregistry: manifest has invalid package id")
 
-	// ErrInvalidComponentID Component ID 含非法字符或形状（见 validComponentID）
+	// ErrInvalidComponentID Component ID 含非法字符或形状 (见 validComponentID)
 	ErrInvalidComponentID = errors.New("pkgregistry: manifest has invalid component id")
 
 	// ErrEmptyVersion manifest 缺少版本号
 	ErrEmptyVersion = errors.New("pkgregistry: manifest has empty version")
 
-	// ErrInvalidVersion version 含非法字符或形状（见 validVersion）。version 会被
-	// 拼成代码目录名 <PackageRoot>/<id>/<version>（install.go），非法字符等于让
+	// ErrInvalidVersion version 含非法字符或形状 (见 validVersion). version 会被
+	// 拼成代码目录名 <PackageRoot>/<id>/<version> (install.go), 非法字符等于让
 	// 敌意 manifest 用 version="../com.victim/2.0" 把代码写进别的 Package 命名空间
 	ErrInvalidVersion = errors.New("pkgregistry: manifest has invalid version")
 
-	// ErrMissingVersionCode manifest 缺少 version_code（或为 0）。升级裁决只看
-	// version_code，缺它就无法做防降级判断
+	// ErrMissingVersionCode manifest 缺少 version_code (或为 0). 升级裁决只看
+	// version_code, 缺它就无法做防降级判断
 	ErrMissingVersionCode = errors.New("pkgregistry: manifest has zero/absent version_code")
 
 	// ErrUnsupportedSchema manifest 声明了本版本不认识的 schema 版本号
@@ -74,13 +77,13 @@ var (
 	// ErrPlatformTooOld manifest 的 min_nervus_api 高于本机 Platform API Level
 	ErrPlatformTooOld = errors.New("pkgregistry: platform api level too old for this package")
 
-	// ErrInvalidABI supported_abis 为空、含未知或非 canonical token（含 Android NDK 名）
+	// ErrInvalidABI supported_abis 为空, 含未知或非 canonical token (含 Android NDK 名)
 	ErrInvalidABI = errors.New("pkgregistry: manifest has empty or invalid supported_abis")
 
 	// ErrNoComponents 一个 Package 必须至少声明一个 App 或 Service
 	ErrNoComponents = errors.New("pkgregistry: manifest declares no components")
 
-	// ErrNoDigests manifest 必须携带文件 digest 清单，否则完整性复核无从谈起
+	// ErrNoDigests manifest 必须携带文件 digest 清单, 否则完整性复核无从谈起
 	ErrNoDigests = errors.New("pkgregistry: manifest has no file digests")
 
 	// ErrDuplicateComponentID 同一 manifest 内两个 Component 共用一个 ID
@@ -95,14 +98,14 @@ var (
 	// ErrInvalidLaunchMode Component.LaunchMode 取值非法
 	ErrInvalidLaunchMode = errors.New("pkgregistry: component has invalid launch_mode")
 
-	// ErrInvalidCapability Component.Capabilities 里有不认识的 capability 名。
-	// 见 privilege.go：白名单挡的是打字错误与注入，不是策略筛选
+	// ErrInvalidCapability Component.Capabilities 里有不认识的 capability 名.
+	// 见 privilege.go: 白名单挡的是打字错误与注入, 不是策略筛选
 	ErrInvalidCapability = errors.New("pkgregistry: component requests an unknown capability")
 
 	// ErrInvalidAddressFamily Component.AddressFamilies 里有不认识的地址族名
 	ErrInvalidAddressFamily = errors.New("pkgregistry: component requests an unknown address family")
 
-	// ErrLaunchModeTypeMismatch launch_mode 与 type 冲突：app 不能 always-on，
+	// ErrLaunchModeTypeMismatch launch_mode 与 type 冲突: app 不能 always-on,
 	// service 不能 manual
 	ErrLaunchModeTypeMismatch = errors.New("pkgregistry: launch_mode incompatible with component type")
 
@@ -113,17 +116,17 @@ var (
 	ErrInvalidVisibility = errors.New("pkgregistry: export has invalid visibility")
 
 	// ErrEntryNotInDigests Component.Entry 未被 digests 清单覆盖 - 入口文件必须
-	// 被签名/完整性复核覆盖，否则等于允许运行一个未经校验的可执行文件
+	// 被签名/完整性复核覆盖, 否则等于允许运行一个未经校验的可执行文件
 	ErrEntryNotInDigests = errors.New("pkgregistry: component entry not covered by digests")
 
 	// ErrIconNotInDigests manifest.icon 未被 digests 清单覆盖
 	ErrIconNotInDigests = errors.New("pkgregistry: icon not covered by digests")
 
-	// ErrInvalidProviderArtifacts Provider descriptor/schema 引用不完整、不安全、
-	// 指向同一文件或未被 manifest digest 覆盖。
+	// ErrInvalidProviderArtifacts Provider descriptor/schema 引用不完整, 不安全,
+	// 指向同一文件或未被 manifest digest 覆盖.
 	ErrInvalidProviderArtifacts = errors.New("pkgregistry: invalid provider artifacts")
 
-	// ErrUnsafeRelPath 一个应为包内相对路径的字段解析后逃出了包目录，
+	// ErrUnsafeRelPath 一个应为包内相对路径的字段解析后逃出了包目录,
 	// 或本身就是绝对路径
 	ErrUnsafeRelPath = errors.New("pkgregistry: path escapes package directory")
 )
@@ -138,7 +141,7 @@ const (
 
 // Runtime 是 Component 的进程入口启动方式
 //
-// 注意：runtime 描述进程入口由谁启动，不是能不能有原生代码 - 两种 runtime
+// 注意: runtime 描述进程入口由谁启动, 不是能不能有原生代码 - 两种 runtime
 // 都可以携带 lib/<abi>/*.so 并经 JNI/Panama 或直接链接加载
 type Runtime string
 
@@ -153,11 +156,11 @@ func (r Runtime) valid() bool { return r == RuntimeNative || r == RuntimeJVM }
 type LaunchMode string
 
 const (
-	// LaunchAlwaysOn 内核就绪后拉起，崩溃退避重启（仅 service）
+	// LaunchAlwaysOn 内核就绪后拉起, 崩溃退避重启 (仅 service)
 	LaunchAlwaysOn LaunchMode = "always-on"
-	// LaunchOnDemand Resolve 到其 endpoint 时拉起，空闲超时停
+	// LaunchOnDemand Resolve 到其 endpoint 时拉起, 空闲超时停
 	LaunchOnDemand LaunchMode = "on-demand"
-	// LaunchManual 仅显式请求（Launcher 拉起 app）
+	// LaunchManual 仅显式请求 (Launcher 拉起 app)
 	LaunchManual LaunchMode = "manual"
 )
 
@@ -167,8 +170,8 @@ func (l LaunchMode) valid() bool {
 
 // Criticality 是 Component 的重要性分级
 //
-// 用有序字符串而不是在 internal/service 里另存一份 uint8 枚举：manifest 是
-// criticality 的真源，两处各存一份会漂。service 的升级链用 Rank 比较
+// 用有序字符串而不是在 internal/service 里另存一份 uint8 枚举: manifest 是
+// criticality 的真源, 两处各存一份会漂. service 的升级链用 Rank 比较
 type Criticality string
 
 const (
@@ -181,7 +184,7 @@ func (c Criticality) valid() bool {
 	return c == CriticalityOptional || c == CriticalityRequired || c == CriticalityVital
 }
 
-// Rank 返回 criticality 的有序级别，供 service 升级链比较（optional<required<vital）
+// Rank 返回 criticality 的有序级别, 供 service 升级链比较 (optional<required<vital)
 func (c Criticality) Rank() int {
 	switch c {
 	case CriticalityVital:
@@ -197,9 +200,9 @@ func (c Criticality) Rank() int {
 type Visibility string
 
 const (
-	// VisibilityPackage 仅同 Package 内其它 Component 可 Resolve（需 perm.service.register.private）
+	// VisibilityPackage 仅同 Package 内其它 Component 可 Resolve (需 perm.service.register.private)
 	VisibilityPackage Visibility = "package"
-	// VisibilityPublic 跨 Package 可见（需 perm.service.register，OEM+）
+	// VisibilityPublic 跨 Package 可见 (需 perm.service.register, OEM+)
 	VisibilityPublic Visibility = "public"
 )
 
@@ -222,11 +225,11 @@ type RuntimeDeps struct {
 	MinJavaRelease int `json:"min_java_release,omitempty"`
 }
 
-// ProviderArtifactsRef 指向签名包内的数据驱动 Provider 契约。
+// ProviderArtifactsRef 指向签名包内的数据驱动 Provider 契约.
 //
-// 两个文件都必须被 Digests 覆盖；运行时 RegisterEndpoint 不能提交或替换它们。
-// Descriptor 是 ProviderDescriptor 的确定性 protobuf bytes，Schemas 是
-// InterfaceSchemaBundleSet 的确定性 protobuf bytes。
+// 两个文件都必须被 Digests 覆盖; 运行时 RegisterEndpoint 不能提交或替换它们.
+// Descriptor 是 ProviderDescriptor 的确定性 protobuf bytes, Schemas 是
+// InterfaceSchemaBundleSet 的确定性 protobuf bytes.
 type ProviderArtifactsRef struct {
 	Descriptor string `json:"descriptor"`
 	Schemas    string `json:"schemas"`
@@ -234,8 +237,8 @@ type ProviderArtifactsRef struct {
 
 // ComponentLimits 是传给 systemd 的资源上限
 //
-// 内核按 trust 钳制这些值的上限，Ordinary 包不能给自己开无限额度 - 钳制在
-// internal/service 落地，这里只做形状承载
+// 内核按 trust 钳制这些值的上限, Ordinary 包不能给自己开无限额度 - 钳制在
+// internal/service 落地, 这里只做形状承载
 type ComponentLimits struct {
 	MemoryMaxMB     uint64 `json:"memory_max_mb,omitempty"`
 	CPUQuotaPercent uint32 `json:"cpu_quota_percent,omitempty"`
@@ -257,54 +260,54 @@ type Component struct {
 	IdleTimeout  int             `json:"idle_timeout_sec,omitempty"` // 仅 on-demand 有效
 	Limits       ComponentLimits `json:"limits,omitempty"`
 
-	// Privileged 是「把沙箱能给的都给这个组件」的总开关：展开成全部
-	// capability + 全部额外地址族 + 设备节点访问。
+	// Privileged 是"把沙箱能给的都给这个组件"的总开关: 展开成全部
+	// capability + 全部额外地址族 + 设备节点访问.
 	//
-	// 存在的理由是【它替代的东西更糟】。没有它，一个要驱动硬件的系统服务
-	// 得逐条列出自己需要哪些 capability——列漏一条的症状是运行期某个操作
-	// EPERM，而错误信息不会说是缺哪个 capability。于是实践中人们会去抄一份
-	// 更长的列表，最后每个包都带着一份没人看得懂的清单。一个诚实的
-	// "privileged": true 至少让 review 的人一眼知道这个包不受沙箱约束。
+	// 存在的理由是它替代的东西更糟. 没有它, 一个要驱动硬件的系统服务
+	// 得逐条列出自己需要哪些 capability - 列漏一条的症状是运行期某个操作
+	// EPERM, 而错误信息不会说是缺哪个 capability. 于是实践中人们会去抄一份
+	// 更长的列表, 最后每个包都带着一份没人看得懂的清单. 一个诚实的
+	// "privileged": true 至少让 review 的人一眼知道这个包不受沙箱约束.
 	//
-	// 【它不等于 root】：进程仍以 App UID 运行、仍有 SystemCallFilter、
-	// ProtectSystem=strict 与各自的数据目录隔离。但拿到 CAP_SETUID 的进程
-	// 可以把自己变成 root，所以实际效果接近——按「这个包完全可信」来判断，
-	// 不要按「稍微多一点权限」。
+	// 它不等于 root: 进程仍以 App UID 运行, 仍有 SystemCallFilter,
+	// ProtectSystem=strict 与各自的数据目录隔离. 但拿到 CAP_SETUID 的进程
+	// 可以把自己变成 root, 所以实际效果接近 - 按"这个包完全可信"来判断,
+	// 不要按"稍微多一点权限".
 	//
-	// 与 Capabilities/AddressFamilies 同一条规则：【只有系统镜像来源的包
-	// 拿得到】。动态安装的包填了会被忽略。
+	// 与 Capabilities/AddressFamilies 同一条规则: 只有系统镜像来源的包
+	// 拿得到. 动态安装的包填了会被忽略.
 	Privileged bool `json:"privileged,omitempty"`
 
-	// Capabilities 是本组件请求的 Linux capability，如 "CAP_NET_ADMIN"。
+	// Capabilities 是本组件请求的 Linux capability, 如 "CAP_NET_ADMIN".
 	//
-	// Privileged 为 true 时本字段不必填（会被全集覆盖）。想精确控制就填它，
-	// 那比 Privileged 好——但请确认列全了。
+	// Privileged 为 true 时本字段不必填 (会被全集覆盖). 想精确控制就填它,
+	// 那比 Privileged 好 - 但请确认列全了.
 	//
-	// 【只有系统镜像来源的包拿得到】。动态安装的包填了也会被 service 层忽略，
-	// 与 AllowDeviceAccess 同一条规则——把 capability 交给任意第三方包，
-	// 等于沙箱不存在。
+	// 只有系统镜像来源的包拿得到. 动态安装的包填了也会被 service 层忽略,
+	// 与 AllowDeviceAccess 同一条规则 - 把 capability 交给任意第三方包,
+	// 等于沙箱不存在.
 	//
-	// 为什么必须有这条口子：组件以 App UID（20000-59999）运行，非 root、
-	// 且沙箱不给任何 capability。驱动无线电（蓝牙 rfkill、hci up）、配置网络
-	// 这类操作因此一律 EPERM。而【不能改成让组件跑 root】——ipc 握手会
-	// CheckUID 拒绝 root 对端（internal/ipc/ipc.go），跑 root 的组件根本连不上
-	// 控制面。capability 是唯一不破坏身份模型的路。
+	// 为什么必须有这条口子: 组件以 App UID (20000-59999) 运行, 非 root,
+	// 且沙箱不给任何 capability. 驱动无线电 (蓝牙 rfkill, hci up), 配置网络
+	// 这类操作因此一律 EPERM. 而不能改成让组件跑 root - ipc 握手会
+	// CheckUID 拒绝 root 对端 (internal/ipc/ipc.go), 跑 root 的组件根本连不上
+	// 控制面. capability 是唯一不破坏身份模型的路.
 	Capabilities []string `json:"capabilities,omitempty"`
 
-	// AddressFamilies 是本组件请求额外放行的 socket 地址族，如 "AF_BLUETOOTH"。
+	// AddressFamilies 是本组件请求额外放行的 socket 地址族, 如 "AF_BLUETOOTH".
 	//
-	// 与 Capabilities 分开是因为它们是【两道互不相干的墙】：
-	// RestrictAddressFamilies 是 seccomp 层的，再多 capability 也绕不过去——
-	// socket(AF_BLUETOOTH, ...) 会直接 EAFNOSUPPORT。只给 capability 不给
-	// 地址族，蓝牙一样打不开，而错误看起来像「协议不支持」，与权限毫无关系。
+	// 与 Capabilities 分开是因为它们是两道互不相干的墙:
+	// RestrictAddressFamilies 是 seccomp 层的, 再多 capability 也绕不过去 -
+	// socket(AF_BLUETOOTH,...) 会直接 EAFNOSUPPORT. 只给 capability 不给
+	// 地址族, 蓝牙一样打不开, 而错误看起来像"协议不支持", 与权限毫无关系.
 	//
-	// 同样只有系统镜像来源的包拿得到。
+	// 同样只有系统镜像来源的包拿得到.
 	AddressFamilies []string `json:"address_families,omitempty"`
 }
 
 // Manifest 是 manifest.json 的解析结果
 //
-// Signer 故意不是一个 JSON 字段：它来自对分离签名的独立验证（见 signature.go），
+// Signer 故意不是一个 JSON 字段: 它来自对分离签名的独立验证 (见 signature.go),
 // 不能让 manifest 自己在 JSON 里填一个 signer 字符串就自证身份
 type Manifest struct {
 	Schema          int                   `json:"schema"`
@@ -327,7 +330,7 @@ type Manifest struct {
 	Signer string `json:"-"`
 }
 
-// Component 按 ID 查一个组件，供 service/停用逻辑使用
+// Component 按 ID 查一个组件, 供 service/停用逻辑使用
 func (m Manifest) Component(id string) (Component, bool) {
 	for _, c := range m.Components {
 		if c.ID == id {
@@ -337,14 +340,14 @@ func (m Manifest) Component(id string) (Component, bool) {
 	return Component{}, false
 }
 
-// ParseManifest 反序列化并做结构性校验，失败即整体拒绝
+// ParseManifest 反序列化并做结构性校验, 失败即整体拒绝
 //
-// 两段解析：
-//  1. 宽松解码，先看 schema 与 min_nervus_api - 好在未知字段之前给出
-//     schema 不认识 / 平台太旧这类更准确、可诊断的错误；否则新版本 manifest
+// 两段解析:
+//  1. 宽松解码, 先看 schema 与 min_nervus_api - 好在未知字段之前给出
+//     schema 不认识 / 平台太旧这类更准确, 可诊断的错误; 否则新版本 manifest
 //     在旧设备上只会撞上 DisallowUnknownFields 报一个含义模糊的未知字段
-//  2. 严格解码全量（DisallowUnknownFields）：manifest 里出现本版本不认识的字段，
-//     多半意味着更新版本 schema 写的 manifest，静默忽略等于假装理解，应当拒绝
+//  2. 严格解码全量 (DisallowUnknownFields): manifest 里出现本版本不认识的字段,
+//     多半意味着更新版本 schema 写的 manifest, 静默忽略等于假装理解, 应当拒绝
 func ParseManifest(data []byte) (Manifest, error) {
 	var probe struct {
 		Schema       int    `json:"schema"`
@@ -375,7 +378,7 @@ func ParseManifest(data []byte) (Manifest, error) {
 }
 
 func (m Manifest) validate() error {
-	// ---- 顶层身份与结构（保持既有负测的触发顺序：id/version/components/digests）----
+	// ---- 顶层身份与结构 (保持既有负测的触发顺序: id/version/components/digests) ----
 	if m.PackageID == "" {
 		return ErrEmptyPackageID
 	}
@@ -402,9 +405,9 @@ func (m Manifest) validate() error {
 	}
 
 	// ---- 组件校验分两趟 ----
-	// 第一趟只做身份结构：id 合法性、去重、type、入口路径安全与 digest 覆盖。
-	// 第二趟才做字段取值：runtime/launch_mode/criticality/exports。分开是为了让
-	// 重复 ID / 非法 type / 路径逃逸这类结构错误在任何字段取值错误之前先被报出，
+	// 第一趟只做身份结构: id 合法性, 去重, type, 入口路径安全与 digest 覆盖.
+	// 第二趟才做字段取值: runtime/launch_mode/criticality/exports. 分开是为了让
+	// 重复 ID / 非法 type / 路径逃逸这类结构错误在任何字段取值错误之前先被报出,
 	// 诊断更贴近真正的问题
 	seenID := make(map[string]struct{}, len(m.Components))
 	for _, c := range m.Components {
@@ -436,7 +439,7 @@ func (m Manifest) validate() error {
 		if !c.LaunchMode.valid() {
 			return fmt.Errorf("%w: component %q launch_mode %q", ErrInvalidLaunchMode, c.ID, c.LaunchMode)
 		}
-		// app 不能 always-on；service 不能 manual
+		// app 不能 always-on; service 不能 manual
 		if c.Type == ComponentApp && c.LaunchMode == LaunchAlwaysOn {
 			return fmt.Errorf("%w: app %q cannot be always-on", ErrLaunchModeTypeMismatch, c.ID)
 		}
@@ -455,14 +458,14 @@ func (m Manifest) validate() error {
 		if c.NativeLibDir != "" && !validRelPath(c.NativeLibDir) {
 			return fmt.Errorf("%w: component %q native_lib_dir %q", ErrUnsafeRelPath, c.ID, c.NativeLibDir)
 		}
-		// capability 与地址族的名字会原样进 systemd 的 unit 属性，必须先过白名单。
+		// capability 与地址族的名字会原样进 systemd 的 unit 属性, 必须先过白名单.
 		// 见 privilege.go
 		if err := validateComponentPrivileges(c); err != nil {
 			return err
 		}
 	}
 
-	// ---- 顶层必填新字段（放在组件校验之后，让组件结构错误优先暴露）----
+	// ---- 顶层必填新字段 (放在组件校验之后, 让组件结构错误优先暴露) ----
 	if m.VersionCode == 0 {
 		return ErrMissingVersionCode
 	}
@@ -506,12 +509,12 @@ func (m Manifest) validate() error {
 	return nil
 }
 
-// validPackageID 报告 s 是否是一个安全的 Package ID：反向 DNS 风格
-// seg(.seg)*，每段 [a-z][a-z0-9_]*，1..8 段，总长 <= 128
+// validPackageID 报告 s 是否是一个安全的 Package ID: 反向 DNS 风格
+// seg(.seg)*, 每段 [a-z][a-z0-9_]*, 1..8 段, 总长 <= 128
 //
-// 这不只是命名规范：package_id 会被 scan.go 的 stateFilePath 拼进记账文件名，
-// 因此拒绝 '.' '..' '/' '\' NUL、大写、空段与超长。
-// 只允许小写是刻意的 - 大小写不敏感文件系统上 "Foo" 与 "foo" 会指向同一文件，
+// 这不只是命名规范: package_id 会被 scan.go 的 stateFilePath 拼进记账文件名,
+// 因此拒绝 '.' '..' '/' '\' NUL, 大写, 空段与超长.
+// 只允许小写是刻意的 - 大小写不敏感文件系统上 "Foo" 与 "foo" 会指向同一文件,
 // 埋下两个 Package 争一个记账文件的隐患
 func validPackageID(s string) bool {
 	if s == "" || len(s) > 128 {
@@ -529,7 +532,7 @@ func validPackageID(s string) bool {
 	return true
 }
 
-// validComponentID 报告 s 是否是一个安全的 Component ID：单段 [a-z][a-z0-9_]*， <= 64
+// validComponentID 报告 s 是否是一个安全的 Component ID: 单段 [a-z][a-z0-9_]*, <= 64
 func validComponentID(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false
@@ -539,10 +542,10 @@ func validComponentID(s string) bool {
 
 // validVersion 报告 s 是否是一个安全的版本字符串
 //
-// version 会被拼成代码目录名 <PackageRoot>/<id>/<version>，因此必须按目录名
-// 安全性收紧：只允许 [A-Za-z0-9._+-]，长度 <= 64，
-// 且拒绝 "."/".." 与含斜杠、反斜杠、NUL 的形状。否则 version="../com.victim/2.0"
-// 经 filepath.Join 清理后会落进别的 Package 命名空间（ 同类洞）
+// version 会被拼成代码目录名 <PackageRoot>/<id>/<version>, 因此必须按目录名
+// 安全性收紧: 只允许 [A-Za-z0-9._+-], 长度 <= 64,
+// 且拒绝 "."/".." 与含斜杠, 反斜杠, NUL 的形状. 否则 version="../com.victim/2.0"
+// 经 filepath.Join 清理后会落进别的 Package 命名空间 (同类洞)
 func validVersion(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false
@@ -575,7 +578,7 @@ func validIDSegment(seg string) bool {
 		case c >= 'a' && c <= 'z':
 			// ok
 		case i > 0 && (c >= '0' && c <= '9' || c == '_'):
-			// ok（数字与下划线不能作首字符）
+			// ok (数字与下划线不能作首字符)
 		default:
 			return false
 		}
@@ -583,10 +586,10 @@ func validIDSegment(seg string) bool {
 	return true
 }
 
-// validRelPath 报告 p 是否是一个安全的包内相对路径：非空、非绝对路径，
+// validRelPath 报告 p 是否是一个安全的包内相对路径: 非空, 非绝对路径,
 // 且 Clean 之后不会以 ".." 逃出包目录
 //
-// 这是纯字符串校验；真正的逃逸防护要等安装提交时由 authority 用
+// 这是纯字符串校验; 真正的逃逸防护要等安装提交时由 authority 用
 // openat2(RESOLVE_BENEATH) 兜底
 func validRelPath(p string) bool {
 	if p == "" || path.IsAbs(p) {

@@ -3,9 +3,9 @@
 // 本文件是全仓库可直接触碰 Linux 特权接口之一
 // .golangci.yml 的 depguard 规则据此放行 syscall / x/sys/unix / os/exec
 //
-// 路径解析纪律：invariant.go 的字符串检查挡不住 symlink 逃逸，真正的保证在这里
-// 由内核完成 - 一律先 open root 拿 fd，再用 openat2(RESOLVE_BENEATH |
-// RESOLVE_NO_SYMLINKS) 做 fd 相对解析；解析成功后只对 fd / (dirfd, leaf) 操作
+// 路径解析纪律: invariant.go 的字符串检查挡不住 symlink 逃逸, 真正的保证在这里
+// 由内核完成 - 一律先 open root 拿 fd, 再用 openat2(RESOLVE_BENEATH |
+// RESOLVE_NO_SYMLINKS) 做 fd 相对解析; 解析成功后只对 fd / (dirfd, leaf) 操作
 // 不再触碰完整字符串路径
 package authority
 
@@ -21,15 +21,15 @@ import (
 )
 
 // resolveParent 打开 path 的父目录并返回 (父目录 fd, 末段名
-// 调用方负责 close 返回的 fd。前提：Validate 已证明 path 位于 root 之内
+// 调用方负责 close 返回的 fd. 前提: Validate 已证明 path 位于 root 之内
 func resolveParent(root, p string) (int, string, error) {
 	rel, err := containedRel(p, root)
 	if err != nil {
-		// Validate 已查过，到这还失败说明调用序被破坏，按错误返回而非 panic
+		// Validate 已查过, 到这还失败说明调用序被破坏, 按错误返回而非 panic
 		return -1, "", err
 	}
 
-	// O_PATH：只要求路径解析权，不要求读权限；O_NOFOLLOW：root 自身也不许是 symlink
+	// O_PATH: 只要求路径解析权, 不要求读权限; O_NOFOLLOW: root 自身也不许是 symlink
 	rootFD, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", fmt.Errorf("open root %s: %w", root, err)
@@ -52,7 +52,7 @@ func resolveParent(root, p string) (int, string, error) {
 	return parentFD, leaf, nil
 }
 
-// splitRel 把斜杠相对路径拆成父目录和末段。rel 无末段斜杠、已 Clean
+// splitRel 把斜杠相对路径拆成父目录和末段. rel 无末段斜杠, 已 Clean
 func splitRel(rel string) (dir, leaf string) {
 	for i := len(rel) - 1; i >= 0; i-- {
 		if rel[i] == '/' {
@@ -69,14 +69,14 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 	}
 	defer func() { _ = unix.Close(parentFD) }()
 
-	// mkdirat 对末段不跟随 symlink：若 leaf 已是链接则 EEXIST，天然安全。
-	// mkdirat 成功 = 本调用创建了这个目录（若已存在会 EEXIST），因此后续
-	// 任一步失败时，回滚删除它是安全的 - 我们删的一定是自己刚建的
+	// mkdirat 对末段不跟随 symlink: 若 leaf 已是链接则 EEXIST, 天然安全.
+	// mkdirat 成功 = 本调用创建了这个目录 (若已存在会 EEXIST), 因此后续
+	// 任一步失败时, 回滚删除它是安全的 - 我们删的一定是自己刚建的
 	if err := unix.Mkdirat(parentFD, leaf, req.Perm); err != nil {
 		if errors.Is(err, unix.EEXIST) {
-			// 目录已存在。对幂等调用方（启动扫描时逐包补齐运行前置）这是正常
-			// 结果，包成 ErrAlreadyExists 让它们能识别，而不必自己判 EEXIST
-			// ——那会把 x/sys/unix 拖进业务包，depguard 不允许。
+			// 目录已存在. 对幂等调用方 (启动扫描时逐包补齐运行前置) 这是正常
+			// 结果, 包成 ErrAlreadyExists 让它们能识别, 而不必自己判 EEXIST
+			// - 那会把 x/sys/unix 拖进业务包, depguard 不允许.
 			return DirHandle{}, fmt.Errorf("%w: %s", ErrAlreadyExists, leaf)
 		}
 		return DirHandle{}, fmt.Errorf("mkdirat %s: %w", leaf, err)
@@ -84,14 +84,14 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 
 	dh, err := g.finishDataDir(parentFD, leaf, req)
 	if err != nil {
-		// 回滚：把刚建的空目录删掉。不回滚会留下 root 所有/权限不完整的半成品，
-		// 而重试又会在 mkdirat 处撞 EEXIST，从此永远修不好
+		// 回滚: 把刚建的空目录删掉. 不回滚会留下 root 所有/权限不完整的半成品,
+		// 而重试又会在 mkdirat 处撞 EEXIST, 从此永远修不好
 		//
-		// AT_REMOVEDIR 只删空目录：若 leaf 在这中间被替换成文件或非空目录
-		// （并发攻击），rmdir 会安全失败、绝不误删。相对 parentFD 操作，
-		// 与创建同一路径解析口径，不跟随 symlink
+		// AT_REMOVEDIR 只删空目录: 若 leaf 在这中间被替换成文件或非空目录
+		//  (并发攻击), rmdir 会安全失败, 绝不误删. 相对 parentFD 操作,
+		// 与创建同一路径解析口径, 不跟随 symlink
 		if rmErr := unix.Unlinkat(parentFD, leaf, unix.AT_REMOVEDIR); rmErr != nil {
-			// 回滚也失败：两个错误都带出去，别让回滚失败掩盖主因
+			// 回滚也失败: 两个错误都带出去, 别让回滚失败掩盖主因
 			return DirHandle{}, fmt.Errorf("%w (rollback rmdir %s failed: %v)", err, leaf, rmErr)
 		}
 		return DirHandle{}, err
@@ -101,8 +101,8 @@ func (g *Gate) osCreateDataDir(_ context.Context, req CreateDataDirRequest) (Dir
 
 // finishDataDir 打开刚建的目录并设定属主与权限
 //
-// 拆成独立函数是为了让 osCreateDataDir 有一个单一的失败出口去做回滚：这里返回
-// error，那里就删目录。全部对 fd 操作（Openat2 后 Fchown/Fchmod），杜绝 TOCTOU
+// 拆成独立函数是为了让 osCreateDataDir 有一个单一的失败出口去做回滚: 这里返回
+// error, 那里就删目录. 全部对 fd 操作 (Openat2 后 Fchown/Fchmod), 杜绝 TOCTOU
 func (g *Gate) finishDataDir(parentFD int, leaf string, req CreateDataDirRequest) (DirHandle, error) {
 	how := unix.OpenHow{
 		Flags:   unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC,
@@ -117,7 +117,7 @@ func (g *Gate) finishDataDir(parentFD int, leaf string, req CreateDataDirRequest
 	if err := unix.Fchown(fd, int(req.UID), int(req.GID)); err != nil {
 		return DirHandle{}, fmt.Errorf("fchown: %w", err)
 	}
-	// mkdir 的 mode 会被进程 umask 削减，必须显式 chmod 回写成请求值
+	// mkdir 的 mode 会被进程 umask 削减, 必须显式 chmod 回写成请求值
 	if err := unix.Fchmod(fd, req.Perm); err != nil {
 		return DirHandle{}, fmt.Errorf("fchmod: %w", err)
 	}
@@ -131,7 +131,7 @@ func (g *Gate) osSetOwner(_ context.Context, req SetOwnerRequest) (struct{}, err
 	}
 	defer func() { _ = unix.Close(parentFD) }()
 
-	// AT_SYMLINK_NOFOLLOW：目标是 symlink 时改链接本身的属主，不穿透到链接目标
+	// AT_SYMLINK_NOFOLLOW: 目标是 symlink 时改链接本身的属主, 不穿透到链接目标
 	if err := unix.Fchownat(parentFD, leaf, int(req.UID), int(req.GID), unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return struct{}{}, fmt.Errorf("fchownat %s: %w", leaf, err)
 	}
@@ -141,13 +141,13 @@ func (g *Gate) osSetOwner(_ context.Context, req SetOwnerRequest) (struct{}, err
 // osInstallVerifiedPackage 把 pkgregistry 已复核过的 staging 目录原子提交为
 // <PackageRoot>/<id>/<version>
 //
-// <id> 这一级只是版本分组的容器，不是权限意义上的独立对象 - 它没有自己的
-// 属主/权限语义，首次安装某个 Package 时按需 mkdirat（EEXIST 时忽略）即可，
+// <id> 这一级只是版本分组的容器, 不是权限意义上的独立对象 - 它没有自己的
+// 属主/权限语义, 首次安装某个 Package 时按需 mkdirat (EEXIST 时忽略) 即可,
 // 不必像 CreateDataDir 那样要求父目录必须显式预先存在
 func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPackageRequest) (struct{}, error) {
 	rel, err := containedRel(req.DestDir, g.inv.PackageRoot)
 	if err != nil {
-		// Validate 已经查过，到这还失败说明调用序被破坏
+		// Validate 已经查过, 到这还失败说明调用序被破坏
 		return struct{}{}, err
 	}
 	idDir, version := splitRel(rel)
@@ -176,15 +176,15 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 	}
 	defer func() { _ = unix.Close(idFD) }()
 
-	// 默认 RENAME_NOREPLACE：目标版本目录已存在时整体失败、不静默覆盖 - 同一个
-	// <id>/<version> 出现第二次通常意味着重复提交或版本号复用，都不该被
-	// 无声吞掉。源端用绝对路径：renameat2(2) 里 pathname 为绝对路径时对应
-	// 的 dirfd 被忽略，staging 目录自身的隔离由 pkgmanagerd 的独立 UID/
-	// mount namespace 负责，不在本次调用的职责范围内
+	// 默认 RENAME_NOREPLACE: 目标版本目录已存在时整体失败, 不静默覆盖 - 同一个
+	// <id>/<version> 出现第二次通常意味着重复提交或版本号复用, 都不该被
+	// 无声吞掉. 源端用绝对路径: renameat2(2) 里 pathname 为绝对路径时对应
+	// 的 dirfd 被忽略, staging 目录自身的隔离由 pkgmanagerd 的独立 UID/
+	// mount namespace 负责, 不在本次调用的职责范围内
 	//
-	// ReplaceExisting 时改用 RENAME_EXCHANGE：两棵树【原子对调】，新树就位的
-	// 同一瞬间旧树落到 staging 路径上。不用「先删旧再 rename」——那中间有一个
-	// 包不存在的窗口，此刻掉电就得到一个记账说装着、目录却没有的系统。
+	// ReplaceExisting 时改用 RENAME_EXCHANGE: 两棵树原子对调, 新树就位的
+	// 同一瞬间旧树落到 staging 路径上. 不用"先删旧再 rename" - 那中间有一个
+	// 包不存在的窗口, 此刻掉电就得到一个记账说装着, 目录却没有的系统.
 	flags := uint(unix.RENAME_NOREPLACE)
 	if req.ReplaceExisting {
 		flags = unix.RENAME_EXCHANGE
@@ -194,25 +194,25 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 	}
 
 	if err := g.finishInstalledPackage(idFD, version); err != nil {
-		// 回滚：把刚移入的目录 rename 回 staging 原路径。用 rename 而不是
-		// 递归删除 - 这已经是一整棵从 pkgmanagerd 移过来的目录树，递归删除
+		// 回滚: 把刚移入的目录 rename 回 staging 原路径. 用 rename 而不是
+		// 递归删除 - 这已经是一整棵从 pkgmanagerd 移过来的目录树, 递归删除
 		// 一个属主可能已经改了一半的目录风险更高
 		//
-		// 回滚要用与去程【相同】的 flag：NOREPLACE 去程成功保证了 staging 原
-		// 路径此刻空闲；而 EXCHANGE 去程把旧树留在了那里，再用 NOREPLACE 回滚
-		// 必然 EEXIST，等于回滚不了——那会留下一个新树已就位但没 finish 的包
+		// 回滚要用与去程相同的 flag: NOREPLACE 去程成功保证了 staging 原
+		// 路径此刻空闲; 而 EXCHANGE 去程把旧树留在了那里, 再用 NOREPLACE 回滚
+		// 必然 EEXIST, 等于回滚不了 - 那会留下一个新树已就位但没 finish 的包
 		if rerr := unix.Renameat2(idFD, version, unix.AT_FDCWD, req.StagingDir, flags); rerr != nil {
 			return struct{}{}, fmt.Errorf("%w (rollback rename to staging failed: %v)", err, rerr)
 		}
 		return struct{}{}, err
 	}
 
-	// EXCHANGE 之后旧树落在 staging 路径上，删掉它。
+	// EXCHANGE 之后旧树落在 staging 路径上, 删掉它.
 	//
-	// 【失败不算安装失败】：新版本已经原子就位、finish 也过了，安装这件事
-	// 已经成立。删不掉只是漏一棵旧树在 staging 根下，admin 的 sweepStaleStaging
-	// 会在下一次 begin-staging 时回收。为此把一次已成功的安装报成失败，会让
-	// 调用方重装，而重装会再走一遍同样的路——把一个磁盘回收问题放大成死循环
+	// 失败不算安装失败: 新版本已经原子就位, finish 也过了, 安装这件事
+	// 已经成立. 删不掉只是漏一棵旧树在 staging 根下, admin 的 sweepStaleStaging
+	// 会在下一次 begin-staging 时回收. 为此把一次已成功的安装报成失败, 会让
+	// 调用方重装, 而重装会再走一遍同样的路 - 把一个磁盘回收问题放大成死循环
 	if req.ReplaceExisting {
 		if rerr := os.RemoveAll(req.StagingDir); rerr != nil && g.log != nil {
 			g.log.Warn("authority: replaced package tree left behind in staging",
@@ -224,13 +224,13 @@ func (g *Gate) osInstallVerifiedPackage(_ context.Context, req InstallVerifiedPa
 
 // finishInstalledPackage 收紧刚提交的版本目录的顶层属主与权限
 //
-// 属主收紧为 nervud 自身（生产环境即运行 nervud 的账户，通常是 root），
+// 属主收紧为 nervud 自身 (生产环境即运行 nervud 的账户, 通常是 root),
 // 不是该 Package 的 App UID - 只读代码目录必须让"谁也不能是自己代码的属主"
-// 这条底线成立（"App 和 Service 都不能修改自己的可执行代码"），
-// 属主若是 App 自己的 UID，被攻破的 App 就能 chmod 回可写、篡改自己的代码
+// 这条底线成立 ("App 和 Service 都不能修改自己的可执行代码"),
+// 属主若是 App 自己的 UID, 被攻破的 App 就能 chmod 回可写, 篡改自己的代码
 //
-// 只收紧顶层：递归收紧树内每个文件的属主/权限是更完整的加固，但 pkgmanagerd
-// 本身尚未落地、staging 的隔离模型还是雏形，这条链路整体仍处于 v1 起步阶段，
+// 只收紧顶层: 递归收紧树内每个文件的属主/权限是更完整的加固, 但 pkgmanagerd
+// 本身尚未落地, staging 的隔离模型还是雏形, 这条链路整体仍处于 v1 起步阶段,
 // 留 TODO 做深度加固而不是现在就仓促实现一个未经充分推敲的递归遍历
 func (g *Gate) finishInstalledPackage(parentFD int, leaf string) error {
 	how := unix.OpenHow{
@@ -253,13 +253,13 @@ func (g *Gate) finishInstalledPackage(parentFD int, leaf string) error {
 }
 
 func (g *Gate) osReboot(ctx context.Context, req RebootRequest) (struct{}, error) {
-	// 特例：reboot(2) 成功即不返回，do 里 run 之后的那条审计永远走不到
-	// 机器为什么重启了是审计必须能回答的问题，所以本操作在执行前先落一条
-	// intent 记录。这是全包唯一允许在 run 内部直接调 auditor 的地方，原因如上
+	// 特例: reboot(2) 成功即不返回, do 里 run 之后的那条审计永远走不到
+	// 机器为什么重启了是审计必须能回答的问题, 所以本操作在执行前先落一条
+	// intent 记录. 这是全包唯一允许在 run 内部直接调 auditor 的地方, 原因如上
 	g.auditor.Record(ctx, audit.Event{
 		Action: "Reboot.initiated", Subject: "kernel", Detail: req.Reason,
 	})
-	// sync 后立即 reboot：reboot(2) 立即生效，不给任何上层留 flush 机会
+	// sync 后立即 reboot: reboot(2) 立即生效, 不给任何上层留 flush 机会
 	unix.Sync()
 	if err := unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART); err != nil {
 		return struct{}{}, fmt.Errorf("reboot: %w", err)
@@ -267,22 +267,22 @@ func (g *Gate) osReboot(ctx context.Context, req RebootRequest) (struct{}, error
 	return struct{}{}, nil
 }
 
-// osPower 经 systemd 发起有序重启/关机。
+// osPower 经 systemd 发起有序重启/关机.
 func (g *Gate) osPower(ctx context.Context, req PowerRequest) (struct{}, error) {
 	pm, ok := g.spawner.(PowerManager)
 	if !ok {
-		// 没有 systemd 后端（测试替身/非 Linux 装配）。fail-closed：
-		// 绝不退回 reboot(2) 硬重启——那是另一个语义，用户点的是「有序关机」
+		// 没有 systemd 后端 (测试替身/非 Linux 装配). fail-closed:
+		// 绝不退回 reboot(2) 硬重启 - 那是另一个语义, 用户点的是"有序关机"
 		return struct{}{}, ErrUnsupportedPlatform
 	}
 
-	// 与 osReboot 同一个特例：成功即不返回（systemd 立刻开始停机，本进程随之
-	// 被 SIGTERM），do 里 run 之后的那条审计走不到。所以先落 intent 记录。
-	// 这是全包第二处、也是最后一处允许在 run 内部直接调 auditor 的地方
+	// 与 osReboot 同一个特例: 成功即不返回 (systemd 立刻开始停机, 本进程随之
+	// 被 SIGTERM), do 里 run 之后的那条审计走不到. 所以先落 intent 记录.
+	// 这是全包第二处, 也是最后一处允许在 run 内部直接调 auditor 的地方
 	g.auditor.Record(ctx, audit.Event{
 		Action: "PowerAction.initiated", Subject: "kernel", Detail: req.Detail(),
 	})
-	// 不做 unix.Sync()：systemd 的 shutdown.target 会正常卸载文件系统，
+	// 不做 unix.Sync(): systemd 的 shutdown.target 会正常卸载文件系统,
 	// 那比这里抢一次 sync 完整得多
 
 	var err error
@@ -292,7 +292,7 @@ func (g *Gate) osPower(ctx context.Context, req PowerRequest) (struct{}, error) 
 	case PowerActionPowerOff:
 		err = pm.PowerOff(ctx)
 	default:
-		// Validate 已经挡过，这里是纵深：不认识的动作绝不猜
+		// Validate 已经挡过, 这里是纵深: 不认识的动作绝不猜
 		return struct{}{}, fmt.Errorf("%w: unknown power action %d", ErrInvariantViolated, req.Action)
 	}
 	if err != nil {

@@ -1,17 +1,17 @@
-// 本文件定义 Authority 的操作码（Kind）、发起者（Subject）与请求契约（Request）
-// Gate 与四步流水线见 authority.go；不变量见 invariant.go
+// 本文件定义 Authority 的操作码 (Kind), 发起者 (Subject) 与请求契约 (Request)
+// Gate 与四步流水线见 authority.go; 不变量见 invariant.go
 package authority
 
 import "fmt"
 
-// Kind 是特权操作的固定操作码，用于审计落盘与离线分析
+// Kind 是特权操作的固定操作码, 用于审计落盘与离线分析
 //
-// 数值一旦分配永不复用。审计日志会被长期留存，复用数值等于让历史记录改变含义
+// 数值一旦分配永不复用. 审计日志会被长期留存, 复用数值等于让历史记录改变含义
 // 废弃的操作把常量标 Deprecated 并留在原位
 type Kind uint16
 
 const (
-	// KindUnspecified 零值即无效，防止未初始化的请求被当成合法操作
+	// KindUnspecified 零值即无效, 防止未初始化的请求被当成合法操作
 	KindUnspecified Kind = 0
 
 	KindPrepareAppIdentity     Kind = 1
@@ -24,10 +24,10 @@ const (
 	KindReboot                 Kind = 8
 	KindRemovePackageTree      Kind = 9
 	KindEnsureAppUser          Kind = 10
-	// KindPowerAction 是【有序】重启/关机（经 systemd 走完整 shutdown.target）。
-	// 与 KindReboot 分开是因为它们是两件事：KindReboot 是 reboot(2) 硬重启，
-	// 属于故障恢复；本操作是用户在设置里发起的正常电源动作。
-	// 具体是重启还是关机由 PowerRequest.Action 决定，落进审计的 Detail
+	// KindPowerAction 是有序重启/关机 (经 systemd 走完整 shutdown.target).
+	// 与 KindReboot 分开是因为它们是两件事: KindReboot 是 reboot(2) 硬重启,
+	// 属于故障恢复; 本操作是用户在设置里发起的正常电源动作.
+	// 具体是重启还是关机由 PowerRequest.Action 决定, 落进审计的 Detail
 	KindPowerAction Kind = 11
 )
 
@@ -60,20 +60,20 @@ func (k Kind) String() string {
 	}
 }
 
-// Subject 是特权请求的发起者，用于审计归因
+// Subject 是特权请求的发起者, 用于审计归因
 //
-// identity 模块尚未落地，Subject 暂由调用方填写；接入 SO_PEERCRED 后
-// 改为由 identity 解析连接得到，禁止外部客户端自报身份
+// identity 模块尚未落地, Subject 暂由调用方填写; 接入 SO_PEERCRED 后
+// 改为由 identity 解析连接得到, 禁止外部客户端自报身份
 type Subject struct {
 	PackageID string // 空字符串 = 内核自身
 	UID       uint32
 }
 
 // SubjectKernel 返回表示 nervud 内核自身的 Subject
-// 它不自动获得豁免：底层不变量照样检查、照样审计
+// 它不自动获得豁免: 底层不变量照样检查, 照样审计
 func SubjectKernel() Subject { return Subject{} }
 
-// String 生成审计用的归因字符串（audit.Event.Subject 字段）
+// String 生成审计用的归因字符串 (audit.Event.Subject 字段)
 func (s Subject) String() string {
 	if s.PackageID == "" {
 		return "kernel"
@@ -83,10 +83,10 @@ func (s Subject) String() string {
 
 // Request 是所有特权请求的统一契约
 //
-// # Kind 用于审计归类；Validate 做与调用者无关的自检
+// # Kind 用于审计归类; Validate 做与调用者无关的自检
 //
-// 可选扩展：请求类型若额外实现 interface{ Detail string }，返回值会进入
-// 审计记录的 Detail 字段（如目标路径）
+// 可选扩展: 请求类型若额外实现 interface{ Detail string }, 返回值会进入
+// 审计记录的 Detail 字段 (如目标路径)
 type Request interface {
 	Kind() Kind
 	Validate(inv *Invariants) error

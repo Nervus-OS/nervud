@@ -1,4 +1,4 @@
-// 本文件是 Gate 与四步流水线 do 的实现；请求类型见 request.go
+// 本文件是 Gate 与四步流水线 do 的实现; 请求类型见 request.go
 // 平台实现见 ops_linux.go / ops_other.go
 package authority
 
@@ -12,9 +12,9 @@ import (
 	"github.com/nervus-os/nervud/internal/authority/systemd"
 )
 
-// UnitManager 是 authority 对 systemd 子包的窄接口依赖：起/停/等一个瞬态 unit。
-// *systemd.Conn 隐式满足。authority 以接口注入而不直接 new systemd.Conn，是为了
-// 让不需要起进程的测试传 nil（StartSandboxedProcess 会 fail-closed），以及单测能注入
+// UnitManager 是 authority 对 systemd 子包的窄接口依赖: 起/停/等一个瞬态 unit.
+// *systemd.Conn 隐式满足. authority 以接口注入而不直接 new systemd.Conn, 是为了
+// 让不需要起进程的测试传 nil (StartSandboxedProcess 会 fail-closed), 以及单测能注入
 // fake 走完 Validate/审计而不碰真实 D-Bus
 type UnitManager interface {
 	StartTransientUnit(ctx context.Context, spec systemd.UnitSpec) error
@@ -22,14 +22,16 @@ type UnitManager interface {
 	WaitUnit(ctx context.Context, name string) (systemd.ExitInfo, error)
 }
 
-// PowerManager 是 UnitManager 的【可选】扩展：整机有序电源动作。
-// *systemd.Conn 隐式满足（见 systemd/power.go）。
+// PowerManager 是 UnitManager 的可选扩展: 整机有序电源动作.
+// *systemd.Conn 隐式满足 (见 systemd/power.go).
 //
-// 【为什么不直接并进 UnitManager】：起进程和关机是两种权限影响面完全不同的能力，
-// 合成一个接口意味着每个想注入 fake spawner 的测试都被迫实现关机方法——而那正是
-// 最不该被随手实现的东西。用可选接口 + 类型断言，拿不到就 fail-closed
-// （osPower 返回 ErrUnsupportedPlatform），既不扩大现有测试替身的责任，
-// 也不给「没有真实 systemd 时悄悄退回硬重启」留任何余地
+// 为什么不直接并进 UnitManager: 起进程和关机是两种权限影响面完全不同的能力,
+// 合成一个接口意味着每个想注入 fake spawner 的测试都被迫实现关机方法 - 而那正是
+// 最不该被随手实现的东西. 用可选接口 + 类型断言, 拿不到就 fail-closed
+//
+//	(osPower 返回 ErrUnsupportedPlatform), 既不扩大现有测试替身的责任,
+//
+// 也不给"没有真实 systemd 时悄悄退回硬重启"留任何余地
 type PowerManager interface {
 	Reboot(ctx context.Context) error
 	PowerOff(ctx context.Context) error
@@ -37,19 +39,19 @@ type PowerManager interface {
 
 // Gate 是 NSOS 全部 Linux 特权操作的唯一入口
 //
-// 它是 代码架构与审计边界，不是进程级隔离空间
-// nervud 一旦被完全执行劫持，应视为整个 NSOS 内核失守
-// Gate 的价值在于让特权操作可枚举、可审计、可评审
+// 它是 代码架构与审计边界, 不是进程级隔离空间
+// nervud 一旦被完全执行劫持, 应视为整个 NSOS 内核失守
+// Gate 的价值在于让特权操作可枚举, 可审计, 可评审
 // 而不在于挡住已经拿到执行权的攻击者
 //
-// Gate 是 设施 而非 kernel.Module：它没有需要启停的后台循环
-// 由 assemble直接构造，并注入给各模块，生命周期与进程一致
-// 注入时按消费者需要给 窄接口，不要把 Gate 整个传下去
+// Gate 是 设施 而非 kernel.Module: 它没有需要启停的后台循环
+// 由 assemble直接构造, 并注入给各模块, 生命周期与进程一致
+// 注入时按消费者需要给 窄接口, 不要把 Gate 整个传下去
 type Gate struct {
 	auditor audit.Recorder
 	inv     *Invariants
 	log     *slog.Logger
-	// spawner 是 systemd unit 管理后端；nil 表示未配置起进程能力，
+	// spawner 是 systemd unit 管理后端; nil 表示未配置起进程能力,
 	// StartSandboxedProcess/StopProcess/WaitProcess 会返回 ErrUnsupportedPlatform
 	spawner UnitManager
 }
@@ -58,13 +60,13 @@ type Config struct {
 	Auditor    audit.Recorder
 	Invariants *Invariants // nil 则用 DefaultInvariants
 	Log        *slog.Logger
-	// Spawner 是 systemd unit 管理后端（生产由 main.go 用 systemd.Dial 构造并注入）。
-	// nil 时 Gate 仍可用于非进程类操作（装包/删树/设属主/重启）
+	// Spawner 是 systemd unit 管理后端 (生产由 main.go 用 systemd.Dial 构造并注入).
+	// nil 时 Gate 仍可用于非进程类操作 (装包/删树/设属主/重启)
 	Spawner UnitManager
 }
 
 // New 构造 Gate
-// 主意：不允许缺 Auditor
+// 主意: 不允许缺 Auditor
 func New(cfg Config) (*Gate, error) {
 	if cfg.Auditor == nil {
 		return nil, fmt.Errorf("authority: Auditor is required")
@@ -83,16 +85,16 @@ func New(cfg Config) (*Gate, error) {
 //
 //	模块提出请求 -> Authority 检查底层不变量 -> 执行 -> Audit 记录
 //
-// V2-TODO：Policy 裁决步骤
-// 本路径的调用者全部是内核模块，同属一个 TCB、同等可信
-// 任何现实威胁，真正跨信任边界的是 App 请求
-// 由 internal/permission 的 capability 执法负责，不走这里
-// Policy 的真实客户是 scheduler（RT 优先级授予）与 safety（收紧 OEM Safety Contract，NRCP）
+// V2-TODO: Policy 裁决步骤
+// 本路径的调用者全部是内核模块, 同属一个 TCB, 同等可信
+// 任何现实威胁, 真正跨信任边界的是 App 请求
+// 由 internal/permission 的 capability 执法负责, 不走这里
+// Policy 的真实客户是 scheduler (RT 优先级授予) 与 safety (收紧 OEM Safety Contract, NRCP)
 //
-// 全部导出操作都必须经由本函数：查了不变量、写了审计由结构保证，而不是靠开发者自觉
-// 泛型仅为消除逐操作的重复流水线；Res 为无返回值的操作时取 struct{
+// 全部导出操作都必须经由本函数: 查了不变量, 写了审计由结构保证, 而不是靠开发者自觉
+// 泛型仅为消除逐操作的重复流水线; Res 为无返回值的操作时取 struct{
 //
-// run 是包内不可导出的平台实现，不接受外部注入
+// run 是包内不可导出的平台实现, 不接受外部注入
 func do[Req Request, Res any](
 	ctx context.Context,
 	g *Gate,
@@ -107,10 +109,10 @@ func do[Req Request, Res any](
 		detail = d.Detail()
 	}
 
-	// Policy 接缝：将来若确有 subject 相关的可变裁决要落在特权路径上，插在这里
-	// （Subject 已贯穿全部签名与审计，届时只加判定、不动接口），拒绝用 ErrPolicyDenied
+	// Policy 接缝: 将来若确有 subject 相关的可变裁决要落在特权路径上, 插在这里
+	//  (Subject 已贯穿全部签名与审计, 届时只加判定, 不动接口), 拒绝用 ErrPolicyDenied
 
-	// 不变量：与调用者无关的系统硬约束，任何策略都不得豁免
+	// 不变量: 与调用者无关的系统硬约束, 任何策略都不得豁免
 	if err := req.Validate(g.inv); err != nil {
 		g.auditor.Record(ctx, audit.Event{
 			Action: kind.String(), Subject: subj.String(), Denied: true, Err: err, Detail: detail,
@@ -118,21 +120,21 @@ func do[Req Request, Res any](
 		return zero, err
 	}
 
-	// 执行真实 Linux 操作（仅本包与 scheduler 可直接触碰 syscall / x/sys / os/exec）
+	// 执行真实 Linux 操作 (仅本包与 scheduler 可直接触碰 syscall / x/sys / os/exec)
 	res, err := run(ctx, req)
 
-	// 审计：成功与失败都记。只记成功的审计日志毫无取证价值
+	// 审计: 成功与失败都记. 只记成功的审计日志毫无取证价值
 	g.auditor.Record(ctx, audit.Event{
 		Action: kind.String(), Subject: subj.String(), Denied: false, Err: err, Detail: detail,
 	})
 	if err != nil {
-		// ErrAlreadyExists 降到 Debug：它是【幂等操作的预期结果】，不是故障。
-		// 调用方拿它当「已经做过了」（见 pkgregistry.provisionEntry），而
-		// provisionAll 每次启动都对每个包跑一遍——记成 ERROR 的话，每次开机
-		// 每个已装的包都会刷一条，运维很快就学会无视 ERROR 这一级。
+		// ErrAlreadyExists 降到 Debug: 它是幂等操作的预期结果, 不是故障.
+		// 调用方拿它当"已经做过了" (见 pkgregistry.provisionEntry), 而
+		// provisionAll 每次启动都对每个包跑一遍 - 记成 ERROR 的话, 每次开机
+		// 每个已装的包都会刷一条, 运维很快就学会无视 ERROR 这一级.
 		//
-		// 审计记录不受影响：上面的 Record 无条件带上 err，取证材料仍然完整。
-		// 降的只是给人看的那一路。
+		// 审计记录不受影响: 上面的 Record 无条件带上 err, 取证材料仍然完整.
+		// 降的只是给人看的那一路.
 		if errors.Is(err, ErrAlreadyExists) {
 			g.log.Debug("authority: target already exists (idempotent no-op)",
 				"kind", kind.String(), "subject", subj.String(), "err", err)

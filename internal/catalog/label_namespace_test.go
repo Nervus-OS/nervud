@@ -10,7 +10,6 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
-// labelledResourceArtifacts 造一个带标签的 OEM 私有资源。
 func labelledResourceArtifacts(t *testing.T, packageID string, labels map[string]string) *ipcregistry.ProviderArtifacts {
 	t.Helper()
 	interfaceID := packageID + ".interface.cam"
@@ -53,8 +52,8 @@ func labelledResourceArtifacts(t *testing.T, packageID string, labels map[string
 			GrantMode:    ipcv1.GrantMode_GRANT_MODE_NORMAL,
 			RiskClass:    ipcv1.RiskClass_RISK_CLASS_NORMAL,
 			MinimumTrust: ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
-			DisplayName:  &ipcv1.LocalizedText{ZhCn: "相机", En: "Camera"},
-			Description:  &ipcv1.LocalizedText{ZhCn: "相机", En: "Camera"},
+			DisplayName:  &ipcv1.LocalizedText{ZhCn: "catalog test value 6042a0", En: "Camera"},
+			Description:  &ipcv1.LocalizedText{ZhCn: "catalog test value 6042a0", En: "Camera"},
 		}},
 	}
 	descriptorWire, schemaWire, err := ipcregistry.MarshalProviderArtifacts(
@@ -86,7 +85,6 @@ func labelledOEMSource(t *testing.T, packageID string, labels map[string]string)
 	}
 }
 
-// 厂商可以给自己命名空间下的标签。
 func TestResourceLabels_PrivateNamespaceAllowed(t *testing.T) {
 	registry := mustDefaultRegistry(t)
 	source := labelledOEMSource(t, "com.vendor.cam", map[string]string{
@@ -101,12 +99,10 @@ func TestResourceLabels_PrivateNamespaceAllowed(t *testing.T) {
 		Labels: map[string]string{"com.vendor.cam.night_capable": "true"},
 	})
 	if !ok || len(matched) != 1 {
-		t.Fatalf("私有标签选不到: %+v, %v", matched, ok)
+		t.Fatalf("unexpected catalog result; value = %+v, %v", matched, ok)
 	}
 }
 
-// 【厂商不得声明平台标签】。能随手写 nervus.camera.facing=front 的话，厂商就能
-// 把自己的摄像头伪装成平台语义下的前视摄像头，让按标准标签选设备的 App 选到它。
 func TestResourceLabels_VendorCannotForgePlatformLabel(t *testing.T) {
 	registry := mustDefaultRegistry(t)
 	source := labelledOEMSource(t, "com.vendor.cam", map[string]string{
@@ -114,14 +110,13 @@ func TestResourceLabels_VendorCannotForgePlatformLabel(t *testing.T) {
 	})
 	_, err := registry.Prepare([]Source{source})
 	if err == nil {
-		t.Fatal("厂商伪造平台标签被接受了")
+		t.Fatal("unexpected catalog result")
 	}
 	if !strings.Contains(err.Error(), "platform-release") {
-		t.Fatalf("err = %v, want 平台标签授权拒绝", err)
+		t.Fatalf("unexpected catalog result; err = %v; expected rejection", err)
 	}
 }
 
-// 别人命名空间下的标签同样不行——命名空间规则与接口/权限/资源类型完全同规。
 func TestResourceLabels_VendorCannotUseForeignNamespace(t *testing.T) {
 	registry := mustDefaultRegistry(t)
 	source := labelledOEMSource(t, "com.vendor.cam", map[string]string{
@@ -129,15 +124,13 @@ func TestResourceLabels_VendorCannotUseForeignNamespace(t *testing.T) {
 	})
 	_, err := registry.Prepare([]Source{source})
 	if err == nil {
-		t.Fatal("跨命名空间标签被接受了")
+		t.Fatal("unexpected catalog result")
 	}
 	if !strings.Contains(err.Error(), "outside package namespace") {
-		t.Fatalf("err = %v, want 命名空间拒绝", err)
+		t.Fatalf("unexpected catalog result; err = %v; expected rejection", err)
 	}
 }
 
-// 标签是契约的一部分：同一个资源被两方声明了不同标签时必须拒绝，
-// 否则 App 按标签选到哪一个取决于发布顺序。
 func TestResourceLabels_ArePartOfResourceContract(t *testing.T) {
 	left := ResourceDefinition{
 		Handle: "cam.main", ResourceType: "t", StableRole: "cam.main",
@@ -146,10 +139,10 @@ func TestResourceLabels_ArePartOfResourceContract(t *testing.T) {
 	right := left
 	right.Labels = map[string]string{"a": "2"}
 	if sameResourceContract(left, right) {
-		t.Fatal("标签不同却被判成同一份资源契约")
+		t.Fatal("unexpected catalog result")
 	}
 	right.Labels = map[string]string{"a": "1"}
 	if !sameResourceContract(left, right) {
-		t.Fatal("标签相同却被判成不同契约")
+		t.Fatal("unexpected catalog result")
 	}
 }

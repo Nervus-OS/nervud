@@ -1,13 +1,13 @@
-// Command nervusctl 是 nervud 的本地特权运维 CLI：装包/卸载/列表/停用启用/授撤权。
+// Command nervusctl 是 nervud 的本地特权运维 CLI: 装包/卸载/列表/停用启用/授撤权.
 //
-// 它不常驻、不持有 Registry 真源。真源永远是 nervud 进程内的 pkgregistry，
-// 否则多个写者会造成权威状态分叉。nervusctl 只把命令经特权管理通道（internal/adminwire）
-// 投递给 nervud，由 nervud 执行并复核 - 签名验证/裁决全部在 nervud，不在 CLI。
+// 它不常驻, 不持有 Registry 真源. 真源永远是 nervud 进程内的 pkgregistry,
+// 否则多个写者会造成权威状态分叉. nervusctl 只把命令经特权管理通道 (internal/adminwire)
+// 投递给 nervud, 由 nervud 执行并复核 - 签名验证/裁决全部在 nervud, 不在 CLI.
 //
-// 唯一由 CLI 承担的重活是把 .nspkg 解包成 staging 目录（zstd+tar，含防 tar-slip
-// 逃逸），且解包目标是 nervud 经 begin-staging 发回的、它自己掌控的目录。nervud
-// 随后对 staging 里的每个文件重新做 digest 复核，因此 CLI 解包环节即便被做手脚也
-// 会在 nervud 侧被拒 - CLI 不是信任锚。
+// 唯一由 CLI 承担的重活是把.nspkg 解包成 staging 目录 (zstd+tar, 含防 tar-slip
+// 逃逸), 且解包目标是 nervud 经 begin-staging 发回的, 它自己掌控的目录. nervud
+// 随后对 staging 里的每个文件重新做 digest 复核, 因此 CLI 解包环节即便被做手脚也
+// 会在 nervud 侧被拒 - CLI 不是信任锚.
 package main
 
 import (
@@ -24,7 +24,7 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// usage 打印命令总览。放进变量以便 -h 与参数错误共用。
+// usage 打印命令总览. 放进变量以便 -h 与参数错误共用.
 const usage = `nervusctl - nervud local privileged O&M tool
 
 Usage:
@@ -44,7 +44,7 @@ Options:
   --sock PATH   Admin channel socket path
 `
 
-// run 是可测的入口：解析参数、构造客户端、执行子命令。返回进程退出码。
+// run 是可测的入口: 解析参数, 构造客户端, 执行子命令. 返回进程退出码.
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("nervusctl", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -80,8 +80,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "revoke":
 		err = cmdSetPermission(client, cmdArgs, stdout, adminwire.GrantStateDenied)
 	case "audit-verify":
-		// 【不连管理通道】：它读的是本机文件，而审计恰恰要在 nervud 起不来
-		// 或者行为可疑的时候仍然查得了。
+		// 不连管理通道: 它读的是本机文件, 而审计恰恰要在 nervud 起不来
+		// 或者行为可疑的时候仍然查得了.
 		err = cmdAuditVerify(cmdArgs, stdout)
 	case "help", "-h", "--help":
 		outf(stdout, "%s", usage)
@@ -103,8 +103,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// usageErr 标注参数用法错误，与运行期失败区分：前者退出 2 并打印用法，
-// 后者退出 1。
+// usageErr 标注参数用法错误, 与运行期失败区分: 前者退出 2 并打印用法,
+// 后者退出 1.
 type usageErr struct{ msg string }
 
 func (e usageErr) Error() string { return e.msg }
@@ -113,7 +113,7 @@ func badUsage(format string, args ...any) error {
 	return usageErr{msg: fmt.Sprintf(format, args...)}
 }
 
-// respErr 把一个失败的 Response 转成 error（供子命令统一处理）。
+// respErr 把一个失败的 Response 转成 error (供子命令统一处理).
 func respErr(resp adminwire.Response) error {
 	if resp.Message != "" {
 		return fmt.Errorf("%s (%s)", resp.Message, resp.Code)

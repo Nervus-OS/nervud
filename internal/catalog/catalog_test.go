@@ -487,8 +487,8 @@ func permissionWire(
 		RiskClass:          risk,
 		MinimumTrust:       minimum,
 		RequiredSignerRole: requiredRole,
-		DisplayName:        &ipcv1.LocalizedText{ZhCn: "测试权限", En: "Test permission"},
-		Description:        &ipcv1.LocalizedText{ZhCn: "测试权限说明", En: "Test permission description"},
+		DisplayName:        &ipcv1.LocalizedText{ZhCn: "catalog test value 839646", En: "Test permission"},
+		Description:        &ipcv1.LocalizedText{ZhCn: "catalog test value 5db73c", En: "Test permission description"},
 	}
 }
 

@@ -267,8 +267,8 @@ func (b *Builder) interfaceRecord(
 		}
 		methods[methodID] = method
 	}
-	// 事件与方法同规参与风险裁决：一个订阅原始摄像头流的事件同样是隐私敏感的，
-	// 不能因为它「只是个事件」就绕过 authorizeRisk
+	// 事件与方法同规参与风险裁决: 一个订阅原始摄像头流的事件同样是隐私敏感的,
+	// 不能因为它"只是个事件"就绕过 authorizeRisk
 	events := make(map[uint32]EventDefinition)
 	for eventID, meta := range schema.Events() {
 		if meta.GetRiskClass() > maxRisk {
@@ -503,11 +503,11 @@ func indexExports(exports []ExportBinding) (map[string]string, error) {
 	return out, nil
 }
 
-// interfaceVersions 把接口声明的各 major 展开成 major -> 契约哈希。
+// interfaceVersions 把接口声明的各 major 展开成 major -> 契约哈希.
 //
-// 只认 interface_versions：v1 的 versions/schema_hash 组合已移除（proto 里
-// 那两个字段号已 reserved）。registry.ParseProviderArtifacts 已经做过同样的
-// 校验，这里再走一遍是因为 Builder 也接受 kernel bootstrap 那条不经 Parse 的路径。
+// 只认 interface_versions: v1 的 versions/schema_hash 组合已移除 (proto 里
+// 那两个字段号已 reserved). registry.ParseProviderArtifacts 已经做过同样的
+// 校验, 这里再走一遍是因为 Builder 也接受 kernel bootstrap 那条不经 Parse 的路径.
 func interfaceVersions(wire *ipcv1.ProvidedInterface) (map[uint32][]byte, error) {
 	versions := wire.GetInterfaceVersions()
 	if len(versions) == 0 {
@@ -686,12 +686,12 @@ func authorizeResource(source Source, next *Snapshot, wire *ipcv1.ManagedResourc
 	return nil
 }
 
-// authorizeResourceLabels 对标签键施加与接口/权限同一套命名空间规则。
+// authorizeResourceLabels 对标签键施加与接口/权限同一套命名空间规则.
 //
-// 标签是【App 选设备的依据】：一个厂商如果能随手声明 nervus.camera.facing=front，
-// 它就能把自己的摄像头伪装成平台语义下的前视摄像头，让按标准标签选设备的 App
-// 选到它。所以平台标签只有 platform-release 能定义，私有标签必须在自己命名空间下——
-// 与接口、权限、资源类型完全同规。
+// 标签是App 选设备的依据: 一个厂商如果能随手声明 nervus.camera.facing=front,
+// 它就能把自己的摄像头伪装成平台语义下的前视摄像头, 让按标准标签选设备的 App
+// 选到它. 所以平台标签只有 platform-release 能定义, 私有标签必须在自己命名空间下 -
+// 与接口, 权限, 资源类型完全同规.
 func authorizeResourceLabels(source Source, wire *ipcv1.ManagedResource) error {
 	for key := range wire.GetLabels() {
 		if key == "" {
@@ -846,8 +846,8 @@ func sameInterfaceContract(left, right interfaceRecord) bool {
 			return false
 		}
 	}
-	// 事件也是契约的一部分：DeliveryClass 决定订阅方看到 sequence 缺口时该
-	// 「什么都不做」还是「数据永久丢失」。两个 Provider 若能各说各的，
+	// 事件也是契约的一部分: DeliveryClass 决定订阅方看到 sequence 缺口时该
+	// "什么都不做"还是"数据永久丢失". 两个 Provider 若能各说各的,
 	// App 解析到谁就决定了它会不会漏数据
 	for eventID, leftEvent := range left.events {
 		rightEvent, ok := right.events[eventID]
@@ -880,7 +880,7 @@ func sameResourceContract(left, right ResourceDefinition) bool {
 		left.StableRole == right.StableRole &&
 		left.AccessMode == right.AccessMode &&
 		left.RiskClass == right.RiskClass &&
-		// 标签也算契约的一部分：两个 Provider 声明同一个资源却给了不同标签，
+		// 标签也算契约的一部分: 两个 Provider 声明同一个资源却给了不同标签,
 		// App 按标签选到哪一个就取决于发布顺序了
 		sameLabels(left.Labels, right.Labels)
 }

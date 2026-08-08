@@ -1,5 +1,5 @@
-// 本文件是完整性复核的一部分：按 manifest 声明的 digest 清单逐文件核对内容。
-// 纯计算，不触碰特权接口，因此不受 depguard 的 syscall 边界约束
+// 本文件是完整性复核的一部分: 按 manifest 声明的 digest 清单逐文件核对内容.
+// 纯计算, 不触碰特权接口, 因此不受 depguard 的 syscall 边界约束
 package pkgregistry
 
 import (
@@ -25,19 +25,19 @@ const (
 // ErrDigestMismatch 至少一个文件的实际内容与 manifest 声明的 digest 不符
 var ErrDigestMismatch = errors.New("pkgregistry: digest verification failed")
 
-// ErrIrregularFile digest 复核遇到非普通文件（symlink/FIFO/设备节点等）。
-// 这些不能被 hash（symlink 会跟随到包外、FIFO/设备会永久阻塞 io.Copy），
+// ErrIrregularFile digest 复核遇到非普通文件 (symlink/FIFO/设备节点等).
+// 这些不能被 hash (symlink 会跟随到包外, FIFO/设备会永久阻塞 io.Copy),
 // 一律拒绝 - 包里只允许普通文件与目录
 var ErrIrregularFile = errors.New("pkgregistry: refusing to hash non-regular file")
 
 // DigestDiff 是完整性复核的结构化结果
 //
-// 返回完整差异而不是遇到第一个不符就退出：审计需要记录这个包到底哪里
-// 不对，而不只是不对这一个布尔值
+// 返回完整差异而不是遇到第一个不符就退出: 审计需要记录这个包到底哪里
+// 不对, 而不只是不对这一个布尔值
 type DigestDiff struct {
-	Mismatched []string // manifest 声明了 digest，但磁盘内容 hash 不一致
-	Missing    []string // manifest 声明了，但磁盘上找不到这个文件
-	Extra      []string // 磁盘上存在，但 manifest 未声明
+	Mismatched []string // manifest 声明了 digest, 但磁盘内容 hash 不一致
+	Missing    []string // manifest 声明了, 但磁盘上找不到这个文件
+	Extra      []string // 磁盘上存在, 但 manifest 未声明
 }
 
 // Clean 报告本次复核是否完全通过
@@ -45,15 +45,15 @@ func (d DigestDiff) Clean() bool {
 	return len(d.Mismatched) == 0 && len(d.Missing) == 0 && len(d.Extra) == 0
 }
 
-// VerifyDigests 核对 root 目录下的实际文件与 digests（包内相对路径 -> sha256 hex）
+// VerifyDigests 核对 root 目录下的实际文件与 digests (包内相对路径 -> sha256 hex)
 //
-// digests 的键必须已经过 validRelPath 校验（ParseManifest 已经做过），本函数
-// 不再重复校验路径安全性，只信任调用方已经拒绝过路径穿越
+// digests 的键必须已经过 validRelPath 校验 (ParseManifest 已经做过), 本函数
+// 不再重复校验路径安全性, 只信任调用方已经拒绝过路径穿越
 //
-// manifest.json 与 manifest.sig 是包的元数据，无法被
-// 自身的 digest 清单覆盖（manifest 不能自散列，sig 也不能写进 manifest 后再签），
+// manifest.json 与 manifest.sig 是包的元数据, 无法被
+// 自身的 digest 清单覆盖 (manifest 不能自散列, sig 也不能写进 manifest 后再签),
 // 因此这两个文件名在 Extra 检查里被豁免 - 它们的完整性由签名覆盖 manifest 原始
-// 字节 + digest 覆盖其余全部文件这条链间接保证，而不是靠列进 digests
+// 字节 + digest 覆盖其余全部文件这条链间接保证, 而不是靠列进 digests
 func VerifyDigests(root string, digests map[string]string) (DigestDiff, error) {
 	var diff DigestDiff
 	seen := make(map[string]bool, len(digests))
@@ -80,9 +80,9 @@ func VerifyDigests(root string, digests map[string]string) (DigestDiff, error) {
 		if d.IsDir() {
 			return nil
 		}
-		// 只允许普通文件：symlink/FIFO/设备节点等非普通类型一律拒绝。symlink 会
-		// 跟随到包外、FIFO/设备会让 io.Copy 永久阻塞（ W^X 与
-		// 完整性前提）。用 DirEntry.Type 判断，不跟随 symlink
+		// 只允许普通文件: symlink/FIFO/设备节点等非普通类型一律拒绝. symlink 会
+		// 跟随到包外, FIFO/设备会让 io.Copy 永久阻塞 (W^X 与
+		// 完整性前提). 用 DirEntry.Type 判断, 不跟随 symlink
 		if !d.Type().IsRegular() {
 			return fmt.Errorf("%w: %s (mode %v)", ErrIrregularFile, p, d.Type())
 		}
@@ -91,7 +91,7 @@ func VerifyDigests(root string, digests map[string]string) (DigestDiff, error) {
 			return rerr
 		}
 		rel = filepath.ToSlash(rel)
-		// 元数据不在自身的 digest 表中，否则 manifest 无法形成有限的自校验内容
+		// 元数据不在自身的 digest 表中, 否则 manifest 无法形成有限的自校验内容
 		if rel == ManifestFileName || rel == SignatureFileName {
 			return nil
 		}
@@ -111,9 +111,9 @@ func VerifyDigests(root string, digests map[string]string) (DigestDiff, error) {
 }
 
 func sha256File(path string) (string, error) {
-	// 先 Lstat（不跟随 symlink）确认是普通文件：symlink 会跟随到包外目标，
-	// FIFO/设备/socket 会让 io.Copy 永久阻塞。os.Open
-	// 会跟随 symlink，所以必须在打开之前用 Lstat 把关
+	// 先 Lstat (不跟随 symlink) 确认是普通文件: symlink 会跟随到包外目标,
+	// FIFO/设备/socket 会让 io.Copy 永久阻塞. os.Open
+	// 会跟随 symlink, 所以必须在打开之前用 Lstat 把关
 	li, err := os.Lstat(path)
 	if err != nil {
 		return "", err
@@ -128,9 +128,9 @@ func sha256File(path string) (string, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// 打开后再用 Fstat 确认一次仍是普通文件：Lstat 与 Open 之间存在 TOCTOU 窗口，
-	// 这道二次核对把Lstat 看到普通文件、Open 时已被换成 FIFO这类替换挡在 io.Copy
-	// 之前。彻底消除 TOCTOU 需要 O_NOFOLLOW（非跨平台），留待 Linux 侧加固
+	// 打开后再用 Fstat 确认一次仍是普通文件: Lstat 与 Open 之间存在 TOCTOU 窗口,
+	// 这道二次核对把Lstat 看到普通文件, Open 时已被换成 FIFO这类替换挡在 io.Copy
+	// 之前. 彻底消除 TOCTOU 需要 O_NOFOLLOW (非跨平台), 留待 Linux 侧加固
 	info, err := f.Stat()
 	if err != nil {
 		return "", err

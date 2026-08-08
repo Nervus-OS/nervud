@@ -1,14 +1,14 @@
-// 本文件实现 route 表：nervud 转发一个 Request 给某个 Service 连接时，用
-// route_id 记录源/目标连接、请求与方法的权威快照、deadline、registration
-// generation 以及 Transfer RouteToken，供正常结果、撤权、超时和断线共同消费。
+// 本文件实现 route 表: nervud 转发一个 Request 给某个 Service 连接时, 用
+// route_id 记录源/目标连接, 请求与方法的权威快照, deadline, registration
+// generation 以及 Transfer RouteToken, 供正常结果, 撤权, 超时和断线共同消费.
 //
 // 设计核心:谁在表锁下成功删除了这条 entry,谁就是这次调用唯一的终结
 // Response 生产者 - 三条路径统一走查表并删除语义,天然保证每个 Request
-// 最多一个终结 Response，因此不需要额外的原子完成标记
+// 最多一个终结 Response, 因此不需要额外的原子完成标记
 //
-// 撤权与发布共用表锁和 epoch：请求在查 endpoint/catalog 前采样 epoch，只有在
-// 发布 route 时 epoch 仍相同才成功。撤权先递增 epoch，再摘表并关闭 RouteToken，
-// 因而查表与发布之间发生的撤权不会留下一个可在事后 BeginTransfer 的旧 route。
+// 撤权与发布共用表锁和 epoch: 请求在查 endpoint/catalog 前采样 epoch, 只有在
+// 发布 route 时 epoch 仍相同才成功. 撤权先递增 epoch, 再摘表并关闭 RouteToken,
+// 因而查表与发布之间发生的撤权不会留下一个可在事后 BeginTransfer 的旧 route.
 package ipc
 
 import (
@@ -48,7 +48,7 @@ const (
 	// completeNotFound: route_id 不存在 - 良性竞态(已被清道夫/另一次结果/
 	// 连接断开清理抢先完成),或本来就是伪造的 route_id,二者在这里无法区分
 	completeNotFound
-	// completeMismatch: route_id 存在,但送回结果的连接不是登记的目标连接。
+	// completeMismatch: route_id 存在,但送回结果的连接不是登记的目标连接.
 	// 没有合法解释 - 没有 Service 会被告知一个指向别的连接的 route_id
 	completeMismatch
 	// completeExpired: target matched, but the result arrived after the exact
@@ -166,11 +166,11 @@ func (t *dispatchTable) publishDispatchAtEpoch(
 
 	var executionSnapshot *ipcv1.ExecutionContext
 	if execution != nil {
-		// 【逐字段拷贝，不是 proto.Clone】：这份快照是要冻结进 route 表的，
-		// 逐字段列出让「新增一个字段却忘了带过来」在代码评审时看得见。
+		// 逐字段拷贝, 不是 proto.Clone: 这份快照是要冻结进 route 表的,
+		// 逐字段列出让"新增一个字段却忘了带过来"在代码评审时看得见.
 		//
-		// 代价是加字段时必须记得改这里——忘了的表现是 Provider 收到的
-		// ExecutionContext 少一个字段，而两边都不报错。
+		// 代价是加字段时必须记得改这里 - 忘了的表现是 Provider 收到的
+		// ExecutionContext 少一个字段, 而两边都不报错.
 		executionSnapshot = &ipcv1.ExecutionContext{
 			LeaseId:            execution.GetLeaseId(),
 			ControllerClass:    execution.GetControllerClass(),
@@ -351,7 +351,7 @@ func (t *dispatchTable) origin(routeID uint64, target *conn) (*routeEntry, bool)
 
 // connClosed 摘除全部以 c 为 target 或 source 的表项,分类返回供调用方在释放
 // 表锁之后处理 - 表锁只保护这张 map 本身,不覆盖把结果送进另一条连接的
-// outbox这类连接 I/O( 明确禁止跨连接 I/O 时持锁)
+// outbox这类连接 I/O(明确禁止跨连接 I/O 时持锁)
 func (t *dispatchTable) connClosed(c *conn) (asTarget, asSource []*routeEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -389,7 +389,7 @@ func (t *dispatchTable) reap(now time.Time) []*routeEntry {
 }
 
 // resolveRoute 是全部完成一个 route路径的共同尾声:归还 source 的 in-flight
-// 计数,并把最终 Response 送进 source 的 outbox。返回值转发自 enqueue,只有
+// 计数,并把最终 Response 送进 source 的 outbox. 返回值转发自 enqueue,只有
 // handleRequest 的同步路径关心它(用于决定是否继续读源连接)
 func resolveRoute(e *routeEntry, resp *ipcv1.Response) bool {
 	e.source.releaseRequest(e.sourceRequestID)
@@ -423,14 +423,14 @@ func (s *Server) dispatchConnClosed(c *conn) {
 	}
 }
 
-// dispatchReapInterval 是清道夫的扫描周期。粗粒度的权衡:一个请求最多会在
-// 真正 deadline 之后再晚一个周期才被清理,换来的是表锁的争用频率保持很低。
+// dispatchReapInterval 是清道夫的扫描周期. 粗粒度的权衡:一个请求最多会在
+// 真正 deadline 之后再晚一个周期才被清理,换来的是表锁的争用频率保持很低.
 // 相对于 defaultMethodTimeoutMs=5000/maxMethodTimeoutMs=30000 这两个量级,
 // 250ms 的延迟可以忽略
 const dispatchReapInterval = 250 * time.Millisecond
 
 // runDispatchReaper 周期性清理超过 deadline 仍未完成的 route,防止一个从不
-// 回应的 Service 让调用者的请求永久挂起。生命周期与 acceptLoop 同构:用
+// 回应的 Service 让调用者的请求永久挂起. 生命周期与 acceptLoop 同构:用
 // s.wg/s.quit 加入既有的启停协议,不新造机制
 func (s *Server) runDispatchReaper() {
 	defer s.wg.Done()

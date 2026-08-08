@@ -31,9 +31,9 @@ func projectCatalogSources(entries []Entry) ([]catalog.Source, error) {
 			continue
 		}
 
-		// 逐包失败一律包成 catalog.SourceError：启动扫描据此隔离肇事者而不是
-		// 整体失败（见 Module.prepareEntriesQuarantining）。SourceError.Unwrap
-		// 保留内层 error，errors.Is(err, ErrProviderArtifactsRequired) 仍成立。
+		// 逐包失败一律包成 catalog.SourceError: 启动扫描据此隔离肇事者而不是
+		// 整体失败 (见 Module.prepareEntriesQuarantining). SourceError.Unwrap
+		// 保留内层 error, errors.Is(err, ErrProviderArtifactsRequired) 仍成立.
 		pkgID := entry.Manifest.PackageID
 		kind, err := catalogSourceKind(entry.Source)
 		if err != nil {

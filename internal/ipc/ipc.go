@@ -1,7 +1,7 @@
-// 本文件是 ipc 模块的 kernel.Module 实现：UDS 监听、accept 循环、连接准入与
-// 有序停机。分帧见 frame.go；连接内的 Envelope 状态机见 conn.go（待落地）
+// 本文件是 ipc 模块的 kernel.Module 实现: UDS 监听, accept 循环, 连接准入与
+// 有序停机. 分帧见 frame.go; 连接内的 Envelope 状态机见 conn.go (待落地)
 //
-// 依赖边界：本包不直接 import syscall / x/sys - 读取对端凭证走 internal/sysprobe，
+// 依赖边界: 本包不直接 import syscall / x/sys - 读取对端凭证走 internal/sysprobe,
 // 特权操作走 internal/authority
 package ipc
 
@@ -38,55 +38,55 @@ import (
 
 // socketMode 是控制面 socket 的文件权限
 //
-// 取 0666 而不是 0660 加专用组，是因为每个 Package 有各自独立的 UID，
-// 用组来表达谁是 App 会让组成员关系变成与 Package Registry 并行的第二个真相源：
-// 装包时加组、卸载时移组，一旦失步就出现 Registry 说已卸载、组里还在、仍能连
-// 上来。Registry 是唯一真相源，不给它制造竞争者
+// 取 0666 而不是 0660 加专用组, 是因为每个 Package 有各自独立的 UID,
+// 用组来表达谁是 App 会让组成员关系变成与 Package Registry 并行的第二个真相源:
+// 装包时加组, 卸载时移组, 一旦失步就出现 Registry 说已卸载, 组里还在, 仍能连
+// 上来. Registry 是唯一真相源, 不给它制造竞争者
 //
-// 真正的鉴权在 accept 之后：SO_PEERCRED 拿内核凭证，App UID 区段检查，
-// Registry 查表。文件位只是第一道噪音过滤，不承担安全职责
+// 真正的鉴权在 accept 之后: SO_PEERCRED 拿内核凭证, App UID 区段检查,
+// Registry 查表. 文件位只是第一道噪音过滤, 不承担安全职责
 //
-// 代价是任何本地进程都能 connect 并迫使 nervud 走一遍拒绝流程，由 Limits.MaxConns
-// 的全局上限兜底。若日后实测该面确有压力，改成 0660 加组是一行的事，但那时组
-// 只做加固，仍然不作为真相源
+// 代价是任何本地进程都能 connect 并迫使 nervud 走一遍拒绝流程, 由 Limits.MaxConns
+// 的全局上限兜底. 若日后实测该面确有压力, 改成 0660 加组是一行的事, 但那时组
+// 只做加固, 仍然不作为真相源
 const socketMode fs.FileMode = 0o666
 
 // Limits 是本模块用到的准入预算
 //
-// 只放当前真正被执行的项。in-flight 请求数、payload 字节、outbound 队列字节等
-// 属于连接内的预算，等 Envelope 层落地时再加 - 提前定义一堆没人读的字段，只会
+// 只放当前真正被执行的项. in-flight 请求数, payload 字节, outbound 队列字节等
+// 属于连接内的预算, 等 Envelope 层落地时再加 - 提前定义一堆没人读的字段, 只会
 // 让人以为它们已经生效
 type Limits struct {
-	// MaxConns 是进程级并发连接上限。socket 是 0666，因此这是防止本地进程靠
+	// MaxConns 是进程级并发连接上限. socket 是 0666, 因此这是防止本地进程靠
 	// 狂开连接耗尽 fd 与内存的最后一道
 	MaxConns int
 
-	// MaxConnsPerUID 限制单个 Package 能占的连接数，防止一个 UID 吃掉全局额度
+	// MaxConnsPerUID 限制单个 Package 能占的连接数, 防止一个 UID 吃掉全局额度
 	MaxConnsPerUID int
 
-	// HandshakeTimeout 是从 accept 到收到第一帧的上限。没有它，连上不说话就能
+	// HandshakeTimeout 是从 accept 到收到第一帧的上限. 没有它, 连上不说话就能
 	// 白占一个连接槽
 	HandshakeTimeout time.Duration
 
-	// IdleTimeout 是稳态下两个 Frame 之间允许的最长间隔，由 Ping/Pong 维持
+	// IdleTimeout 是稳态下两个 Frame 之间允许的最长间隔, 由 Ping/Pong 维持
 	IdleTimeout time.Duration
 
 	// FrameBodyTimeout 是读完一个已宣告长度的正文的上限
 	//
-	// 它必须显著短于 IdleTimeout：长度前缀一旦收到，就说明 N 字节已经在路上，
-	// 再慢也该很快到齐。用 IdleTimeout 覆盖正文读取等于把空闲容忍度送给
+	// 它必须显著短于 IdleTimeout: 长度前缀一旦收到, 就说明 N 字节已经在路上,
+	// 再慢也该很快到齐. 用 IdleTimeout 覆盖正文读取等于把空闲容忍度送给
 	// slowloris - 发完 4 字节头后每秒挤一个字节即可长期占住连接
 	FrameBodyTimeout time.Duration
 
-	// MaxFramesPerConnPerSec 是单连接入站帧速率上限（ 的第一道）
+	// MaxFramesPerConnPerSec 是单连接入站帧速率上限 (的第一道)
 	//
-	// 每帧都要 proto.Unmarshal，一个死循环刷帧的合法 App 能持续制造 CPU/GC
-	// 压力。本上限设得足够高，正常客户端（交互式几十/秒、高频遥测几百/秒）
-	// 远够不着，只截断病理性的 tight loop。超限即按滥用关连接并审计
+	// 每帧都要 proto.Unmarshal, 一个死循环刷帧的合法 App 能持续制造 CPU/GC
+	// 压力. 本上限设得足够高, 正常客户端 (交互式几十/秒, 高频遥测几百/秒)
+	// 远够不着, 只截断病理性的 tight loop. 超限即按滥用关连接并审计
 	//
-	// 这只是第一道：完整的 要求每 UID 聚合的字节速率 token bucket，
+	// 这只是第一道: 完整的 要求每 UID 聚合的字节速率 token bucket,
 	// 且超限应返回 RESOURCE_EXHAUSTED 而非直接关连接 - 那需要 Envelope 层的
-	// Response 能力，随 conn.go 落地
+	// Response 能力, 随 conn.go 落地
 	MaxFramesPerConnPerSec int
 }
 
@@ -104,9 +104,9 @@ func DefaultLimits() Limits {
 
 // normalizeLimits 对每个字段逐一填默认值
 //
-// 不能只在整个结构全零时才用默认：部分填写（只设了 MaxConns，其余留零）会让
-// HandshakeTimeout=0 这类字段生效 - SetReadDeadline(now) 立即超时，连接一建就
-// 断，表现为 监听成功但谁都连不上，极难排查。逐字段兜底把这种半填配置也拉回安全
+// 不能只在整个结构全零时才用默认: 部分填写 (只设了 MaxConns, 其余留零) 会让
+// HandshakeTimeout=0 这类字段生效 - SetReadDeadline(now) 立即超时, 连接一建就
+// 断, 表现为 监听成功但谁都连不上, 极难排查. 逐字段兜底把这种半填配置也拉回安全
 func normalizeLimits(l Limits) Limits {
 	d := DefaultLimits()
 	if l.MaxConns <= 0 {
@@ -131,54 +131,54 @@ func normalizeLimits(l Limits) Limits {
 }
 
 type Config struct {
-	// SockPath 是控制面入口，生产固定 /run/nervus/nervud.sock
+	// SockPath 是控制面入口, 生产固定 /run/nervus/nervud.sock
 	SockPath string
 
 	Log     *slog.Logger
 	Auditor audit.Recorder
 
-	// Invariants 提供 App UID 区段检查。传值而不是传 *authority.Gate：
-	// ipc 不需要任何特权操作，只需要那条不变量
+	// Invariants 提供 App UID 区段检查. 传值而不是传 *authority.Gate:
+	// ipc 不需要任何特权操作, 只需要那条不变量
 	Invariants *authority.Invariants
 
-	// Identity 把内核凭证映射成可信身份。接口由本包（消费者）定义，
+	// Identity 把内核凭证映射成可信身份. 接口由本包 (消费者) 定义,
 	// *identity.Registry 隐式满足
 	Identity PeerResolver
 
-	// Permission 查询 Package 的已授予权限。接口由本包（消费者）定义，
+	// Permission 查询 Package 的已授予权限. 接口由本包 (消费者) 定义,
 	// *permission.Registry 隐式满足
 	Permission PermissionChecker
 
 	// Limits 为零值时使用 DefaultLimits
 	Limits Limits
 
-	// Components 把 systemd unit 反查回它承载的组件（由 service.Manager 提供）。
-	// 接口由本包（消费者）定义，*service.Manager 隐式满足。为 nil 时 verifyComponent
-	// 走 fail-closed。
+	// Components 把 systemd unit 反查回它承载的组件 (由 service.Manager 提供).
+	// 接口由本包 (消费者) 定义, *service.Manager 隐式满足. 为 nil 时 verifyComponent
+	// 走 fail-closed.
 	Components ComponentResolver
 
 	// Endpoints 把 ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给
-	// internal/endpoint，并在 Request 分派时提供路由查表。接口由本包（消费者）
-	// 定义，实现由 *endpoint.Module 提供。为 nil 时握手/请求管线维持既有降级
-	// 行为（ResolveEndpoint 等按 UnsupportedBody 处理，Request 恒 UNAVAILABLE）
+	// internal/endpoint, 并在 Request 分派时提供路由查表. 接口由本包 (消费者)
+	// 定义, 实现由 *endpoint.Module 提供. 为 nil 时握手/请求管线维持既有降级
+	// 行为 (ResolveEndpoint 等按 UnsupportedBody 处理, Request 恒 UNAVAILABLE)
 	// - 允许 endpoint 与 ipc 分批合入
 	Endpoints EndpointResolver
 
-	// Leases 把 AcquireControl/ReleaseControl 接到 internal/control 的租约状态机。
-	// 为 nil 时这两个 body 回 UNAVAILABLE（能力缺口，不是协议违规）——
-	// 与 Endpoints 为 nil 时的降级同一形态。
+	// Leases 把 AcquireControl/ReleaseControl 接到 internal/control 的租约状态机.
+	// 为 nil 时这两个 body 回 UNAVAILABLE (能力缺口, 不是协议违规) -
+	// 与 Endpoints 为 nil 时的降级同一形态.
 	Leases ControlLeases
 
-	// Launcher 把 LaunchComponent 接到 internal/service 的 EnsureStarted。
-	// 由 *service.Manager 隐式满足；为 nil 时该 body 回 UNAVAILABLE。
+	// Launcher 把 LaunchComponent 接到 internal/service 的 EnsureStarted.
+	// 由 *service.Manager 隐式满足; 为 nil 时该 body 回 UNAVAILABLE.
 	Launcher ComponentLauncher
 
-	// Resources 把 AcquireControl 的 ResourceSelector 解析成 resource_handle。
-	// 为 nil 时任何租约申请都解析失败——v2 没有隐式默认。
+	// Resources 把 AcquireControl 的 ResourceSelector 解析成 resource_handle.
+	// 为 nil 时任何租约申请都解析失败 - v2 没有隐式默认.
 	Resources ResourceResolver
 
-	// Operations 拥有长任务的状态机。为 nil 时声明了 returns_operation 的
-	// 方法一律被拒（能力缺口，不是协议违规）。
+	// Operations 拥有长任务的状态机. 为 nil 时声明了 returns_operation 的
+	// 方法一律被拒 (能力缺口, 不是协议违规).
 	Operations OperationManager
 
 	// Transfer owns the generic high-throughput data plane. Method metadata,
@@ -189,54 +189,54 @@ type Config struct {
 
 // ComponentResolver 把 systemd unit 名反查回它承载的组件实例
 //
-// 接口在消费者（ipc）这一侧定义，实现由 internal/service 提供。verifyComponent 用
-// 对端进程的 cgroup 解出 unit，再经它拿到这个 unit 到底是哪个 Package 的哪个
-// Component、什么 UID、是否停用的内核事实，与客户端自报的 declared_component_id
+// 接口在消费者 (ipc) 这一侧定义, 实现由 internal/service 提供. verifyComponent 用
+// 对端进程的 cgroup 解出 unit, 再经它拿到这个 unit 到底是哪个 Package 的哪个
+// Component, 什么 UID, 是否停用的内核事实, 与客户端自报的 declared_component_id
 // 交叉核对
 type ComponentResolver interface {
 	LookupComponentByUnit(unit string) (service.ComponentIdentity, bool)
 }
 
 // EndpointResolver 把 ResolveEndpoint/RegisterEndpoint/UnregisterEndpoint 转发给
-// internal/endpoint，并在 Request 分派时提供路由查表
+// internal/endpoint, 并在 Request 分派时提供路由查表
 //
-// 接口在本包（消费者）定义，实现由 *endpoint.Module 提供，同 ComponentResolver/
-// PermissionChecker 的既有模式。endpoint 包本身不 import ipc - ConnHandle/
-// RouteInfo/RouteError 等支撑类型定义在 endpoint 一侧，IPC 只依赖窄接口，
+// 接口在本包 (消费者) 定义, 实现由 *endpoint.Module 提供, 同 ComponentResolver/
+// PermissionChecker 的既有模式. endpoint 包本身不 import ipc - ConnHandle/
+// RouteInfo/RouteError 等支撑类型定义在 endpoint 一侧, IPC 只依赖窄接口,
 // 避免 endpoint 反向依赖传输层
 type EndpointResolver interface {
 	ResolveEndpoint(conn endpoint.ConnHandle, caller identity.Caller, req *ipcv1.ResolveEndpoint) *ipcv1.ResolveEndpointResult
 	RegisterEndpoint(conn endpoint.ConnHandle, caller identity.Caller, req *ipcv1.RegisterEndpoint) *ipcv1.RegisterEndpointResult
 	UnregisterEndpoint(conn endpoint.ConnHandle, req *ipcv1.UnregisterEndpoint) *ipcv1.UnregisterEndpointResult
 
-	// Route 供 handleRequest 用：拿到 endpoint_id 后查一次"转给谁、需要什么
-	// 权限、这次调用是否仍然合法"。ipc 自己不缓存任何路由状态，每次都查
+	// Route 供 handleRequest 用: 拿到 endpoint_id 后查一次"转给谁, 需要什么
+	// 权限, 这次调用是否仍然合法". ipc 自己不缓存任何路由状态, 每次都查
 	Route(conn endpoint.ConnHandle, endpointID uint64, methodID uint32) (endpoint.RouteInfo, endpoint.RouteError)
 
-	// RouteEvent 是订阅侧的准入：拿到 (endpoint_id, event_id) 后查一次
-	// 「事件源在哪、权威 EventMeta 是什么、这次订阅是否合法」。
-	// 准入链与 Route 同源，差别只在最后一步查的是事件而非方法
+	// RouteEvent 是订阅侧的准入: 拿到 (endpoint_id, event_id) 后查一次
+	// "事件源在哪, 权威 EventMeta 是什么, 这次订阅是否合法".
+	// 准入链与 Route 同源, 差别只在最后一步查的是事件而非方法
 	RouteEvent(conn endpoint.ConnHandle, endpointID uint64, eventID uint32) (endpoint.EventRoute, endpoint.RouteError)
 
-	// LookupProviderEvent 校验一次 PublishEvent：这条连接是否真的拥有该
-	// endpoint，以及该 event_id 是否在契约里声明过
+	// LookupProviderEvent 校验一次 PublishEvent: 这条连接是否真的拥有该
+	// endpoint, 以及该 event_id 是否在契约里声明过
 	LookupProviderEvent(conn endpoint.ConnHandle, serviceEndpointID uint64, eventID uint32) (catalog.EventDefinition, endpoint.RouteError)
 
-	// OwnsEndpoint 回答「这条连接是否拥有这个 registration」。
+	// OwnsEndpoint 回答"这条连接是否拥有这个 registration".
 	//
-	// BindEventScope 走它：少了这道检查，任何一个系统服务都能替别的 endpoint
-	// 登记实例归属——进而把自己塞进别人的事件流。
+	// BindEventScope 走它: 少了这道检查, 任何一个系统服务都能替别的 endpoint
+	// 登记实例归属 - 进而把自己塞进别人的事件流.
 	OwnsEndpoint(conn endpoint.ConnHandle, serviceEndpointID uint64) bool
 
-	// ConnClosed 由 ipc 在连接的 serve 循环退出时调用一次，让 endpoint 清理
-	// 该连接名下的全部 registration/binding，并使仍存活的关联 binding 失效
+	// ConnClosed 由 ipc 在连接的 serve 循环退出时调用一次, 让 endpoint 清理
+	// 该连接名下的全部 registration/binding, 并使仍存活的关联 binding 失效
 	ConnClosed(conn endpoint.ConnHandle)
 }
 
 // PeerResolver 把 SO_PEERCRED 凭证解析成可信身份
 //
-// 接口在消费者这一侧定义，实现由 internal/identity 提供。ipc 只需要这一个
-// 方法，没有理由持有整个 Registry - 拿到全部方法的模块越少，
+// 接口在消费者这一侧定义, 实现由 internal/identity 提供. ipc 只需要这一个
+// 方法, 没有理由持有整个 Registry - 拿到全部方法的模块越少,
 // 谁能改身份索引这个问题的答案就越短
 type PeerResolver interface {
 	Resolve(cred sysprobe.Ucred) (identity.Caller, error)
@@ -244,13 +244,13 @@ type PeerResolver interface {
 
 // PermissionChecker 查询某个 Package 是否已被授予某项 permission
 //
-// 接口在消费者（ipc）这一侧定义，实现由 internal/permission 提供，同一套
-// 理由：ipc 只需要这一个方法，没有理由持有整个 Registry
+// 接口在消费者 (ipc) 这一侧定义, 实现由 internal/permission 提供, 同一套
+// 理由: ipc 只需要这一个方法, 没有理由持有整个 Registry
 //
-// 当前请求管线还算不出"这个 Request 需要哪个 permission ID"（依赖 internal/
-// endpoint 把 endpoint_id/method_id 映射到 permission ID，而 endpoint 目前
-// 还是空实现），本接口现阶段只是装配期占位；真正的裁决调用点，以及
-// ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED 的使用，要等 endpoint 落地后
+// 当前请求管线还算不出"这个 Request 需要哪个 permission ID" (依赖 internal/
+// endpoint 把 endpoint_id/method_id 映射到 permission ID, 而 endpoint 目前
+// 还是空实现), 本接口现阶段只是装配期占位; 真正的裁决调用点, 以及
+// ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED 的使用, 要等 endpoint 落地后
 // 才随请求管线一起加
 type PermissionChecker interface {
 	Allowed(packageID, permission string) bool
@@ -274,9 +274,9 @@ type TransferManager interface {
 
 // Server 是控制面 UDS 的所有者
 //
-// 生命周期契约：Start 必须快速返回，后台循环的退出只听 Stop，不听 Start(ctx)
-// 的 ctx。若后台循环也监听信号 ctx，它会与 Kernel.stopAll 被同一个信号并行唤醒，
-// 谁先退出不确定，停机顺序就不再由 Kernel 的反序 Stop 唯一决定
+// 生命周期契约: Start 必须快速返回, 后台循环的退出只听 Stop, 不听 Start(ctx)
+// 的 ctx. 若后台循环也监听信号 ctx, 它会与 Kernel.stopAll 被同一个信号并行唤醒,
+// 谁先退出不确定, 停机顺序就不再由 Kernel 的反序 Stop 唯一决定
 type Server struct {
 	sockPath   string
 	log        *slog.Logger
@@ -290,45 +290,45 @@ type Server struct {
 	// configuration knob that bypasses kernel-backed component identity.
 	verifyComponentForTest func(*net.UnixConn, identity.Caller, string) (service.ComponentIdentity, error)
 	endpoints              EndpointResolver
-	// subscriptions 持有全部事件订阅。为 nil 时 Subscribe 回 UNAVAILABLE，
-	// PublishEvent 静默丢弃——最小装配与大量测试并不需要订阅。
+	// subscriptions 持有全部事件订阅. 为 nil 时 Subscribe 回 UNAVAILABLE,
+	// PublishEvent 静默丢弃 - 最小装配与大量测试并不需要订阅.
 	subscriptions *subscription.Registry
-	// eventScopes 记录事件实例的归属（见 eventscope.go）。外部 Provider 的
-	// 按实例订阅靠它裁决。
+	// eventScopes 记录事件实例的归属 (见 eventscope.go). 外部 Provider 的
+	// 按实例订阅靠它裁决.
 	eventScopes *eventScopes
 	leases      ControlLeases
 	launcher    ComponentLauncher
 	resources   ResourceResolver
 	transfer    TransferManager
-	// operations 拥有长任务的状态机。为 nil 时【声明了 returns_operation 的
-	// 方法一律被拒】——不是静默降级成普通调用：那会让调用方拿到一个 OK
-	// 而机器还在动，而它以为已经做完了。
+	// operations 拥有长任务的状态机. 为 nil 时声明了 returns_operation 的
+	// 方法一律被拒 - 不是静默降级成普通调用: 那会让调用方拿到一个 OK
+	// 而机器还在动, 而它以为已经做完了.
 	operations OperationManager
-	// operationWire 是内建 endpoint 的那一份状态（endpoint 句柄），
-	// 由 OperationBuiltinHandler 在装配期建立。
+	// operationWire 是内建 endpoint 的那一份状态 (endpoint 句柄),
+	// 由 OperationBuiltinHandler 在装配期建立.
 	operationWire *operationWire
 	limits        Limits
 	// monotonicNow is the Linux CLOCK_MONOTONIC source used for wire deadlines.
 	// Tests replace it because production sysprobe support is Linux-only.
 	monotonicNow func() (uint64, error)
 
-	// nextConnID 给每条连接分配 control 模块用的标识。从 1 开始（0 留作
-	// "未指定"哨兵，与协议里 request_id 0 保留同一习惯）。
+	// nextConnID 给每条连接分配 control 模块用的标识. 从 1 开始 (0 留作
+	// "未指定"哨兵, 与协议里 request_id 0 保留同一习惯).
 	nextConnID atomic.Uint64
 
 	ln *net.UnixListener
 
-	// lockLn 是单例锁：一个 abstract namespace socket，名字由 sockPath 派生。
-	// 它从不 Accept，只靠占用 abstract 名字来保证同一时刻只有一个 nervud。
+	// lockLn 是单例锁: 一个 abstract namespace socket, 名字由 sockPath 派生.
+	// 它从不 Accept, 只靠占用 abstract 名字来保证同一时刻只有一个 nervud.
 	// 见 acquireSingletonLock
 	lockLn *net.UnixListener
 
-	// quit 由 Stop 关闭，是全部后台 goroutine 的唯一退出信号
+	// quit 由 Stop 关闭, 是全部后台 goroutine 的唯一退出信号
 	quit     chan struct{}
 	quitOnce sync.Once
 	wg       sync.WaitGroup
 
-	// fatal 承载后台循环已经无法继续的错误，容量 1、只写一次
+	// fatal 承载后台循环已经无法继续的错误, 容量 1, 只写一次
 	fatal chan error
 
 	mu    sync.Mutex
@@ -340,22 +340,22 @@ type Server struct {
 	perUID       map[uint32]int
 	started      bool
 
-	// dispatch 是 route_id -> 在途 Dispatch 的唯一权威（dispatch.go），
+	// dispatch 是 route_id -> 在途 Dispatch 的唯一权威 (dispatch.go),
 	// handleRequest/handleDispatchResult/runDispatchReaper/dispatchConnClosed
 	// 共同消费
 	dispatch *dispatchTable
 
-	// rejectLog 给准入拒绝路径的审计限速。被拒绝的连接可以由攻击者任意刷，
+	// rejectLog 给准入拒绝路径的审计限速. 被拒绝的连接可以由攻击者任意刷,
 	// 不限速的话审计日志本身就成了放大器
 	rejectLog rateLimiter
 
-	// violationLog 给协议违规路径的审计限速。畸形帧同样可被恶意连接刷，
+	// violationLog 给协议违规路径的审计限速. 畸形帧同样可被恶意连接刷,
 	// 与 rejectLog 同理需要限速
 	violationLog rateLimiter
 
 	// dispatchRaceLog 给"迟到/未知 route_id 的 DispatchResult"审计限速,与
 	// violationLog 分开的桶 - 这是预期内的正常竞态,不该跟真正的协议违规信号
-	// 抢占同一份审计预算（见 dispatch.go 的 auditDispatchRace）
+	// 抢占同一份审计预算 (见 dispatch.go 的 auditDispatchRace)
 	dispatchRaceLog rateLimiter
 }
 
@@ -364,8 +364,8 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("ipc: SockPath is required")
 	}
 	if !filepath.IsAbs(cfg.SockPath) {
-		// 相对路径的含义取决于进程 cwd，而 cwd 可被 systemd 单元或运行期 chdir
-		// 改变，等于把控制面入口交给外部状态
+		// 相对路径的含义取决于进程 cwd, 而 cwd 可被 systemd 单元或运行期 chdir
+		// 改变, 等于把控制面入口交给外部状态
 		return nil, fmt.Errorf("ipc: SockPath %q must be absolute", cfg.SockPath)
 	}
 	if cfg.Log == nil {
@@ -378,13 +378,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("ipc: Invariants is required")
 	}
 	if cfg.Identity == nil {
-		// 不给默认实现：缺身份解析时唯一安全的默认是谁都不认识，
-		// 那等于开着一个谁也连不上的 socket。装配阶段就该发现
+		// 不给默认实现: 缺身份解析时唯一安全的默认是谁都不认识,
+		// 那等于开着一个谁也连不上的 socket. 装配阶段就该发现
 		return nil, errors.New("ipc: Identity is required")
 	}
 	if cfg.Permission == nil {
-		// 同 Identity：不给默认实现。缺权限查询没有安全的默认值可用，必须在
-		// 装配阶段就暴露出来，而不是留到运行期才发现权限查询从未真正生效
+		// 同 Identity: 不给默认实现. 缺权限查询没有安全的默认值可用, 必须在
+		// 装配阶段就暴露出来, 而不是留到运行期才发现权限查询从未真正生效
 		return nil, errors.New("ipc: Permission is required")
 	}
 	if cfg.Transfer == nil {
@@ -423,11 +423,11 @@ func New(cfg Config) (*Server, error) {
 
 func (s *Server) Name() string { return "ipc" }
 
-// Fatal 实现 kernel.FatalReporter：accept 循环连续失败到放弃时通过本通道上报，
-// 让 Kernel 能反序关闭模块并以非零状态退出，而不是留下失去入口的假健康进程
+// Fatal 实现 kernel.FatalReporter: accept 循环连续失败到放弃时通过本通道上报,
+// 让 Kernel 能反序关闭模块并以非零状态退出, 而不是留下失去入口的假健康进程
 func (s *Server) Fatal() <-chan error { return s.fatal }
 
-// Start 建立监听并起 accept 循环。ctx 仅用于 Start 期间，不被后台循环持有
+// Start 建立监听并起 accept 循环. ctx 仅用于 Start 期间, 不被后台循环持有
 func (s *Server) Start(context.Context) error {
 	s.mu.Lock()
 	if s.started {
@@ -437,13 +437,13 @@ func (s *Server) Start(context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// 1. 先拿单例锁。它保证从这行往后，本进程是唯一的 nervud，后面对残骸
-	// socket 的清理才能无条件安全（没有活实例可能拥有那个 socket）
+	// 1. 先拿单例锁. 它保证从这行往后, 本进程是唯一的 nervud, 后面对残骸
+	// socket 的清理才能无条件安全 (没有活实例可能拥有那个 socket)
 	if err := s.acquireSingletonLock(); err != nil {
 		return err
 	}
-	// 锁拿到之后，Start 的任何一步失败都必须把它还回去，否则同一 sockPath 再也
-	// 起不来（abstract 名字被本进程一直占着）
+	// 锁拿到之后, Start 的任何一步失败都必须把它还回去, 否则同一 sockPath 再也
+	// 起不来 (abstract 名字被本进程一直占着)
 	ok := false
 	defer func() {
 		if !ok {
@@ -452,8 +452,8 @@ func (s *Server) Start(context.Context) error {
 		}
 	}()
 
-	// 2. 父目录由 systemd 的 RuntimeDirectory=nervus 创建（0755，root 所有）。
-	// 这里只检查不创建：建目录是特权文件系统操作，该走 authority，而让 ipc
+	// 2. 父目录由 systemd 的 RuntimeDirectory=nervus 创建 (0755, root 所有).
+	// 这里只检查不创建: 建目录是特权文件系统操作, 该走 authority, 而让 ipc
 	// 自己 MkdirAll 会在内核里多开一条绕过 Gate 的写路径
 	dir := filepath.Dir(s.sockPath)
 	fi, err := os.Stat(dir)
@@ -464,7 +464,7 @@ func (s *Server) Start(context.Context) error {
 		return fmt.Errorf("ipc: runtime dir %s is not a directory", dir)
 	}
 
-	// 3. 清理残骸。持锁在手，任何遗留的 socket 文件必然是死的
+	// 3. 清理残骸. 持锁在手, 任何遗留的 socket 文件必然是死的
 	if err := s.clearStaleSocket(); err != nil {
 		return err
 	}
@@ -473,11 +473,11 @@ func (s *Server) Start(context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ipc: listen %s: %w", s.sockPath, err)
 	}
-	// 显式声明：关闭监听时删除 socket 文件，不依赖默认行为
+	// 显式声明: 关闭监听时删除 socket 文件, 不依赖默认行为
 	ln.SetUnlinkOnClose(true)
 
-	// bind 时的权限受 umask 削减（通常落到 0755），必须显式改写。
-	// 这个中间窗口是安全的：窗口内权限只会更严，不会更松
+	// bind 时的权限受 umask 削减 (通常落到 0755), 必须显式改写.
+	// 这个中间窗口是安全的: 窗口内权限只会更严, 不会更松
 	if err := os.Chmod(s.sockPath, socketMode); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("ipc: chmod %s: %w", s.sockPath, err)
@@ -497,32 +497,32 @@ func (s *Server) Start(context.Context) error {
 
 // singletonLockName 由 sockPath 派生 abstract namespace socket 名字
 //
-// 用 @ 前缀让 net 包把它当作 abstract socket（Go 约定：首字节替换为 NUL）。
-// 由 sockPath 派生而不是写死一个全局名：不同 sockPath 的实例互不干扰（测试
-// 友好），同一 sockPath 的实例互斥（生产正确，路径固定为 /run/nervus/nervud.sock）
+// 用 @ 前缀让 net 包把它当作 abstract socket (Go 约定: 首字节替换为 NUL).
+// 由 sockPath 派生而不是写死一个全局名: 不同 sockPath 的实例互不干扰 (测试
+// 友好), 同一 sockPath 的实例互斥 (生产正确, 路径固定为 /run/nervus/nervud.sock)
 func (s *Server) singletonLockName() string { return "@" + s.sockPath }
 
 // acquireSingletonLock 用 abstract namespace socket 的 bind 原子性做单例锁
 //
-// 为什么用它而不是 dial 探测 + unlink 残骸：
+// 为什么用它而不是 dial 探测 + unlink 残骸:
 //
-//	abstract socket 的 bind 由内核保证原子 - 两个进程同时 bind 同名，只有一个
-//	成功，另一个拿 EADDRINUSE。这一步到位地消除了 探测判死 -> unlink -> rebind 之间
-//	的 TOCTOU：不可能出现两个实例都判定 旧 socket 已死 然后各自 bind 成功
+//	abstract socket 的 bind 由内核保证原子 - 两个进程同时 bind 同名, 只有一个
+//	成功, 另一个拿 EADDRINUSE. 这一步到位地消除了 探测判死 -> unlink -> rebind 之间
+//	的 TOCTOU: 不可能出现两个实例都判定 旧 socket 已死 然后各自 bind 成功
 //
-//	而且 abstract socket 不在文件系统，进程退出内核自动回收 - 没有残骸，
-//	不需要 死活探测 那一整套。持锁本身就证明了 没有别的活实例
+//	而且 abstract socket 不在文件系统, 进程退出内核自动回收 - 没有残骸,
+//	不需要 死活探测 那一整套. 持锁本身就证明了 没有别的活实例
 //
-// 权衡（有意接受）：abstract 名字不走文件系统权限，netns 内任何进程都能 bind，
-// 因此一个恶意本地进程可以抢先占用本名字来阻止 nervud 启动。对本部署可接受：
-// nervud 开机时最先启动（早于任何 app），获取锁时无人竞争；崩溃重启且恰有恶意
-// app 抢占的窗口由 systemd StartLimitAction=reboot 兜底自愈。真正 squat-proof
-// 的方案是 root-owned 锁文件上的 flock（那需要 depguard 决策，另议）
+// 权衡 (有意接受): abstract 名字不走文件系统权限, netns 内任何进程都能 bind,
+// 因此一个恶意本地进程可以抢先占用本名字来阻止 nervud 启动. 对本部署可接受:
+// nervud 开机时最先启动 (早于任何 app), 获取锁时无人竞争; 崩溃重启且恰有恶意
+// app 抢占的窗口由 systemd StartLimitAction=reboot 兜底自愈. 真正 squat-proof
+// 的方案是 root-owned 锁文件上的 flock (那需要 depguard 决策, 另议)
 func (s *Server) acquireSingletonLock() error {
 	name := s.singletonLockName()
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: name, Net: "unix"})
 	if err != nil {
-		// 绝大多数是 EADDRINUSE：另一个 nervud 正持有锁。也可能是被 squat
+		// 绝大多数是 EADDRINUSE: 另一个 nervud 正持有锁. 也可能是被 squat
 		return fmt.Errorf("ipc: cannot acquire singleton lock %q (another nervud running?): %w", name, err)
 	}
 	s.lockLn = ln
@@ -531,9 +531,9 @@ func (s *Server) acquireSingletonLock() error {
 
 // Stop 停止接客并回收全部连接
 //
-// 顺序固定：先 close(quit) 让循环知道这是计划内停机，再关监听打断阻塞中的
-// Accept，最后强制关闭存活连接打断阻塞中的 Read。反过来做的话，Accept 会先
-// 返回一个错误而循环尚不知道该退出，从而走进错误处理与退避分支
+// 顺序固定: 先 close(quit) 让循环知道这是计划内停机, 再关监听打断阻塞中的
+// Accept, 最后强制关闭存活连接打断阻塞中的 Read. 反过来做的话, Accept 会先
+// 返回一个错误而循环尚不知道该退出, 从而走进错误处理与退避分支
 func (s *Server) Stop(ctx context.Context) error {
 	s.quitOnce.Do(func() { close(s.quit) })
 
@@ -560,14 +560,14 @@ func (s *Server) Stop(ctx context.Context) error {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		// 超时即放弃等待并返回错误。进程仍会退出，安全性由 systemd 重启与
+		// 超时即放弃等待并返回错误. 进程仍会退出, 安全性由 systemd 重启与
 		// MCU 心跳刹停兜底
 		errs = append(errs, fmt.Errorf("goroutines not drained: %w", ctx.Err()))
 	}
 
-	// 最后释放单例锁。放在连接回收之后：只要还在收尾，就还占着锁，
-	// 不给一个抢跑的新实例留出 我以为前一个已经退干净了 的窗口。
-	// abstract socket 关闭即由内核回收，无文件残留
+	// 最后释放单例锁. 放在连接回收之后: 只要还在收尾, 就还占着锁,
+	// 不给一个抢跑的新实例留出 我以为前一个已经退干净了 的窗口.
+	// abstract socket 关闭即由内核回收, 无文件残留
 	if s.lockLn != nil {
 		if err := s.lockLn.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close singleton lock: %w", err))
@@ -581,12 +581,12 @@ func (s *Server) Stop(ctx context.Context) error {
 
 // clearStaleSocket 清理主 socket 路径上的残骸
 //
-// 前提：调用方已持有单例锁（acquireSingletonLock）。因此这里不需要探测
-// 死活 - 锁已经证明没有别的活实例，那么路径上若有一个 socket，它必然是上次
-// 运行留下的残骸（崩溃或 SIGKILL，来不及 unlink），可以无条件删除
+// 前提: 调用方已持有单例锁 (acquireSingletonLock). 因此这里不需要探测
+// 死活 - 锁已经证明没有别的活实例, 那么路径上若有一个 socket, 它必然是上次
+// 运行留下的残骸 (崩溃或 SIGKILL, 来不及 unlink), 可以无条件删除
 //
-// 仍然保留的唯一防线：路径存在但不是 socket时拒绝而非删除。万一 sockPath
-// 被配置错误地指到了一个普通文件，盲删不可逆 - 这条与单例锁无关，是防手滑
+// 仍然保留的唯一防线: 路径存在但不是 socket时拒绝而非删除. 万一 sockPath
+// 被配置错误地指到了一个普通文件, 盲删不可逆 - 这条与单例锁无关, 是防手滑
 func (s *Server) clearStaleSocket() error {
 	fi, err := os.Lstat(s.sockPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -600,7 +600,7 @@ func (s *Server) clearStaleSocket() error {
 		return fmt.Errorf("ipc: %s exists and is not a socket (mode %s); refusing to remove", s.sockPath, fi.Mode())
 	}
 
-	// 持锁在手，这个 socket 必然是残骸
+	// 持锁在手, 这个 socket 必然是残骸
 	s.log.Warn("ipc: removing stale socket", "sock", s.sockPath)
 	if err := os.Remove(s.sockPath); err != nil {
 		return fmt.Errorf("ipc: remove stale socket %s: %w", s.sockPath, err)
@@ -613,8 +613,8 @@ const acceptBackoffMax = 200 * time.Millisecond
 
 // acceptFailureLimit 是放弃前允许的连续失败次数
 //
-// 有它是因为退避不能无限重试：监听 fd 若进入永久错误状态，无限循环会把内核
-// 变成一个占着 socket 却永远不接客的空壳，而外部看不出区别
+// 有它是因为退避不能无限重试: 监听 fd 若进入永久错误状态, 无限循环会把内核
+// 变成一个占着 socket 却永远不接客的空壳, 而外部看不出区别
 const acceptFailureLimit = 32
 
 func (s *Server) acceptLoop() {
@@ -626,7 +626,7 @@ func (s *Server) acceptLoop() {
 	for {
 		c, err := s.ln.AcceptUnix()
 		if err != nil {
-			// 计划内停机：Stop 已经 close(quit) 并关掉了监听
+			// 计划内停机: Stop 已经 close(quit) 并关掉了监听
 			select {
 			case <-s.quit:
 				return
@@ -644,7 +644,7 @@ func (s *Server) acceptLoop() {
 				return
 			}
 
-			// 不自旋：EMFILE/ENFILE 这类错误会立刻重现，全速重试只会把一个核
+			// 不自旋: EMFILE/ENFILE 这类错误会立刻重现, 全速重试只会把一个核
 			// 烧满而不解决任何问题
 			if backoff == 0 {
 				backoff = time.Millisecond
@@ -669,27 +669,27 @@ func (s *Server) acceptLoop() {
 
 // admit 对新连接做准入判定
 //
-// 检查顺序按代价从小到大排列，且全部在分配 goroutine 与读缓冲之前完成。顺序
-// 反了的话，攻击者用必然被拒的连接照样能迫使内核先分配 128 KiB 缓冲
+// 检查顺序按代价从小到大排列, 且全部在分配 goroutine 与读缓冲之前完成. 顺序
+// 反了的话, 攻击者用必然被拒的连接照样能迫使内核先分配 128 KiB 缓冲
 func (s *Server) admit(c *net.UnixConn) {
 	cred, err := sysprobe.PeerCred(c)
 	if err != nil {
-		// 读不到内核凭证就无法归因，只能断开。正常连接不会走到这里
+		// 读不到内核凭证就无法归因, 只能断开. 正常连接不会走到这里
 		s.reject(c, 0, "peer credentials unavailable", err)
 		return
 	}
 
-	// App UID 区段检查：一次整数比较，把系统账号、登录用户、root 全部挡在分配
-	// 任何资源之前。这条不变量由 authority 拥有，此处复用而不是重新声明
+	// App UID 区段检查: 一次整数比较, 把系统账号, 登录用户, root 全部挡在分配
+	// 任何资源之前. 这条不变量由 authority 拥有, 此处复用而不是重新声明
 	if err := s.inv.CheckUID(cred.UID); err != nil {
 		s.reject(c, cred.UID, "uid outside app range", err)
 		return
 	}
 
-	// 身份解析：UID 落在区段内不代表它属于某个已注册 Package。手工创建的
-	// 系统用户、或者进程还活着但 Package 已被卸载，都会走到这里被拒
+	// 身份解析: UID 落在区段内不代表它属于某个已注册 Package. 手工创建的
+	// 系统用户, 或者进程还活着但 Package 已被卸载, 都会走到这里被拒
 	//
-	// 排在区段检查之后：那是一次整数比较，本步是一次原子 Load 加 map 查找，
+	// 排在区段检查之后: 那是一次整数比较, 本步是一次原子 Load 加 map 查找,
 	// 先便宜后贵
 	caller, err := s.identity.Resolve(cred)
 	if err != nil {
@@ -720,8 +720,8 @@ func (s *Server) admit(c *net.UnixConn) {
 	}()
 }
 
-// release 把连接从注册表摘掉。必须与 admit 中的登记严格配对，否则 perUID 计数
-// 只增不减，该 UID 会被永久锁在额度之外
+// release 把连接从注册表摘掉. 必须与 admit 中的登记严格配对, 否则 perUID 计数
+// 只增不减, 该 UID 会被永久锁在额度之外
 func (s *Server) release(c *net.UnixConn, uid uint32) {
 	_ = c.Close()
 
@@ -752,20 +752,20 @@ func (s *Server) reject(c *net.UnixConn, uid uint32, reason string, err error) {
 	})
 }
 
-// serve 是单条连接的帧泵：分帧、超时、每帧准入复核，然后把每个良构 Envelope
-// 交给连接状态机（conn）。握手（Hello/HelloAck 协商版本、下发 ConnectionLimits）
+// serve 是单条连接的帧泵: 分帧, 超时, 每帧准入复核, 然后把每个良构 Envelope
+// 交给连接状态机 (conn). 握手 (Hello/HelloAck 协商版本, 下发 ConnectionLimits)
 // 与握手后的 body 分派都在 conn.go
 func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 	log := s.log.With("package", caller.PackageID, "uid", caller.UID, "pid", caller.PID)
 
-	// 每连接一块读缓冲并复用，稳态下帧读取不产生堆分配。
+	// 每连接一块读缓冲并复用, 稳态下帧读取不产生堆分配.
 	// MaxConns 决定了这部分内存的上界
 	buf := make([]byte, MaxFrameBytes)
 
-	// 入站帧速率闸门，单连接一个（ 第一道，见 Limits.MaxFramesPerConnPerSec）
+	// 入站帧速率闸门, 单连接一个 (第一道, 见 Limits.MaxFramesPerConnPerSec)
 	frameRate := newRateLimiter(s.limits.MaxFramesPerConnPerSec, time.Second)
 
-	// 连接状态机：第一帧必须是 Hello，握手完成前不接受其它 body（conn.go）
+	// 连接状态机: 第一帧必须是 Hello, 握手完成前不接受其它 body (conn.go)
 	co := newConn(s, c, caller, log)
 	s.mu.Lock()
 	s.controlConns[co.connID] = co
@@ -778,52 +778,52 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		s.mu.Unlock()
 	}()
 
-	// 独立 writer goroutine：本连接自己的出站帧全部经 co.outbox
-	// 排队，只有它真正调用 co.c.Write（conn.go 的 runWriter）。在读循环之前
-	// 起，好让握手的 HelloAck 也走同一条路径
+	// 独立 writer goroutine: 本连接自己的出站帧全部经 co.outbox
+	// 排队, 只有它真正调用 co.c.Write (conn.go 的 runWriter). 在读循环之前
+	// 起, 好让握手的 HelloAck 也走同一条路径
 	s.wg.Add(1)
 	go co.runWriter()
 
-	// 下面三个 defer 按 LIFO 执行，即 serve 返回时的实际顺序是：
+	// 下面三个 defer 按 LIFO 执行, 即 serve 返回时的实际顺序是:
 	//  1. dispatchConnClosed - 摘掉 route 表里以本连接为 target/source 的
-	//   表项（结果送去的是别的连接的 outbox，不影响本连接自己的收尾）
+	//  表项 (结果送去的是别的连接的 outbox, 不影响本连接自己的收尾)
 	//  2. endpoints.ConnClosed - 通知 endpoint 清理本连接名下的全部
-	//   使 endpoint registration 和 binding 失效
+	//  使 endpoint registration 和 binding 失效
 	//  3. 关闭本连接自己的 outbox 并等 writer 真正退出 - 必须等它停止碰 socket
-	//   之后，admit 那层的 release 才能安全 Close 底层连接
+	//  之后, admit 那层的 release 才能安全 Close 底层连接
 	defer func() {
 		co.outbox.close()
 		<-co.writerDone
 	}()
 	if s.endpoints != nil {
 		// co 本身作为 endpoint.ConnHandle 传入 - 两个命名空间的 endpoint_id
-		// 靠这份指针身份区分，而不是数字本身
+		// 靠这份指针身份区分, 而不是数字本身
 		defer s.endpoints.ConnClosed(co)
 	}
 	if s.subscriptions != nil {
-		// 清掉本连接名下的全部订阅。
+		// 清掉本连接名下的全部订阅.
 		//
-		// 【不发 SubscriptionClosed】：对端已经没了，发给谁。它与因背压终止
-		// 单条订阅不是一回事——那时连接还活着，必须告诉它哪一条没了。
+		// 不发 SubscriptionClosed: 对端已经没了, 发给谁. 它与因背压终止
+		// 单条订阅不是一回事 - 那时连接还活着, 必须告诉它哪一条没了.
 		//
 		// 本连接作为 Provider 时的清理由 endpoints.ConnClosed 触发的
-		// endpoint 失效链路负责，不在这里。
+		// endpoint 失效链路负责, 不在这里.
 		defer s.subscriptions.CloseConn(co)
 	}
 	if s.eventScopes != nil {
-		// 两个方向都要清：这条连接可能是登记方（Provider），也可能是被登记的
-		// 归属方（调用方）。少任一边都会留下永远清不掉的条目。
+		// 两个方向都要清: 这条连接可能是登记方 (Provider), 也可能是被登记的
+		// 归属方 (调用方). 少任一边都会留下永远清不掉的条目.
 		defer s.eventScopes.closeProvider(co)
 		defer s.eventScopes.closeOwner(co)
 	}
 	if s.leases != nil {
-		// 撤掉本连接名下的全部 ControlLease。租约绑连接、断开即失效，不撤的话
-		// 一个断了线的 App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL
-		// 自然到期 —— 对机器人来说那是一段谁都动不了的时间。
+		// 撤掉本连接名下的全部 ControlLease. 租约绑连接, 断开即失效, 不撤的话
+		// 一个断了线的 App 仍然"持有"执行器控制权, 谁也抢不走, 直到 TTL
+		// 自然到期 - 对机器人来说那是一段谁都动不了的时间.
 		//
-		// 放在 endpoints.ConnClosed 之后注册 = 【先于】它执行（defer 后进先出）：
-		// 先撤运动授权，再拆路由。反过来的话，拆路由与撤租之间存在一个窗口，
-		// 期间本连接的 lease 仍然有效而路由已经没了。
+		// 放在 endpoints.ConnClosed 之后注册 = 先于它执行 (defer 后进先出):
+		// 先撤运动授权, 再拆路由. 反过来的话, 拆路由与撤租之间存在一个窗口,
+		// 期间本连接的 lease 仍然有效而路由已经没了.
 		defer s.leases.RevokeConn(co.leaseConnID())
 	}
 	// The transfer data plane is also connection-scoped. Register this before
@@ -839,8 +839,8 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		default:
 		}
 
-		// 读窗口由 conn 当前 phase 决定：握手期用短得多的 HandshakeTimeout，
-		// 握手后转入由 Ping/Pong 维持的 IdleTimeout（见 conn.readDeadline）
+		// 读窗口由 conn 当前 phase 决定: 握手期用短得多的 HandshakeTimeout,
+		// 握手后转入由 Ping/Pong 维持的 IdleTimeout (见 conn.readDeadline)
 		if err := c.SetReadDeadline(time.Now().Add(co.readDeadline())); err != nil {
 			return
 		}
@@ -850,7 +850,7 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 			return
 		}
 
-		// 长度已收到，正文必须很快到齐，换用短得多的正文 deadline
+		// 长度已收到, 正文必须很快到齐, 换用短得多的正文 deadline
 		if err := c.SetReadDeadline(time.Now().Add(s.limits.FrameBodyTimeout)); err != nil {
 			return
 		}
@@ -860,7 +860,7 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 			return
 		}
 
-		// 帧速率闸门：一个死循环刷帧的 App 到这里被截断。正常客户端远够不着
+		// 帧速率闸门: 一个死循环刷帧的 App 到这里被截断. 正常客户端远够不着
 		if !frameRate.allow() {
 			log.Warn("ipc: inbound frame rate exceeded, closing connection",
 				"limit_per_sec", s.limits.MaxFramesPerConnPerSec)
@@ -868,31 +868,31 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 			return
 		}
 
-		// 每帧复核身份存活：UID 稳定，用它重新查表即可发现 Package 被卸载
-		// 或 Trust 变化（每次调用做快速存活复核）。发现即断开，
+		// 每帧复核身份存活: UID 稳定, 用它重新查表即可发现 Package 被卸载
+		// 或 Trust 变化 (每次调用做快速存活复核). 发现即断开,
 		// 客户端重连时会用新身份重新握手
 		//
-		// 覆盖范围有限，需说明：这只挡住 卸载/降权 这类 identity 层面的撤权，
+		// 覆盖范围有限, 需说明: 这只挡住 卸载/降权 这类 identity 层面的撤权,
 		// 且只在客户端发帧时触发 - 一条一言不发的空闲连接要等 IdleTimeout
-		// 才被回收。细粒度的 Permission 撤权、以及对空闲连接的主动断开，属于
-		// permission 模块与 Envelope 层（EndpointRevoked），不在这里
+		// 才被回收. 细粒度的 Permission 撤权, 以及对空闲连接的主动断开, 属于
+		// permission 模块与 Envelope 层 (EndpointRevoked), 不在这里
 		if !s.identityStillValid(co.caller) {
 			log.Warn("ipc: caller identity revoked mid-connection, closing")
 			s.auditViolation(co.caller, errIdentityRevoked)
 			return
 		}
 
-		// 先解外层小结构并校验良构，之后才谈得上业务分派。要求这个
-		// 顺序：身份、endpoint、方法、长度、权限都过了，才用生成代码去解方法
-		// payload，以免未授权输入直接驱动业务解析器
+		// 先解外层小结构并校验良构, 之后才谈得上业务分派. 要求这个
+		// 顺序: 身份, endpoint, 方法, 长度, 权限都过了, 才用生成代码去解方法
+		// payload, 以免未授权输入直接驱动业务解析器
 		env, err := parseEnvelope(body)
 		if err != nil {
 			s.logConnExit(log, co.caller, err)
 			return
 		}
 
-		// 连接状态机处理：握手协商、下发 ConnectionLimits、握手后按 body 分派。
-		// 返回 false 表示应关闭本连接（原因已由 co 审计/记录）
+		// 连接状态机处理: 握手协商, 下发 ConnectionLimits, 握手后按 body 分派.
+		// 返回 false 表示应关闭本连接 (原因已由 co 审计/记录)
 		if !co.handle(env) {
 			return
 		}
@@ -900,25 +900,25 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 }
 
 var (
-	// errComponentUnverifiable：无法核对（核对基础设施未接线，或对端不在受管 cgroup、
-	// 内核太旧无 SO_PEERPIDFD 等能力缺口）。属能力缺口而非攻击，fail closed 但不算违规
+	// errComponentUnverifiable: 无法核对 (核对基础设施未接线, 或对端不在受管 cgroup,
+	// 内核太旧无 SO_PEERPIDFD 等能力缺口). 属能力缺口而非攻击, fail closed 但不算违规
 	errComponentUnverifiable = errors.New("ipc: component verification unavailable")
 
-	// errComponentMismatch：核对到客户端自报 Component 与内核事实不一致（UID/包/
-	// 组件 ID 对不上，或 unit 非受管组件，或组件已停用）。这是潜在伪装，永远拒绝并审计
+	// errComponentMismatch: 核对到客户端自报 Component 与内核事实不一致 (UID/包/
+	// 组件 ID 对不上, 或 unit 非受管组件, 或组件已停用). 这是潜在伪装, 永远拒绝并审计
 	errComponentMismatch = errors.New("ipc: declared component does not match kernel facts")
 )
 
-// verifyComponent 是验证声明而不是相信声明的落点：
-// 用对端进程的 cgroup 解出它所属的 systemd unit，经 ComponentResolver 拿到这个 unit
-// 到底是哪个 Package 的哪个 Component、UID、是否停用的内核事实，与客户端在 Hello 里
-// 自报的 declared_component_id 交叉核对，返回核对确认的 Component ID
+// verifyComponent 是验证声明而不是相信声明的落点:
+// 用对端进程的 cgroup 解出它所属的 systemd unit, 经 ComponentResolver 拿到这个 unit
+// 到底是哪个 Package 的哪个 Component, UID, 是否停用的内核事实, 与客户端在 Hello 里
+// 自报的 declared_component_id 交叉核对, 返回核对确认的 Component ID
 //
-// 两类失败严格区分：
-//   - errComponentUnverifiable（能力缺口）：Components 未接线、对端不在受管 cgroup、
-//     内核无 SO_PEERPIDFD 且回退也失败。fail closed，但不审计为违规。
-//   - errComponentMismatch（潜在伪装）：核对到不一致。永远拒绝并审计；信任自报
-//     等于把身份决策权交给对端，正是禁止的。
+// 两类失败严格区分:
+//   - errComponentUnverifiable (能力缺口): Components 未接线, 对端不在受管 cgroup,
+//     内核无 SO_PEERPIDFD 且回退也失败. fail closed, 但不审计为违规.
+//   - errComponentMismatch (潜在伪装): 核对到不一致. 永远拒绝并审计; 信任自报
+//     等于把身份决策权交给对端, 正是禁止的.
 func (s *Server) verifyComponent(
 	uc *net.UnixConn,
 	caller identity.Caller,
@@ -944,11 +944,11 @@ func (s *Server) verifyComponent(
 		var ok bool
 		inst, ok = s.components.LookupComponentByUnit(unit)
 		if !ok {
-			// 对端所在 unit 不是 nervud 起的受管组件 - 可能是伪装，或非受管进程连了上来
+			// 对端所在 unit 不是 nervud 起的受管组件 - 可能是伪装, 或非受管进程连了上来
 			return service.ComponentIdentity{}, fmt.Errorf("%w: unit %q is not a managed component", errComponentMismatch, unit)
 		}
 	}
-	// 内核事实交叉核对（任一不符即潜在伪装）
+	// 内核事实交叉核对 (任一不符即潜在伪装)
 	if inst.UID != caller.UID {
 		return service.ComponentIdentity{}, fmt.Errorf("%w: unit uid %d != peer uid %d", errComponentMismatch, inst.UID, caller.UID)
 	}
@@ -971,14 +971,14 @@ func (s *Server) verifyComponent(
 
 // resolvePeerUnit 解析对端进程当前所属的 systemd unit
 //
-// 优先 SO_PEERPIDFD（稳定引用，免 PID 回收竞态）读 cgroup；不可用（内核 <6.5）时
-// 回退到 SO_PEERCRED PID + 复核 /proc/<pid> 属主仍等于 SO_PEERCRED UID 后再读 cgroup。
-// 回退路径的残留风险：同一 Package 内 component A 冒充 component B（同 UID、同数据目录）
-// - 如实记录，不假装解决
+// 优先 SO_PEERPIDFD (稳定引用, 免 PID 回收竞态) 读 cgroup; 不可用 (内核 <6.5) 时
+// 回退到 SO_PEERCRED PID + 复核 /proc/<pid> 属主仍等于 SO_PEERCRED UID 后再读 cgroup.
+// 回退路径的残留风险: 同一 Package 内 component A 冒充 component B (同 UID, 同数据目录)
+// - 如实记录, 不假装解决
 func (s *Server) resolvePeerUnit(uc *net.UnixConn, caller identity.Caller) (string, error) {
 	cgroup, err := sysprobe.PeerCgroupViaPIDFD(uc)
 	if err != nil {
-		// 回退：SO_PEERCRED PID + /proc 属主复核
+		// 回退: SO_PEERCRED PID + /proc 属主复核
 		owner, oerr := sysprobe.ProcOwnerUID(caller.PID)
 		if oerr != nil {
 			return "", fmt.Errorf("pidfd path failed (%v); proc owner recheck failed: %v", err, oerr)
@@ -1000,8 +1000,8 @@ func (s *Server) resolvePeerUnit(uc *net.UnixConn, caller identity.Caller) (stri
 
 // unitFromCgroup 从 cgroup v2 路径里取出 nervud 起的 systemd unit 名
 //
-// 受管组件的 cgroup 形如 ".../system.slice/nervus-<pkg>-<comp>.service"（可能有嵌套
-// 的 .slice 层级）。取路径里最后一个以 nervus- 起、.service 结尾的段
+// 受管组件的 cgroup 形如 ".../system.slice/nervus-<pkg>-<comp>.service" (可能有嵌套
+// 的.slice 层级). 取路径里最后一个以 nervus- 起,.service 结尾的段
 func unitFromCgroup(cgroup string) (string, bool) {
 	segs := strings.Split(cgroup, "/")
 	for i := len(segs) - 1; i >= 0; i-- {
@@ -1015,24 +1015,24 @@ func unitFromCgroup(cgroup string) (string, bool) {
 
 // ConnectionLimits 是下发给 SDK 的连接预算
 //
-// in-flight 请求数、payload 和 outbound queue 使用固定默认值。方法 timeout
-// 由 Registry 逐方法声明；订阅数取保守默认值，后续可按设备 profile 收紧
+// in-flight 请求数, payload 和 outbound queue 使用固定默认值. 方法 timeout
+// 由 Registry 逐方法声明; 订阅数取保守默认值, 后续可按设备 profile 收紧
 //
-// 全部字段都下发非零值：proto3 标量缺省是 0，而协议没有定义0 = 尚未实现，
-// 漏填会被 SDK 读成不允许任何 in-flight 请求 / 订阅 / timeout。执行层对这些预算的
-// 强制随 Envelope 层落地，但下发的数值现在就必须是有意义的自律依据
+// 全部字段都下发非零值: proto3 标量缺省是 0, 而协议没有定义0 = 尚未实现,
+// 漏填会被 SDK 读成不允许任何 in-flight 请求 / 订阅 / timeout. 执行层对这些预算的
+// 强制随 Envelope 层落地, 但下发的数值现在就必须是有意义的自律依据
 const (
 	defaultMethodPayloadBytes = 16 << 10  // 普通方法默认 request/response
 	maxInflightRequests       = 64        //
-	maxInflightPayloadBytes   = 1 << 20   // ：1 MiB
-	maxOutboundQueueBytes     = 512 << 10 // ：512 KiB
-	maxSubscriptions          = 64        // 保守默认值，后续按设备 profile 调优
-	defaultMethodTimeoutMs    = 5_000     // Request.timeout_ms=0 时采用（方法 Registry 再细化）
+	maxInflightPayloadBytes   = 1 << 20   //: 1 MiB
+	maxOutboundQueueBytes     = 512 << 10 //: 512 KiB
+	maxSubscriptions          = 64        // 保守默认值, 后续按设备 profile 调优
+	defaultMethodTimeoutMs    = 5_000     // Request.timeout_ms=0 时采用 (方法 Registry 再细化)
 	maxMethodTimeoutMs        = 30_000    // nervud 收紧调用者 timeout 的上限
 )
 
-// connectionLimits 组装本连接下发的 ConnectionLimits。idle_timeout_ms 取自实际强制的
-// Limits.IdleTimeout，其余取上面按 固定或保守约定的常量
+// connectionLimits 组装本连接下发的 ConnectionLimits. idle_timeout_ms 取自实际强制的
+// Limits.IdleTimeout, 其余取上面按 固定或保守约定的常量
 func (s *Server) connectionLimits() *ipcv1.ConnectionLimits {
 	return &ipcv1.ConnectionLimits{
 		MaxFrameBytes:             MaxFrameBytes,
@@ -1047,29 +1047,29 @@ func (s *Server) connectionLimits() *ipcv1.ConnectionLimits {
 	}
 }
 
-// identityStillValid 用连接建立时的凭证重新解析身份，判断它是否仍然有效且未变
+// identityStillValid 用连接建立时的凭证重新解析身份, 判断它是否仍然有效且未变
 //
-// 复用 caller 里已经拿到的内核凭证字段（UID/GID/PID 都来自 SO_PEERCRED，
-// 连接存续期间不变），不重新读 socket
+// 复用 caller 里已经拿到的内核凭证字段 (UID/GID/PID 都来自 SO_PEERCRED,
+// 连接存续期间不变), 不重新读 socket
 func (s *Server) identityStillValid(caller identity.Caller) bool {
 	fresh, err := s.identity.Resolve(sysprobe.Ucred{UID: caller.UID, GID: caller.GID, PID: caller.PID})
 	if err != nil {
 		return false // Package 已被卸载
 	}
-	// Package ID、Trust 或安装运行代次变化，都视为身份已变。代次检查是升级
-	// 边界：旧进程与新进程共用 UID，但旧连接不能继承新版本刚发布的权限。
+	// Package ID, Trust 或安装运行代次变化, 都视为身份已变. 代次检查是升级
+	// 边界: 旧进程与新进程共用 UID, 但旧连接不能继承新版本刚发布的权限.
 	return fresh.PackageID == caller.PackageID &&
 		fresh.Trust == caller.Trust &&
 		fresh.Generation == caller.Generation
 }
 
-// 违规审计用的哨兵错误，让审计记录能被离线规则精确归类
+// 违规审计用的哨兵错误, 让审计记录能被离线规则精确归类
 var (
 	errFrameRateExceeded = errors.New("inbound frame rate exceeded")
 	errIdentityRevoked   = errors.New("caller identity revoked mid-connection")
 )
 
-// logConnExit 区分正常断开与协议违规。两者的处理和审计完全不同，混在一起会让
+// logConnExit 区分正常断开与协议违规. 两者的处理和审计完全不同, 混在一起会让
 // 真正的攻击迹象淹没在客户端正常退出的噪音里
 func (s *Server) logConnExit(log *slog.Logger, caller identity.Caller, err error) {
 	switch {
@@ -1085,10 +1085,11 @@ func (s *Server) logConnExit(log *slog.Logger, caller identity.Caller, err error
 	}
 }
 
-// auditViolation 记一条违规审计，限速，并填上 Subject以便归因到 Package/UID
+// auditViolation 记一条违规审计, 限速, 并填上 Subject以便归因到 Package/UID
 //
-// 之前这条路径既不限速（畸形帧可被恶意连接刷成审计放大器），也不填 Subject
-// （无法归因到是谁干的） - 两个都在这里补上
+// 之前这条路径既不限速 (畸形帧可被恶意连接刷成审计放大器), 也不填 Subject
+//
+//	(无法归因到是谁干的) - 两个都在这里补上
 func (s *Server) auditViolation(caller identity.Caller, err error) {
 	if !s.violationLog.allow() {
 		return
@@ -1101,15 +1102,15 @@ func (s *Server) auditViolation(caller identity.Caller, err error) {
 	})
 }
 
-// auditPublishRejected 记一条被拒的事件上报。
+// auditPublishRejected 记一条被拒的事件上报.
 //
-// 【独立 Action】：Provider 推一个它不拥有的 endpoint 或契约外的 event_id，
-// 既不是协议违规（body 本身合法）也不是能力缺口（本 build 实现了它），
-// 而是 Provider 侧的 bug 或越权尝试。混进上面两类里会让真正的信号被淹没。
-// auditScopeRejected 记一次被拒的实例归属登记。
+// 独立 Action: Provider 推一个它不拥有的 endpoint 或契约外的 event_id,
+// 既不是协议违规 (body 本身合法) 也不是能力缺口 (本 build 实现了它),
+// 而是 Provider 侧的 bug 或越权尝试. 混进上面两类里会让真正的信号被淹没.
+// auditScopeRejected 记一次被拒的实例归属登记.
 //
-// 独立 Action：它既不是协议违规（body 合法）也不是能力缺口（已实现），
-// 混进那两类会淹没真正的信号。
+// 独立 Action: 它既不是协议违规 (body 合法) 也不是能力缺口 (已实现),
+// 混进那两类会淹没真正的信号.
 func (s *Server) auditScopeRejected(
 	caller identity.Caller, endpointID, scope uint64, code ipcv1.StatusCode,
 ) {
@@ -1140,12 +1141,12 @@ func (s *Server) auditPublishRejected(
 	})
 }
 
-// auditUnsupported 记一条收到本 build 尚未实现的 body审计，限速并填 Subject
+// auditUnsupported 记一条收到本 build 尚未实现的 body审计, 限速并填 Subject
 //
-// 与 auditViolation 分开 Action 是为了让离线规则能把能力缺口（未实现）与
-// 协议违规 / 潜在攻击区分开 - 混进同一个 Action，真正的攻击迹象会被未实现
-// 路径的噪音淹没。共用 violationLog 令牌桶：两者都以关闭连接收场，一条连接
-// 至多产出一条，限速要挡的是大量连接各刷一条，共用即可
+// 与 auditViolation 分开 Action 是为了让离线规则能把能力缺口 (未实现) 与
+// 协议违规 / 潜在攻击区分开 - 混进同一个 Action, 真正的攻击迹象会被未实现
+// 路径的噪音淹没. 共用 violationLog 令牌桶: 两者都以关闭连接收场, 一条连接
+// 至多产出一条, 限速要挡的是大量连接各刷一条, 共用即可
 func (s *Server) auditUnsupported(caller identity.Caller, err error) {
 	if !s.violationLog.allow() {
 		return
@@ -1160,7 +1161,7 @@ func (s *Server) auditUnsupported(caller identity.Caller, err error) {
 
 // rateLimiter 是给审计路径用的最小令牌桶
 //
-// 不用 x/time/rate：那会为一件二十行能解决的事引入一个 TCB 依赖
+// 不用 x/time/rate: 那会为一件二十行能解决的事引入一个 TCB 依赖
 type rateLimiter struct {
 	mu       sync.Mutex
 	burst    int
@@ -1189,93 +1190,93 @@ func (r *rateLimiter) allow() bool {
 	return true
 }
 
-// ControlLeases 是 ipc 对 internal/control 的窄接口依赖：申请、释放、连接断开
-// 时撤销该连接名下的全部租约。
+// ControlLeases 是 ipc 对 internal/control 的窄接口依赖: 申请, 释放, 连接断开
+// 时撤销该连接名下的全部租约.
 //
-// 接口由消费者（ipc）定义，*control.Module 隐式满足——与 EndpointResolver、
-// PermissionChecker 同一范式。ipc 不需要 control 的续租/抢占/快照能力，
-// 就不把它们写进这个接口。
+// 接口由消费者 (ipc) 定义, *control.Module 隐式满足 - 与 EndpointResolver,
+// PermissionChecker 同一范式. ipc 不需要 control 的续租/抢占/快照能力,
+// 就不把它们写进这个接口.
 type ControlLeases interface {
 	Acquire(req control.Request) (control.Lease, error)
 	Release(id control.ID, conn control.ConnID) error
 	// CheckResource is the method-gate proof that this exact connection still
 	// owns the lease for the resolved resource.
 	CheckResource(conn control.ConnID, resource string, generation uint64) (control.LeaseProof, error)
-	// CheckLease 按租约句柄复核，回答「这个句柄还有效吗、它握的是哪个资源」。
-	// 运动类 operation 的创建走它——那条路径手里只有一个句柄，而必须确认它
-	// 确实覆盖要绑定的那个资源。
+	// CheckLease 按租约句柄复核, 回答"这个句柄还有效吗, 它握的是哪个资源".
+	// 运动类 operation 的创建走它 - 那条路径手里只有一个句柄, 而必须确认它
+	// 确实覆盖要绑定的那个资源.
 	CheckLease(id control.ID, conn control.ConnID) (control.LeaseProof, error)
-	// RevokeConn 撤销某连接名下的全部租约。
+	// RevokeConn 撤销某连接名下的全部租约.
 	//
-	// 【连接收尾时必须调用】。租约绑本连接、不可转让、断开即失效
-	// （envelope.proto: AcquireControlSuccess.lease_id）。不撤的话，一个断了线的
-	// App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL 自然到期——对机器人
-	// 来说那意味着一段谁都动不了的时间。
+	// 连接收尾时必须调用. 租约绑本连接, 不可转让, 断开即失效
+	//  (envelope.proto: AcquireControlSuccess.lease_id). 不撤的话, 一个断了线的
+	// App 仍然"持有"执行器控制权, 谁也抢不走, 直到 TTL 自然到期 - 对机器人
+	// 来说那意味着一段谁都动不了的时间.
 	RevokeConn(conn control.ConnID)
 	// RevokeResource invalidates leases issued against an obsolete catalog
 	// generation before the same public handle can be reused.
 	RevokeResource(resource string, generation uint64)
 }
 
-// OperationManager 是 ipc 对 internal/operation 的窄接口依赖。
+// OperationManager 是 ipc 对 internal/operation 的窄接口依赖.
 //
-// 接口在消费者（ipc）这一侧定义，*operation.Manager 隐式满足——与
-// ComponentResolver / PermissionChecker 同一模式。
+// 接口在消费者 (ipc) 这一侧定义, *operation.Manager 隐式满足 - 与
+// ComponentResolver / PermissionChecker 同一模式.
 type OperationManager interface {
-	// Create 在 dispatch 遇到 returns_operation 方法时建一条 operation。
-	// conn 是调用方连接，provider 是执行方连接。
+	// Create 在 dispatch 遇到 returns_operation 方法时建一条 operation.
+	// conn 是调用方连接, provider 是执行方连接.
 	Create(conn, provider operation.ConnHandle, caller identity.Caller,
 		origin operation.OriginBinding, resources []string,
 		leaseID, epoch uint64, deadline time.Time) (uint64, ipcv1.StatusCode)
 
-	// Get / Cancel 是调用方侧，自带 caller 可见性裁决。
+	// Get / Cancel 是调用方侧, 自带 caller 可见性裁决.
 	Get(caller identity.Caller, id uint64) (operation.Operation, bool)
 	Cancel(caller identity.Caller, id uint64) ipcv1.StatusCode
 
-	// ProviderOperation 是回报侧的归属检查：Provider 只能回报派给它的那些。
+	// ProviderOperation 是回报侧的归属检查: Provider 只能回报派给它的那些.
 	ProviderOperation(provider operation.ConnHandle, id uint64) (operation.Operation, bool)
 
-	// Accept / Progress / Succeed / Fail / Cancelled 是 Provider 的回报接缝。
+	// Accept / Progress / Succeed / Fail / Cancelled 是 Provider 的回报接缝.
 	Accept(id, epoch uint64) error
 	Progress(id uint64, payload []byte) error
 	Succeed(id uint64, result []byte) error
 	Fail(id uint64, code ipcv1.StatusCode, detail []byte) error
 	Cancelled(id uint64) error
 
-	// ReleaseByConn 在连接断开时收敛该连接名下未终结的 operation。
+	// ReleaseByConn 在连接断开时收敛该连接名下未终结的 operation.
 	ReleaseByConn(conn operation.ConnHandle)
 }
 
-// ComponentLauncher 是 ipc 对 internal/service 的窄接口依赖：拉起一个组件，
-// 并回答它此刻在不在跑。*service.Manager 隐式满足。
+// ComponentLauncher 是 ipc 对 internal/service 的窄接口依赖: 拉起一个组件,
+// 并回答它此刻在不在跑. *service.Manager 隐式满足.
 //
-// 与 ComponentResolver（unit → 组件的反查，握手时核对身份用）分成两个接口：
-// 两者的调用时机、失败后果与所需权限都不同，合成一个只会让「谁需要什么」
-// 变模糊。
+// 与 ComponentResolver (unit -> 组件的反查, 握手时核对身份用) 分成两个接口:
+// 两者的调用时机, 失败后果与所需权限都不同, 合成一个只会让"谁需要什么"
+// 变模糊.
 type ComponentLauncher interface {
 	EnsureStarted(ctx context.Context, pkg, comp string) error
 	IsRunning(pkg, comp string) bool
 }
 
-// ResourceResolver 是 ipc 对 internal/resource 的窄接口依赖：把 (type, role)
-// 解析成 resource_handle。
+// ResourceResolver 是 ipc 对 internal/resource 的窄接口依赖: 把 (type, role)
+// 解析成 resource_handle.
 // AcquireControl uses the narrower exclusive-control lookup so catalog entries
 // declared SHARED_OBSERVE can be routed but never leased.
 type ResourceResolver interface {
 	ResolveControl(resourceType, role string) (handle string, generation uint64, ok bool)
-	// ResolveControlBySelector 支持 labels 过滤与多候选策略。AcquireControl 走它；
+	// ResolveControlBySelector 支持 labels 过滤与多候选策略. AcquireControl 走它;
 	// ResolveControl 保留给只有 type/role 的内部调用点
 	ResolveControlBySelector(sel *ipcv1.ResourceSelector) (handle string, generation uint64, ok bool)
 }
 
-// resolveLeaseResource 把 AcquireControl 的 selector 解析成 resource_handle。
+// resolveLeaseResource 把 AcquireControl 的 selector 解析成 resource_handle.
 //
-// 【空 selector 一律拒绝】。v1 曾在这里隐式取 {motion.base, main}，那条默认已
-// 移除：它让「我没写 selector」和「我要底盘」变成同一件事，一个忘了填的调用
-// 会静默地拿到底盘的控制租约——对机器人来说这是最不该有的那种默认。
+// 空 selector 一律拒绝. v1 曾在这里隐式取 {motion.base, main}, 那条默认已
+// 移除: 它让"我没写 selector"和"我要底盘"变成同一件事, 一个忘了填的调用
+// 会静默地拿到底盘的控制租约 - 对机器人来说这是最不该有的那种默认.
 func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, uint64, bool) {
 	if s.resources == nil {
-		// 没有 Resource 目录就没有租约权威。生产装配注入 catalog 支撑的模块
+		// 没有 Resource 目录就没有租约权威. 生产装配注入 catalog 支撑的模块
 		return "", 0, false
 	}
 	if catalog.SelectorIsEmpty(sel) {
@@ -1284,10 +1285,10 @@ func (s *Server) resolveLeaseResource(sel *ipcv1.ResourceSelector) (string, uint
 	return s.resources.ResolveControlBySelector(sel)
 }
 
-// auditLaunch 记一条成功的组件启动。
+// auditLaunch 记一条成功的组件启动.
 //
-// 启动别的组件是一个跨 Package 的动作，审计里必须能回答「谁把它拉起来的」——
-// 排查一个不该在跑的组件时，这是第一个要看的地方。
+// 启动别的组件是一个跨 Package 的动作, 审计里必须能回答"谁把它拉起来的" -
+// 排查一个不该在跑的组件时, 这是第一个要看的地方.
 func (s *Server) auditLaunch(caller identity.Caller, pkg, comp string, alreadyRunning bool) {
 	if s.auditor == nil {
 		return

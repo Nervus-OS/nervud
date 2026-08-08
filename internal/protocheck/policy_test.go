@@ -13,14 +13,13 @@ func TestGateSupportFailsClosed(t *testing.T) {
 	tests := []struct {
 		name string
 		meta *ipcv1.MethodMeta
-		// operationsWired 是装配事实：本次构造有没有 Operation Manager。
+
 		operationsWired bool
 		want            error
 	}{
 		{name: "nil metadata", want: ErrNilMethodMeta},
 		{
-			// 【没接线时长任务必须被拒】，不是降级成普通调用：降级会让调用方
-			// 拿到一个 OK 而机器还在动，它以为已经做完了。
+
 			name: "operation without manager",
 			meta: &ipcv1.MethodMeta{ReturnsOperation: true},
 			want: ErrOperationUnsupported,
@@ -74,16 +73,14 @@ func TestValidateProviderStatus(t *testing.T) {
 			code: ipcv1.StatusCode_STATUS_CODE_OK,
 		},
 		{
-			// 【普通方法回 ACCEPTED 仍然违规】：那意味着它声称创建了一个
-			// 没人拥有的长任务。
+
 			name: "plain method cannot accept",
 			meta: supported, outcome: ProviderOutcomeSuccess,
 			code: ipcv1.StatusCode_STATUS_CODE_ACCEPTED,
 			want: ErrProviderStatus,
 		},
 		{
-			// 长任务可以。nervud 在 Dispatch 之前就建好了 Operation，
-			// 「必须先存在」这个前提由顺序保证。
+
 			name:            "operation method may accept",
 			meta:            &ipcv1.MethodMeta{ReturnsOperation: true},
 			outcome:         ProviderOutcomeSuccess,

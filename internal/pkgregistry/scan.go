@@ -1,11 +1,11 @@
-// 本文件实现 固定的启动扫描：只扫描两个受控来源，不递归扫描任意目录
+// 本文件实现 固定的启动扫描: 只扫描两个受控来源, 不递归扫描任意目录
 //
 //	/usr/lib/nervus/system-packages/*/manifest.json 系统镜像内置 Package
-//	/var/lib/nervus/registry/            nervud 自己提交、
+//	/var/lib/nervus/registry/  nervud 自己提交,
 //	 标记为 active 的动态安装版本索引
 //
-// 同时承担 要求的"每个 Package 一个稳定 UID"的持久化：UID 一旦分配，
-// 写入 /var/lib/nervus/registry/ 下的记账文件，跨重启保持不变
+// 同时承担 要求的"每个 Package 一个稳定 UID"的持久化: UID 一旦分配,
+// 写入 /var/lib/nervus/registry/ 下的记账文件, 跨重启保持不变
 package pkgregistry
 
 import (
@@ -24,8 +24,8 @@ const (
 	// DefaultSystemPackagesDir 是只读系统镜像内置 Package 的固定来源
 	DefaultSystemPackagesDir = "/usr/lib/nervus/system-packages"
 
-	// DefaultRegistryStateDir 保存 Package Registry、活动版本和 UID 分配的
-	// 可信状态；只有 nervud 可修改
+	// DefaultRegistryStateDir 保存 Package Registry, 活动版本和 UID 分配的
+	// 可信状态; 只有 nervud 可修改
 	DefaultRegistryStateDir = "/var/lib/nervus/registry"
 
 	allocatorStateFile = "_allocator.json"
@@ -37,7 +37,7 @@ type ScanResult struct {
 	Skipped []SkippedPackage
 }
 
-// SkippedPackage 记录一个未能装载的 Package 及原因，供审计与诊断
+// SkippedPackage 记录一个未能装载的 Package 及原因, 供审计与诊断
 type SkippedPackage struct {
 	Path string
 	Err  error
@@ -45,12 +45,12 @@ type SkippedPackage struct {
 
 // Scan 执行一次完整的启动扫描
 //
-// packageRoot 通常取 authority.DefaultInvariants.PackageRoot；调用方
-// 显式传入而不是本函数内部硬编码，便于测试用 t.TempDir 隔离
+// packageRoot 通常取 authority.DefaultInvariants.PackageRoot; 调用方
+// 显式传入而不是本函数内部硬编码, 便于测试用 t.TempDir 隔离
 //
-// trust 是签名验证的信任根视图：系统镜像包的 trust 由其 manifest.sig 的真实
-// 验签结论决定（经 Arbitrate），而不是存在于系统目录即 TrustPlatform。trust
-// 为零值（LoadTrustStore 失败）时，platform/oem 签名都验不过 -> 一律 fail-closed
+// trust 是签名验证的信任根视图: 系统镜像包的 trust 由其 manifest.sig 的真实
+// 验签结论决定 (经 Arbitrate), 而不是存在于系统目录即 TrustPlatform. trust
+// 为零值 (LoadTrustStore 失败) 时, platform/oem 签名都验不过 -> 一律 fail-closed
 // 到 Ordinary
 func Scan(stateDir, systemPackagesDir, packageRoot string, trust TrustStore, log *slog.Logger) ScanResult {
 	var result ScanResult
@@ -69,11 +69,11 @@ func Scan(stateDir, systemPackagesDir, packageRoot string, trust TrustStore, log
 // scanSystemImage 扫描系统镜像内置 Package
 //
 // 信任不是存在于系统目录即 TrustPlatform - 那样一来 trust store 失败时
-// main.go 记的non-Ordinary trust disabled就是假的，被写进系统目录的任意包都能
-// 白拿 Platform。这里改为：读 manifest.sig -> 用内嵌根验签的 TrustStore 验签 ->
-// Arbitrate(SourceSystemImage, signers) 定 trust。验不过或缺 sig -> fail-closed
-// 到 Ordinary（不跳过整个包：系统包即便只拿 Ordinary 也应能装载运行，只是拿不到
-// 特权），digest 不符仍是硬 fail（镜像损坏/被篡改的信号）
+// main.go 记的non-Ordinary trust disabled就是假的, 被写进系统目录的任意包都能
+// 白拿 Platform. 这里改为: 读 manifest.sig -> 用内嵌根验签的 TrustStore 验签 ->
+// Arbitrate(SourceSystemImage, signers) 定 trust. 验不过或缺 sig -> fail-closed
+// 到 Ordinary (不跳过整个包: 系统包即便只拿 Ordinary 也应能装载运行, 只是拿不到
+// 特权), digest 不符仍是硬 fail (镜像损坏/被篡改的信号)
 func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *slog.Logger) ([]Entry, []SkippedPackage) {
 	var entries []Entry
 	var skipped []SkippedPackage
@@ -111,7 +111,7 @@ func scanSystemImage(stateDir, systemPackagesDir string, trust TrustStore, log *
 			continue
 		}
 
-		// 验签定 trust。缺 sig 或验不过 -> Ordinary（fail-closed），仍装载；
+		// 验签定 trust. 缺 sig 或验不过 -> Ordinary (fail-closed), 仍装载;
 		// 有效的 platform/oem 签名 -> 经 Arbitrate 给对应特权 trust
 		pkgTrust := identity.TrustOrdinary
 		var signerRoles []string
@@ -306,14 +306,14 @@ func scanDynamicInstalls(
 }
 
 /*func readManifest(path string) (Manifest, error) {
-	data, err := os.ReadFile(path)
+	data, err:= os.ReadFile(path)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pkgregistry: read manifest %s: %w", path, err)
 	}
 	return ParseManifest(data)
 }*/
 
-// stableUID 返回 packageID 已持久化的 UID；若这是第一次见到该 Package，
+// stableUID 返回 packageID 已持久化的 UID; 若这是第一次见到该 Package,
 // 分配一个新的并原子写入记账文件
 func stableUID(stateDir, packageID, version string, trust identity.TrustProfile, src Source) (uint32, error) {
 	sp, err := stateFilePath(stateDir, packageID)
@@ -345,7 +345,7 @@ func stableUID(stateDir, packageID, version string, trust identity.TrustProfile,
 	return uid, nil
 }
 
-// ---- 记账文件（每 Package 一个 JSON 文件）------------------------------
+// ---- 记账文件 (每 Package 一个 JSON 文件) ------------------------------
 
 type registryState struct {
 	PackageID     string `json:"package_id"`
@@ -359,14 +359,14 @@ type registryState struct {
 	// current verified evidence and candidate Catalog.
 	GrantedPermissions []string `json:"granted_permissions,omitempty"`
 
-	// LineageRootKeyID / LineageKeyIDs 是 developer 签名的血统摘要，供升级期的
-	// 签名连续性核对。unverified（devmode）安装时为空 -
-	// 无身份锚点，checkUpgrade 据此放宽连续性（见 upgrade.go）
+	// LineageRootKeyID / LineageKeyIDs 是 developer 签名的血统摘要, 供升级期的
+	// 签名连续性核对. unverified (devmode) 安装时为空 -
+	// 无身份锚点, checkUpgrade 据此放宽连续性 (见 upgrade.go)
 	LineageRootKeyID string   `json:"lineage_root_key_id,omitempty"`
 	LineageKeyIDs    []string `json:"lineage_key_ids,omitempty"`
 
-	// DisabledComponents 是被停用的 Component ID 列表。
-	// 停用按 Component 记，升级/重启后仍生效
+	// DisabledComponents 是被停用的 Component ID 列表.
+	// 停用按 Component 记, 升级/重启后仍生效
 	DisabledComponents []string `json:"disabled_components,omitempty"`
 
 	// RemovalPending is an uninstall tombstone. It is persisted before any
@@ -378,13 +378,13 @@ type registryState struct {
 	RemovalComponents []string `json:"removal_components,omitempty"`
 }
 
-// stateFilePath 计算某个 Package 记账文件的路径，并做纵深防御校验
+// stateFilePath 计算某个 Package 记账文件的路径, 并做纵深防御校验
 //
-// 这条路径不过 Authority Gate（记账文件不跨信任边界，见 writeFileAtomic 的
-// 注释），因此它接收的 packageID 若来自敌意 manifest 且未经校验，就是一个可以
-// 让 nervud 以 root 在 stateDir 之外写文件的洞。治本在
-// manifest.validate 的 validPackageID；这里是第二道：即便上游漏了，也确保拼出的
-// 路径仍严格位于 stateDir 之下，并在拒绝时带上 Clean 后的完整解析路径便于取证
+// 这条路径不过 Authority Gate (记账文件不跨信任边界, 见 writeFileAtomic 的
+// 注释), 因此它接收的 packageID 若来自敌意 manifest 且未经校验, 就是一个可以
+// 让 nervud 以 root 在 stateDir 之外写文件的洞. 治本在
+// manifest.validate 的 validPackageID; 这里是第二道: 即便上游漏了, 也确保拼出的
+// 路径仍严格位于 stateDir 之下, 并在拒绝时带上 Clean 后的完整解析路径便于取证
 func stateFilePath(dir, packageID string) (string, error) {
 	if !validPackageID(packageID) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidPackageID, packageID)
@@ -432,11 +432,11 @@ type allocatorState struct {
 	NextUID uint32 `json:"next_uid"`
 }
 
-// allocateUID 分配下一个稳定 Package UID，持久化在 dir/_allocator.json
+// allocateUID 分配下一个稳定 Package UID, 持久化在 dir/_allocator.json
 //
-// v1 简化：只做高水位单调分配，从不回收复用已释放的 UID。这是"卸载后不能
+// v1 简化: 只做高水位单调分配, 从不回收复用已释放的 UID. 这是"卸载后不能
 // 立即不安全地复用"这条架构要求最简单的安全实现 - 代价是 UID 空间
-// 用一个少一个，真正的"冷却期后回收"策略留给后续设计，此刻用简单换安全
+// 用一个少一个, 真正的"冷却期后回收"策略留给后续设计, 此刻用简单换安全
 func allocateUID(dir string) (uint32, error) {
 	inv := authority.DefaultInvariants()
 	path := filepath.Join(dir, allocatorStateFile)
@@ -453,7 +453,7 @@ func allocateUID(dir string) (uint32, error) {
 			next = st.NextUID
 		}
 	case os.IsNotExist(err):
-		// 第一次分配，从 MinAppUID 开始
+		// 第一次分配, 从 MinAppUID 开始
 	default:
 		return 0, fmt.Errorf("pkgregistry: read allocator state: %w", err)
 	}
@@ -475,13 +475,13 @@ func allocateUID(dir string) (uint32, error) {
 	return next, nil
 }
 
-// writeFileAtomic 把 data 原子写入 path：先写同目录下的临时文件再 rename，
+// writeFileAtomic 把 data 原子写入 path: 先写同目录下的临时文件再 rename,
 // 避免半写状态在 crash 或并发读者眼里出现
 //
-// 这是标准库 os 的普通文件 I/O，不涉及 depguard 限制的 syscall/x-sys/os-exec
-// 三个包 - pkgregistry 自己的记账状态不需要过 Authority Gate，Gate 只用于
-// 跨信任边界的操作（把 staging 提交成最终代码目录、创建属于某 UID 的私有
-// 数据目录），见 install.go
+// 这是标准库 os 的普通文件 I/O, 不涉及 depguard 限制的 syscall/x-sys/os-exec
+// 三个包 - pkgregistry 自己的记账状态不需要过 Authority Gate, Gate 只用于
+// 跨信任边界的操作 (把 staging 提交成最终代码目录, 创建属于某 UID 的私有
+// 数据目录), 见 install.go
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -489,8 +489,8 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("pkgregistry: create temp file in %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
-	// Rename 成功后 tmpPath 已不在原处，这里的 Remove 会失败，忽略即可；
-	// 只有在 Rename 之前失败退出的路径上，这个 defer 才真正负责清理
+	// Rename 成功后 tmpPath 已不在原处, 这里的 Remove 会失败, 忽略即可;
+	// 只有在 Rename 之前失败退出的路径上, 这个 defer 才真正负责清理
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := tmp.Write(data); err != nil {

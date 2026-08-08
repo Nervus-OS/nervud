@@ -1,5 +1,5 @@
-// 本文件实现卸载与停用或启用，并与 install.go 共用 Module.mu
-// 串行化，保证卸载/停用与安装不并发交错、三份投影不分裂。
+// 本文件实现卸载与停用或启用, 并与 install.go 共用 Module.mu
+// 串行化, 保证卸载/停用与安装不并发交错, 三份投影不分裂.
 package pkgregistry
 
 import (
@@ -19,9 +19,9 @@ var (
 	ErrPackageNotInstalled = errors.New("pkgregistry: package not installed")
 	// ErrComponentNotFound 目标 Component 不在该 Package 的 manifest 中
 	ErrComponentNotFound = errors.New("pkgregistry: component not found")
-	// ErrComponentProtected 目标 Component 在保护名单里或声明为不可停用，拒绝停用
+	// ErrComponentProtected 目标 Component 在保护名单里或声明为不可停用, 拒绝停用
 	ErrComponentProtected = errors.New("pkgregistry: component cannot be disabled")
-	// ErrSystemPackageImmutable 系统镜像来源的 Package 不能被动态卸载（跟随整镜像 OTA）
+	// ErrSystemPackageImmutable 系统镜像来源的 Package 不能被动态卸载 (跟随整镜像 OTA)
 	ErrSystemPackageImmutable = errors.New("pkgregistry: system-image package cannot be uninstalled")
 	// ErrPackageRemovalPending blocks install/lifecycle mutations while a prior
 	// uninstall is waiting for its idempotent filesystem cleanup to complete.
@@ -29,10 +29,10 @@ var (
 )
 
 // isProtectedComponent 报告 "<pkg>/<comp>" 是否在编译期硬编码的不可停用名单里
-// 。理由同中央 catalog 的内建权限底线：这条保护规则不能由文件系统写
-// 权限决定，所以是代码里的 switch 而非可被改动的数据。停用提供停用 UI 的设置 app
-// 自身、权限确认通道、会话/包管理/安全恢复，都会让系统失去自我修复能力。用函数而非
-// 包级 map，避开 gochecknoglobals，也让名单是代码这件事更直白
+// . 理由同中央 catalog 的内建权限底线: 这条保护规则不能由文件系统写
+// 权限决定, 所以是代码里的 switch 而非可被改动的数据. 停用提供停用 UI 的设置 app
+// 自身, 权限确认通道, 会话/包管理/安全恢复, 都会让系统失去自我修复能力. 用函数而非
+// 包级 map, 避开 gochecknoglobals, 也让名单是代码这件事更直白
 func isProtectedComponent(pkgSlashComp string) bool {
 	switch pkgSlashComp {
 	case "nervus.pkgmanagerd/main",
@@ -46,10 +46,10 @@ func isProtectedComponent(pkgSlashComp string) bool {
 	}
 }
 
-// CanDisable 报告某 Component 是否可被停用，不可时给出原因
+// CanDisable 报告某 Component 是否可被停用, 不可时给出原因
 //
-// Ordinary 包：用户对自己装的东西有完全控制权，恒可停用（其 manifest 声明
-// disableable:false 无效，与 Install 一致）。系统包：不在保护名单、且 manifest 显式
+// Ordinary 包: 用户对自己装的东西有完全控制权, 恒可停用 (其 manifest 声明
+// disableable:false 无效, 与 Install 一致). 系统包: 不在保护名单, 且 manifest 显式
 // 声明 disableable:true 才可停
 func (e Entry) CanDisable(compID string) (bool, string) {
 	if _, ok := e.Manifest.Component(compID); !ok {
@@ -68,18 +68,18 @@ func (e Entry) CanDisable(compID string) (bool, string) {
 	return true, ""
 }
 
-// ComponentStopper 是卸载/停用/升级时对 service.Manager 的窄接口依赖：停掉一个组件
-// 的运行实例，或在升级后把整个包切到新版本。为 nil 时跳过（endpoint/service 尚未
-// 接线的阶段留接缝）
+// ComponentStopper 是卸载/停用/升级时对 service.Manager 的窄接口依赖: 停掉一个组件
+// 的运行实例, 或在升级后把整个包切到新版本. 为 nil 时跳过 (endpoint/service 尚未
+// 接线的阶段留接缝)
 type ComponentStopper interface {
 	StopComponent(ctx context.Context, pkg, comp string) error
 	// ReloadPackage 停掉该包全部旧实例并用当前 Registry 的新版本重起 always-on 组件
-	// （升级用，防旧版本继续运行/重启）
+	//  (升级用, 防旧版本继续运行/重启)
 	ReloadPackage(ctx context.Context, pkg string) error
 }
 
-// LeaseRevoker 是卸载/撤权时对 control 的窄接口依赖：撤销某 Package 持有的全部
-// ControlLease（若含 motion 则由 control 递增 motion epoch）。为 nil 时跳过（Step 9 接线）
+// LeaseRevoker 是卸载/撤权时对 control 的窄接口依赖: 撤销某 Package 持有的全部
+// ControlLease (若含 motion 则由 control 递增 motion epoch). 为 nil 时跳过 (Step 9 接线)
 type LeaseRevoker interface {
 	RevokeByPackage(pkgID string) error
 }
@@ -91,8 +91,8 @@ type PackageTransferRevoker interface {
 	RevokeResource(resourceHandle string, generation uint64)
 }
 
-// SetLifecycleHooks 注入卸载/停用需要的外部协作者（service 停组件、control 撤租）。
-// 装配期由 main.go 调用；两者都可为 nil（对应阶段未接线时留接缝）
+// SetLifecycleHooks 注入卸载/停用需要的外部协作者 (service 停组件, control 撤租).
+// 装配期由 main.go 调用; 两者都可为 nil (对应阶段未接线时留接缝)
 func (m *Module) SetLifecycleHooks(stopper ComponentStopper, revoker LeaseRevoker) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -109,13 +109,13 @@ func (m *Module) SetTransferRevoker(revoker PackageTransferRevoker) {
 
 // SetComponentEnabled 停用/启用一个 Component 并持久化
 //
-// 停用生效范围（缺一不可，本函数负责持久化 + 投影 + 停运行实例；IPC 握手据
-// DisabledComponents 拒绝该组件由 ipc/verifyComponent 侧完成）：
+// 停用生效范围 (缺一不可, 本函数负责持久化 + 投影 + 停运行实例; IPC 握手据
+// DisabledComponents 拒绝该组件由 ipc/verifyComponent 侧完成):
 //   - 更新 registryState.DisabledComponents 并原子落盘
-//   - Replace 三份投影（DisabledComponents 进 Entry，scan 重启后仍生效）
-//   - 停掉运行实例（经 ComponentStopper）
+//   - Replace 三份投影 (DisabledComponents 进 Entry, scan 重启后仍生效)
+//   - 停掉运行实例 (经 ComponentStopper)
 //
-// 停用按 Component，不回收 Package UID。启用永远可逆
+// 停用按 Component, 不回收 Package UID. 启用永远可逆
 func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -139,7 +139,7 @@ func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, 
 	// 计算新的 DisabledComponents 集合
 	next := setMembership(e.DisabledComponents, compID, !enabled)
 
-	// 持久化：先落盘记账，再 Replace 内存投影（落盘失败就不动内存态）
+	// 持久化: 先落盘记账, 再 Replace 内存投影 (落盘失败就不动内存态)
 	st, ok := m.readState(pkgID)
 	if !ok {
 		return fmt.Errorf("%w: %q (no ledger)", ErrPackageNotInstalled, pkgID)
@@ -154,11 +154,11 @@ func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, 
 		return err
 	}
 
-	// 停用：停掉运行实例（启用则交给下一次 Start/EnsureStarted 拉起，本函数不主动起）
+	// 停用: 停掉运行实例 (启用则交给下一次 Start/EnsureStarted 拉起, 本函数不主动起)
 	if !enabled && m.stopper != nil {
 		if err := m.stopper.StopComponent(ctx, pkgID, compID); err != nil {
-			// 停实例失败不回滚持久化的停用意图 - 持久化的 disabled 是权威，实例
-			// 会在下次复核/重启时被清；只记审计
+			// 停实例失败不回滚持久化的停用意图 - 持久化的 disabled 是权威, 实例
+			// 会在下次复核/重启时被清; 只记审计
 			m.aud.Record(ctx, audit.Event{Action: "pkgregistry.SetComponentEnabled.stop", Subject: pkgID, Denied: true, Err: err})
 		}
 	}
@@ -170,8 +170,9 @@ func (m *Module) SetComponentEnabled(ctx context.Context, pkgID, compID string, 
 	return nil
 }
 
-// Uninstall 彻底删除一个 Package：代码、数据、记账、投影全清，UID 不复用
-// （由 allocateUID 的单调高水位保证）。系统镜像来源的包不可动态卸载
+// Uninstall 彻底删除一个 Package: 代码, 数据, 记账, 投影全清, UID 不复用
+//
+//	(由 allocateUID 的单调高水位保证). 系统镜像来源的包不可动态卸载
 func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -287,7 +288,7 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 
 // ---- 内部辅助 -------------------------------------------------------------
 
-// setMembership 返回把 id 加入(present=true)/移出(present=false) set 后的新切片（去重、稳定）
+// setMembership 返回把 id 加入(present=true)/移出(present=false) set 后的新切片 (去重, 稳定)
 func setMembership(set []string, id string, present bool) []string {
 	out := make([]string, 0, len(set)+1)
 	seen := false
@@ -307,7 +308,7 @@ func setMembership(set []string, id string, present bool) []string {
 	return out
 }
 
-// readState 读某包的持久化记账（调用方持 mu）
+// readState 读某包的持久化记账 (调用方持 mu)
 func (m *Module) readState(pkgID string) (registryState, bool) {
 	sp, err := stateFilePath(m.stateDir, pkgID)
 	if err != nil {
@@ -320,7 +321,7 @@ func (m *Module) readState(pkgID string) (registryState, bool) {
 	return st, true
 }
 
-// replaceEntry 用改动后的 e 覆盖 Registry 里的同 ID 项，并重投影三份状态（持 mu）
+// replaceEntry 用改动后的 e 覆盖 Registry 里的同 ID 项, 并重投影三份状态 (持 mu)
 func (m *Module) replaceEntry(e Entry) error {
 	entries := m.registry.List()
 	for i := range entries {
@@ -331,7 +332,7 @@ func (m *Module) replaceEntry(e Entry) error {
 	return m.commitEntries(entries)
 }
 
-// removeEntry 从 Registry 剔除某 ID 后重投影三份状态（持 mu）
+// removeEntry 从 Registry 剔除某 ID 后重投影三份状态 (持 mu)
 func (m *Module) removeEntry(pkgID string) error {
 	existing := m.registry.List()
 	entries := make([]Entry, 0, len(existing))

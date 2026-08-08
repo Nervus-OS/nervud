@@ -35,7 +35,7 @@ type routingEndpoints struct {
 	resourceGen    uint64
 	requiresLease  bool
 	isMotion       bool
-	// returnsOper 让这个替身声明一个长任务方法。
+
 	returnsOper bool
 }
 
@@ -59,8 +59,6 @@ func (r *routingEndpoints) UnregisterEndpoint(_ endpoint.ConnHandle, req *ipcv1.
 	}}
 }
 
-// 订阅链路在本文件的用例里不参与——这两个替身恒回 NOT_FOUND。
-// 订阅本身的行为由 internal/subscription 与 subscribe_test.go 覆盖。
 func (r *routingEndpoints) RouteEvent(
 	_ endpoint.ConnHandle, _ uint64, _ uint32,
 ) (endpoint.EventRoute, endpoint.RouteError) {
@@ -117,7 +115,6 @@ func (r *routingEndpoints) Route(
 	}, endpoint.RouteError{}
 }
 
-// OwnsEndpoint 恒真：本文件的用例不验归属，那由 eventscope 的测试覆盖。
 func (r *routingEndpoints) OwnsEndpoint(_ endpoint.ConnHandle, _ uint64) bool { return true }
 
 func (r *routingEndpoints) ConnClosed(endpoint.ConnHandle) {}
@@ -141,7 +138,6 @@ func newRoutingTestServer(
 	return newRoutingTestServerWith(t, re, leases, nil)
 }
 
-// newRoutingTestServerWithOperations 是接了 Operation Manager 的变体。
 func newRoutingTestServerWithOperations(
 	t *testing.T, re *routingEndpoints, ops OperationManager,
 ) (*Server, string) {
@@ -330,11 +326,7 @@ func TestDispatch_ControlExecutionContextUsesLeaseProof(t *testing.T) {
 	}
 }
 
-// v1 曾按协商 minor 决定 Dispatch 带不带 ExecutionContext，因此需要一条
-// 「minor 0 的 Provider 拿不到控制方法」的规则，以及它对应的测试。
 //
-// v2 从第一天起无条件携带，那条规则与测试一并移除。控制方法的准入现在只看
-// 租约证明本身（见 TestDispatch_ControlExecutionContextUsesLeaseProof）。
 
 func TestDispatch_ProviderPublicMessageNotForwarded(t *testing.T) {
 	re := &routingEndpoints{registerResult: registerSuccessResult(1)}

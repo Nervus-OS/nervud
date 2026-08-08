@@ -1,5 +1,5 @@
-// 本文件是各子命令的实现：把参数校验、（install 的）解包、调用管理通道、结果
-// 展示串起来。所有安全判定都在 nervud 侧，这里只做参数检查与人类可读输出。
+// 本文件是各子命令的实现: 把参数校验, (install 的) 解包, 调用管理通道, 结果
+// 展示串起来. 所有安全判定都在 nervud 侧, 这里只做参数检查与人类可读输出.
 package main
 
 import (
@@ -11,13 +11,15 @@ import (
 	"github.com/nervus-os/nervud/internal/adminwire"
 )
 
-// outf/outln 是对 fmt.Fprintf/Fprintln 的最小封装：向用户终端写字节若失败
-// （stdout/stderr 已断），CLI 无从补救，故有意丢弃写错误。集中在这里丢弃，
-// 而不是在每个调用点散落 `_, _ =`，也让 errcheck 满意。
+// outf/outln 是对 fmt.Fprintf/Fprintln 的最小封装: 向用户终端写字节若失败
+//
+//	(stdout/stderr 已断), CLI 无从补救, 故有意丢弃写错误. 集中在这里丢弃,
+//
+// 而不是在每个调用点散落 `_, _ =`, 也让 errcheck 满意.
 func outf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 func outln(w io.Writer, a ...any)               { _, _ = fmt.Fprintln(w, a...) }
 
-// cmdInstall：begin-staging -> 解包 .nspkg 进 nervud 掌控的目录 -> install。
+// cmdInstall: begin-staging -> 解包.nspkg 进 nervud 掌控的目录 -> install.
 func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return badUsage("install requires exactly one <file.nspkg>")
@@ -27,7 +29,7 @@ func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 		return fmt.Errorf("open package: %w", err)
 	}
 
-	// 1) 让 nervud 建一个它掌控的 staging 目录（同一文件系统、属主/权限受控）。
+	// 1) 让 nervud 建一个它掌控的 staging 目录 (同一文件系统, 属主/权限受控).
 	beginResp, err := c.Do(adminwire.Request{Cmd: adminwire.CmdBeginStaging})
 	if err != nil {
 		return err
@@ -37,13 +39,13 @@ func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 	}
 	staging := beginResp.StagingDir
 
-	// 2) 解包 .nspkg 到该目录（zstd+tar，含防 tar-slip）。失败时 nervud 的 staging
-	// 清扫会best-effort回收孤儿，这里不必远程清理。
+	// 2) 解包.nspkg 到该目录 (zstd+tar, 含防 tar-slip). 失败时 nervud 的 staging
+	// 清扫会best-effort回收孤儿, 这里不必远程清理.
 	if err := unpackNspkg(nspkgPath, staging); err != nil {
 		return fmt.Errorf("unpack %s: %w", nspkgPath, err)
 	}
 
-	// 3) 触发安装：nervud 复核签名/digest/权限后原子提交。
+	// 3) 触发安装: nervud 复核签名/digest/权限后原子提交.
 	resp, err := c.Do(adminwire.Request{Cmd: adminwire.CmdInstall, StagingDir: staging})
 	if err != nil {
 		return err
@@ -54,7 +56,7 @@ func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 
 	p := resp.Package
 	outf(out, "installed %s %s (trust=%s, source=%s)\n", p.ID, p.Version, p.Trust, p.Source)
-	// 打印授予的权限清单，让操作者能核对安装结果实际获得的权限
+	// 打印授予的权限清单, 让操作者能核对安装结果实际获得的权限
 	if len(p.Granted) > 0 {
 		outln(out, "  granted permissions:")
 		for _, perm := range p.Granted {
@@ -66,7 +68,7 @@ func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 	return nil
 }
 
-// cmdUninstall：卸载一个 Package。
+// cmdUninstall: 卸载一个 Package.
 func cmdUninstall(c *adminwire.Client, args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return badUsage("uninstall requires exactly one <package_id>")
@@ -82,7 +84,7 @@ func cmdUninstall(c *adminwire.Client, args []string, out io.Writer) error {
 	return nil
 }
 
-// cmdList：列出已装 Package（表格输出）。
+// cmdList: 列出已装 Package (表格输出).
 func cmdList(c *adminwire.Client, args []string, out io.Writer) error {
 	if len(args) != 0 {
 		return badUsage("list takes no arguments")
@@ -110,7 +112,7 @@ func cmdList(c *adminwire.Client, args []string, out io.Writer) error {
 	return tw.Flush()
 }
 
-// cmdSetEnabled：enable/disable 一个 Component（enabled 决定方向）。
+// cmdSetEnabled: enable/disable 一个 Component (enabled 决定方向).
 func cmdSetEnabled(c *adminwire.Client, args []string, out io.Writer, enabled bool) error {
 	verb := "disable"
 	if enabled {
@@ -132,7 +134,7 @@ func cmdSetEnabled(c *adminwire.Client, args []string, out io.Writer, enabled bo
 	return nil
 }
 
-// cmdSetPermission：grant/revoke 一个运行期权限（state 决定方向）。
+// cmdSetPermission: grant/revoke 一个运行期权限 (state 决定方向).
 func cmdSetPermission(c *adminwire.Client, args []string, out io.Writer, state string) error {
 	verb, past := "revoke", "revoked"
 	if state == adminwire.GrantStateGranted {

@@ -1,28 +1,28 @@
 package safety
 
-// StopPhase 是与顶层 Safety Gate 正交的实际停止进度相位。
+// StopPhase 是与顶层 Safety Gate 正交的实际停止进度相位.
 //
-// SAFETY_LATCHED 在触发点即刻原子生效；本相位只跟踪物理停止到底走到哪一步。没有
-// 编码器/速度估计等可信停稳证据的设备只能封顶到 OUTPUT_DISABLED，不得把PWM/输出
-// 已归零伪装成 STANDSTILL_CONFIRMED。
+// SAFETY_LATCHED 在触发点即刻原子生效; 本相位只跟踪物理停止到底走到哪一步. 没有
+// 编码器/速度估计等可信停稳证据的设备只能封顶到 OUTPUT_DISABLED, 不得把PWM/输出
+// 已归零伪装成 STANDSTILL_CONFIRMED.
 //
-// 数值必须与 nervus-ipc safety.proto 的 StopPhase 枚举一致（proto 是唯一真源）。
+// 数值必须与 nervus-ipc safety.proto 的 StopPhase 枚举一致 (proto 是唯一真源).
 type StopPhase uint8
 
 const (
 	PhaseUnspecified StopPhase = 0
 
-	// 正常推进链（单调前进）。
+	// 正常推进链 (单调前进).
 	PhaseRequested        StopPhase = 1
 	PhaseSent             StopPhase = 2
 	PhaseProviderAccepted StopPhase = 3
 	PhaseMCUAcked         StopPhase = 4
 	PhaseOutputDisabled   StopPhase = 5
 
-	// 有可信证据时才可到达。
+	// 有可信证据时才可到达.
 	PhaseStandstillConfirmed StopPhase = 6
 
-	// 终态旁支：任意非终态可进入，不可逆。
+	// 终态旁支: 任意非终态可进入, 不可逆.
 	PhaseDeliveryFault     StopPhase = 7
 	PhaseStandstillTimeout StopPhase = 8
 )
@@ -50,7 +50,7 @@ func (p StopPhase) String() string {
 	}
 }
 
-// rank 给正常推进相位一个单调序号；旁支终态与 Unspecified 返回 0（单独处理）。
+// rank 给正常推进相位一个单调序号; 旁支终态与 Unspecified 返回 0 (单独处理).
 func (p StopPhase) rank() int {
 	switch p {
 	case PhaseRequested:
@@ -74,11 +74,11 @@ func (p StopPhase) isTerminalFault() bool {
 	return p == PhaseDeliveryFault || p == PhaseStandstillTimeout
 }
 
-// 相位必须连同它属于哪一轮锁存一起发布，否则上一轮的进度会被误当成本轮的证据。
+// 相位必须连同它属于哪一轮锁存一起发布, 否则上一轮的进度会被误当成本轮的证据.
 //
-// 打包成一个字（布局与 internal/motiongate 一致：高 8 位相位 | 低 56 位 epoch），
-// 这样 Supervisor 的一次 Store 就同时publish了相位与归属，读侧一次 Load 即得到自洽
-// 的二元组 - 分成两个原子量就又有了读到新相位配旧 epoch的撕裂窗口。
+// 打包成一个字 (布局与 internal/motiongate 一致: 高 8 位相位 | 低 56 位 epoch),
+// 这样 Supervisor 的一次 Store 就同时publish了相位与归属, 读侧一次 Load 即得到自洽
+// 的二元组 - 分成两个原子量就又有了读到新相位配旧 epoch的撕裂窗口.
 const (
 	phaseEpochBits = 56
 	phaseEpochMask = (uint64(1) << phaseEpochBits) - 1
@@ -92,28 +92,28 @@ func unpackPhase(word uint64) (StopPhase, uint64) {
 	return StopPhase(word >> phaseEpochBits), word & phaseEpochMask
 }
 
-// stopTracker 跟踪单个执行器 Resource（v1 只有 base.main）的停止进度。
-// 只在 Supervisor goroutine 内访问，无需同步。
+// stopTracker 跟踪单个执行器 Resource (v1 只有 base.main) 的停止进度.
+// 只在 Supervisor goroutine 内访问, 无需同步.
 type stopTracker struct {
 	phase               StopPhase
-	standstillSupported bool // 来自 Safety Contract：无证据能力时封顶 OUTPUT_DISABLED
+	standstillSupported bool // 来自 Safety Contract: 无证据能力时封顶 OUTPUT_DISABLED
 	terminal            bool
 }
 
-// begin 重置跟踪器到 REQUESTED，并记录本设备是否具备可信停稳证据能力。
+// begin 重置跟踪器到 REQUESTED, 并记录本设备是否具备可信停稳证据能力.
 func (t *stopTracker) begin(standstillSupported bool) {
 	t.phase = PhaseRequested
 	t.standstillSupported = standstillSupported
 	t.terminal = false
 }
 
-// advance 尝试把相位推进到 to，返回是否发生了有效推进。规则：
+// advance 尝试把相位推进到 to, 返回是否发生了有效推进. 规则:
 //
-//   - 已入终态：不再变化。
-//   - 终态旁支（DELIVERY_FAULT / STANDSTILL_TIMEOUT）：可从任意非终态进入，不可逆。
-//   - STANDSTILL_CONFIRMED：需要 standstillSupported；否则封顶在 OUTPUT_DISABLED
-//     不接受没有可信证据的伪停稳状态。
-//   - 其余正常相位：只能单调前进（rank 严格增大）。
+//   - 已入终态: 不再变化.
+//   - 终态旁支 (DELIVERY_FAULT / STANDSTILL_TIMEOUT): 可从任意非终态进入, 不可逆.
+//   - STANDSTILL_CONFIRMED: 需要 standstillSupported; 否则封顶在 OUTPUT_DISABLED
+//     不接受没有可信证据的伪停稳状态.
+//   - 其余正常相位: 只能单调前进 (rank 严格增大).
 func (t *stopTracker) advance(to StopPhase) bool {
 	if t.terminal {
 		return false
@@ -124,7 +124,7 @@ func (t *stopTracker) advance(to StopPhase) bool {
 		return true
 	}
 	if to == PhaseStandstillConfirmed && !t.standstillSupported {
-		// 无停稳证据能力：最多推进到 OUTPUT_DISABLED。
+		// 无停稳证据能力: 最多推进到 OUTPUT_DISABLED.
 		if t.phase.rank() < PhaseOutputDisabled.rank() {
 			t.phase = PhaseOutputDisabled
 			return true

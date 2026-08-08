@@ -26,12 +26,10 @@ type fakeEndpoints struct {
 	routeInfo      endpoint.RouteInfo
 	routeErr       endpoint.RouteError
 
-	// 订阅链路。零值的 eventErr 表示「成功」，与 routeErr 同规
 	eventRoute    endpoint.EventRoute
 	providerEvent catalog.EventDefinition
 	eventErr      endpoint.RouteError
 
-	// ownsEndpoint 是 BindEventScope 的归属检查结果。
 	ownsEndpoint bool
 
 	connClosed []endpoint.ConnHandle
@@ -57,7 +55,6 @@ func (f *fakeEndpoints) Route(
 	return f.routeInfo, f.routeErr
 }
 
-// 订阅链路：本文件的用例验的是 endpoint 接线，不是订阅。恒回 NOT_FOUND。
 func (f *fakeEndpoints) RouteEvent(
 	_ endpoint.ConnHandle, _ uint64, _ uint32,
 ) (endpoint.EventRoute, endpoint.RouteError) {

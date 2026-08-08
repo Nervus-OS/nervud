@@ -11,8 +11,6 @@ import (
 	"github.com/nervus-os/nervud/internal/identity"
 )
 
-// writeDevPackageSig 在 dir/<pkg>/manifest.sig 写一个 role 角色的签名块，
-// 并返回被签名的 manifest 原始字节。
 func writeDevPackageSig(
 	t *testing.T, dir, pkg string, role SignerRole, priv ed25519.PrivateKey, embedKey bool,
 ) []byte {
@@ -44,8 +42,6 @@ func writeDevPackageSig(
 	return manifestBytes
 }
 
-// 开发锚点建立之后，同一份 manifest.sig 必须能通过完整的 VerifySignature，
-// 并被 Arbitrate 判成 Platform。这是本 flag 存在的全部目的。
 func TestLoadDevTrustStore_AnchorsEmbeddedPlatformKey(t *testing.T) {
 	dir := t.TempDir()
 	priv := newDevKey(t)
@@ -72,8 +68,6 @@ func TestLoadDevTrustStore_AnchorsEmbeddedPlatformKey(t *testing.T) {
 	}
 }
 
-// 篡改 manifest 之后验签必须照样失败：dev 锚点放松的是「密钥是否被平台根授权」，
-// 不是签名本身。这条断言防止本文件被改成「开发期一律放行」。
 func TestLoadDevTrustStore_StillRejectsTamperedManifest(t *testing.T) {
 	dir := t.TempDir()
 	priv := newDevKey(t)
@@ -92,7 +86,6 @@ func TestLoadDevTrustStore_StillRejectsTamperedManifest(t *testing.T) {
 	}
 }
 
-// 没有内嵌公钥就锚不出任何东西：key_id 单独出现不构成身份证明。
 func TestLoadDevTrustStore_IgnoresSignatureWithoutEmbeddedKey(t *testing.T) {
 	dir := t.TempDir()
 	priv := newDevKey(t)
@@ -103,8 +96,6 @@ func TestLoadDevTrustStore_IgnoresSignatureWithoutEmbeddedKey(t *testing.T) {
 	}
 }
 
-// developer 角色自锚定，不该进入 store —— 它的公钥本来就内嵌在签名块里，
-// 由 VerifySignature 自行处理。放进来会模糊「谁需要被授权」这条线。
 func TestLoadDevTrustStore_SkipsDeveloperRole(t *testing.T) {
 	dir := t.TempDir()
 	priv := newDevKey(t)
@@ -115,8 +106,6 @@ func TestLoadDevTrustStore_SkipsDeveloperRole(t *testing.T) {
 	}
 }
 
-// key_id 与内嵌公钥对不上时必须丢弃：否则一个包能用自己的密钥去占用
-// 另一个 key_id 的授权位。
 func TestLoadDevTrustStore_RejectsKeyIDMismatch(t *testing.T) {
 	dir := t.TempDir()
 	priv := newDevKey(t)
@@ -130,7 +119,7 @@ func TestLoadDevTrustStore_RejectsKeyIDMismatch(t *testing.T) {
 	sig := ed25519.Sign(priv, msg)
 	data, err := json.Marshal(SignatureBlock{Format: 1, Signatures: []Signature{{
 		Role: RolePlatformRelease, Alg: SigAlgEd25519,
-		// key_id 取另一把钥匙的，内嵌公钥取本把的
+
 		KeyID: keyIDOf(other.Public().(ed25519.PublicKey)),
 		Key:   base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
 		Sig:   base64.StdEncoding.EncodeToString(sig),
@@ -147,8 +136,6 @@ func TestLoadDevTrustStore_RejectsKeyIDMismatch(t *testing.T) {
 	}
 }
 
-// 动态安装包即便签了 platform-release，也只能拿 Ordinary。dev 锚点不改变
-// 这条来源求交规则 —— 确认开发开关没有把权力泄漏到动态安装路径。
 func TestLoadDevTrustStore_DynamicInstallStillOrdinary(t *testing.T) {
 	dir := t.TempDir()
 	priv := newDevKey(t)

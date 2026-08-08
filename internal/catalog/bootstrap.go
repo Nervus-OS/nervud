@@ -100,8 +100,8 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("catalog: build resource-directory bootstrap schema: %w", err)
 	}
-	// 【带事件枚举】：OperationChanged 有载荷，必须走 bundle 而不是内联到
-	// descriptor——内联那条路是给元数据接口用的，它不允许 payload_type。
+	// 带事件枚举: OperationChanged 有载荷, 必须走 bundle 而不是内联到
+	// descriptor - 内联那条路是给元数据接口用的, 它不允许 payload_type.
 	operationBundle, err := ipcregistry.BuildSchemaBundleWithEvents(
 		InterfaceOperationControl, 1,
 		operationv1.OperationControlMethod(0).Descriptor(),
@@ -158,8 +158,8 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 				"",
 				"",
 			),
-			// 资源目录【不绑任何资源】：它描述的就是资源本身。
-			// 绑一个资源会让「列出全部摄像头」先要求解析到某一个摄像头。
+			// 资源目录不绑任何资源: 它描述的就是资源本身.
+			// 绑一个资源会让"列出全部摄像头"先要求解析到某一个摄像头.
 			bootstrapInterface(
 				InterfaceResourceDirectory,
 				resourceDirBundle,
@@ -169,10 +169,10 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 				"",
 				"",
 			),
-			// 【不设 required_permission】：能不能查一个 operation，由它
-			// 自己的所有者关系决定（Manager.Get 的 canSee），不由一条全局
-			// 权限决定。加一条权限只会让「持有它就能看全机 operation」
-			// 变成一件可能的事。
+			// 不设 required_permission: 能不能查一个 operation, 由它
+			// 自己的所有者关系决定 (Manager.Get 的 canSee), 不由一条全局
+			// 权限决定. 加一条权限只会让"持有它就能看全机 operation"
+			// 变成一件可能的事.
 			bootstrapInterface(
 				InterfaceOperationControl,
 				operationBundle,
@@ -263,7 +263,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"读取诊断信息",
+			"Read diagnostics",
 			"Read diagnostics",
 		),
 		bootstrapPermission(
@@ -273,7 +273,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"注册包内服务",
+			"Register a package-private service",
 			"Register a package-private service",
 		),
 		bootstrapPermission(
@@ -283,18 +283,18 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_OEM,
 			"",
 			"",
-			"注册公共系统服务",
+			"Register a public system service",
 			"Register a public system service",
 		),
-		// perm.storage.shared 是【服务之间】交换配置、模型、缓存的门槛。
+		// perm.storage.shared 是服务之间交换配置, 模型, 缓存的门槛.
 		//
-		// 与 perm.storage.user 刻意分开：那是「用户的文档」，语义面向 App 与
-		// 文件选择器，因此是 USER_CONSENT + PRIVACY_SENSITIVE；而两个服务想放个
-		// 中间文件，不该变成「要用户同意访问他的文档」。
+		// 与 perm.storage.user 刻意分开: 那是"用户的文档", 语义面向 App 与
+		// 文件选择器, 因此是 USER_CONSENT + PRIVACY_SENSITIVE; 而两个服务想放个
+		// 中间文件, 不该变成"要用户同意访问他的文档".
 		//
-		// GRANT_MODE_NORMAL + Ordinary：共享区里本就只该放「拿到这条权限就有资格
-		// 看」的东西。需要更细门槛的数据（摄像头帧一类）必须走 Transfer 的内存
-		// 句柄——那里句柄本身就是凭证，没有文件系统路径可绕。
+		// GRANT_MODE_NORMAL + Ordinary: 共享区里本就只该放"拿到这条权限就有资格
+		// 看"的东西. 需要更细门槛的数据 (摄像头帧一类) 必须走 Transfer 的内存
+		// 句柄 - 那里句柄本身就是凭证, 没有文件系统路径可绕.
 		bootstrapPermission(
 			"perm.storage.shared",
 			ipcv1.GrantMode_GRANT_MODE_NORMAL,
@@ -302,7 +302,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"storage",
-			"读写服务间共享区",
+			"Read and write the inter-service shared area",
 			"Read and write the inter-service shared area",
 		),
 		bootstrapPermission(
@@ -312,7 +312,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"storage",
-			"访问用户文件",
+			"Access user files",
 			"Access user files",
 		),
 		bootstrapPermission(
@@ -322,7 +322,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			"",
 			"",
-			"启动系统组件",
+			"Launch system components",
 			"Launch system components",
 		),
 		bootstrapPermission(
@@ -332,7 +332,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"motion",
-			"控制机器人移动",
+			"Control robot motion",
 			"Control robot motion",
 		),
 		bootstrapPermission(
@@ -342,7 +342,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"motion",
-			"控制机械臂",
+			"Control the manipulator",
 			"Control the manipulator",
 		),
 		bootstrapPermission(
@@ -352,7 +352,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			"",
 			"",
-			"平台控制",
+			"Platform control",
 			"Platform control",
 		),
 		bootstrapPermission(
@@ -362,7 +362,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"紧急重启",
+			"Emergency reboot",
 			"Emergency reboot",
 		),
 		bootstrapPermission(
@@ -372,7 +372,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			"",
 			"",
-			"有序关机或重启",
+			"Orderly power control",
 			"Orderly power control",
 		),
 		bootstrapPermission(
@@ -382,7 +382,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_OEM,
 			"",
 			"",
-			"读取安全状态",
+			"Observe safety state",
 			"Observe safety state",
 		),
 		bootstrapPermission(
@@ -392,7 +392,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"解除安全锁存",
+			"Re-arm the safety system",
 			"Re-arm the safety system",
 		),
 		bootstrapPermission(
@@ -402,22 +402,22 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"安装或卸载软件",
+			"Install or uninstall packages",
 			"Install or uninstall packages",
 		),
-		// perm.pkg.admin 取代了曾经写死在 main.go 里的「哪个 Package ID 能连
-		// 管理通道」。持有它的包可以连上 admin UDS 并获得可写 staging 目录。
+		// perm.pkg.admin 取代了曾经写死在 main.go 里的"哪个 Package ID 能连
+		// 管理通道". 持有它的包可以连上 admin UDS 并获得可写 staging 目录.
 		//
-		// 三重收紧与 perm.safety.rearm 同款，这不是巧合——两者都是「一旦拿到就
-		// 能改变整机状态」的能力：
-		//   SYSTEM_ONLY  -> IntersectAt 要求来源必须是系统镜像包
-		//   PLATFORM     -> 开发构建降级到 Ordinary 的包拿不到
-		//   platform-release 签名角色 -> 必须由平台发布密钥签过
+		// 三重收紧与 perm.safety.rearm 同款, 这不是巧合 - 两者都是"一旦拿到就
+		// 能改变整机状态"的能力:
+		//  SYSTEM_ONLY -> IntersectAt 要求来源必须是系统镜像包
+		//  PLATFORM -> 开发构建降级到 Ordinary 的包拿不到
+		//  platform-release 签名角色 -> 必须由平台发布密钥签过
 		//
-		// 【安全边界与之前完全一致】：放行的仍然只是「谁能连上这条 socket」。
-		// 全部命令依旧投递给同进程的 pkgregistry.Module 复核签名、digest、
-		// 升级裁决与权限交集。变的只是「凭什么放行」——从内核硬编码的包名，
-		// 变成一条包必须在 manifest 里显式声明、且经过裁决的权限。
+		// 安全边界与之前完全一致: 放行的仍然只是"谁能连上这条 socket".
+		// 全部命令依旧投递给同进程的 pkgregistry.Module 复核签名, digest,
+		// 升级裁决与权限交集. 变的只是"凭什么放行" - 从内核硬编码的包名,
+		// 变成一条包必须在 manifest 里显式声明, 且经过裁决的权限.
 		bootstrapPermission(
 			"perm.pkg.admin",
 			ipcv1.GrantMode_GRANT_MODE_SYSTEM_ONLY,
@@ -425,16 +425,16 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"代表系统执行装包与权限管理",
+			"Administer packages and grants on behalf of the system",
 			"Administer packages and grants on behalf of the system",
 		),
-		// perm.resource.query 是【设备发现】的门槛。
+		// perm.resource.query 是设备发现的门槛.
 		//
-		// 与 perm.diagnostics.read / perm.pkg.query 同一档（NORMAL + Ordinary）：
-		// 它暴露的是「这台机器上有哪些硬件」，而那件事 App 靠反复 Resolve 试探
-		// 本来也能问出来——目录只是把试探变成一次查询，没有放大暴露面。
+		// 与 perm.diagnostics.read / perm.pkg.query 同一档 (NORMAL + Ordinary):
+		// 它暴露的是"这台机器上有哪些硬件", 而那件事 App 靠反复 Resolve 试探
+		// 本来也能问出来 - 目录只是把试探变成一次查询, 没有放大暴露面.
 		//
-		// 真正的门槛在【用】上：拿到摄像头列表不等于能取流，那要 perm.camera.capture。
+		// 真正的门槛在用上: 拿到摄像头列表不等于能取流, 那要 perm.camera.capture.
 		bootstrapPermission(
 			"perm.resource.query",
 			ipcv1.GrantMode_GRANT_MODE_NORMAL,
@@ -442,7 +442,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"查看设备上有哪些硬件资源",
+			"List hardware resources on this device",
 			"List hardware resources on this device",
 		),
 		bootstrapPermission(
@@ -452,7 +452,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"查看已安装软件",
+			"List installed packages",
 			"List installed packages",
 		),
 		bootstrapPermission(
@@ -462,7 +462,7 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"管理运行期权限",
+			"Manage runtime grants",
 			"Manage runtime grants",
 		),
 	}

@@ -1,4 +1,4 @@
-// 本文件实现 RegisterEndpoint：Service 向 nervud 报到一个它已实现的 Interface
+// 本文件实现 RegisterEndpoint: Service 向 nervud 报到一个它已实现的 Interface
 package endpoint
 
 import (
@@ -26,7 +26,7 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 		return registerFailure(reqID, code)
 	}
 
-	// 步骤 1：该连接必须已握手完成（caller.ComponentID 非空，见 ipc 的组件核对）
+	// 步骤 1: 该连接必须已握手完成 (caller.ComponentID 非空, 见 ipc 的组件核对)
 	if caller.ComponentID == "" {
 		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION, "handshake not complete: no component id")
 	}
@@ -36,7 +36,7 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 			"authoritative catalog is unavailable")
 	}
 
-	// 步骤 2：Service 只能注册 manifest 已声明的 endpoint
+	// 步骤 2: Service 只能注册 manifest 已声明的 endpoint
 	if m.pkgs == nil {
 		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
 			"package registry is unavailable")
@@ -84,7 +84,7 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 			"component is not a catalog-approved provider for the interface major")
 	}
 
-	// 步骤 3：按 Export 的 Visibility 选权限 ID 并裁决
+	// 步骤 3: 按 Export 的 Visibility 选权限 ID 并裁决
 	permID := permServiceRegister
 	if visibility == pkgregistry.VisibilityPackage {
 		permID = permServiceRegisterPrivate
@@ -101,9 +101,9 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 			"resource_handle is absent, unknown, or incompatible with the interface")
 	}
 
-	// schema hash 必须与 Catalog 里那份逐字节相等。曾经有一条只放行
-	// nervus.pkgmanagerd 空 schema 的兼容桥，在打包链能产出 ProviderArtifacts
-	// 之后已经移除——现在所有 Provider 一视同仁。
+	// schema hash 必须与 Catalog 里那份逐字节相等. 曾经有一条只放行
+	// nervus.pkgmanagerd 空 schema 的兼容桥, 在打包链能产出 ProviderArtifacts
+	// 之后已经移除 - 现在所有 Provider 一视同仁.
 	reportedSchema := req.GetInterfaceSchemaHash()
 	if !bytes.Equal(reportedSchema, provider.Definition.SchemaHash) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
@@ -113,7 +113,7 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 
 	m.mu.Lock()
 
-	// 步骤 6：分配 conn 自己的 nextRegID，登记 serviceRegistration
+	// 步骤 6: 分配 conn 自己的 nextRegID, 登记 serviceRegistration
 	regKey := registrationKey{pkg: caller.PackageID, comp: caller.ComponentID, iface: interfaceID}
 	m.generations[regKey]++
 
@@ -139,7 +139,7 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	cs.registrations[reg.id] = reg
 	m.byInterface[interfaceID] = append(m.byInterface[interfaceID], reg)
 
-	// 步骤 7：若该 (pkg, comp) 有 Resolve 正在等它启动完成，广播唤醒
+	// 步骤 7: 若该 (pkg, comp) 有 Resolve 正在等它启动完成, 广播唤醒
 	key := componentKey{pkg: caller.PackageID, comp: caller.ComponentID}
 	waiters := m.pendingStarts[key]
 	delete(m.pendingStarts, key)

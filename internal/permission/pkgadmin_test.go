@@ -19,9 +19,6 @@ func platformReleaseSigners() catalog.SignerEvidence {
 	}
 }
 
-// perm.pkg.admin 取代了内核里写死的「哪个 Package ID 能连管理通道」。
-// 这条断言确认它真的能被授予——否则装包链路会静默断掉，症状是
-// pkgmanagerd 起来了但连不上管理通道。
 func TestPackageAdmin_GrantedToPlatformReleaseSystemImage(t *testing.T) {
 	r := NewDefaultRegistry()
 	granted, denied := r.IntersectAt(
@@ -32,13 +29,11 @@ func TestPackageAdmin_GrantedToPlatformReleaseSystemImage(t *testing.T) {
 		platformReleaseSigners(),
 	)
 	if !slices.Contains(granted, permPackageAdmin) {
-		t.Fatalf("platform-release 系统镜像包拿不到 %s: granted=%v denied=%v",
+		t.Fatalf("unexpected permission result; platform-release %s: granted=%v denied=%v",
 			permPackageAdmin, granted, denied)
 	}
 }
 
-// 三道门必须各自独立生效。任何一道松了，一个不该有装包权的包就能连上
-// 管理通道——那条通道能装任意可执行文件进系统。
 func TestPackageAdmin_DeniedWithoutFullAuthority(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -47,29 +42,29 @@ func TestPackageAdmin_DeniedWithoutFullAuthority(t *testing.T) {
 		signers catalog.SignerEvidence
 	}{
 		{
-			// GRANT_MODE_SYSTEM_ONLY：动态安装包一律拒
-			name:    "动态安装",
+
+			name:    "permission test value 724bc2",
 			source:  catalog.SourceKindDynamicInstall,
 			trust:   identity.TrustOrdinary,
 			signers: platformReleaseSigners(),
 		},
 		{
-			// MinimumTrust=PLATFORM：开发构建里降级到 Ordinary 的包拿不到
-			name:    "系统镜像但只有 Ordinary 信任",
+
+			name:    "permission test value 4f4ca2; Ordinary",
 			source:  catalog.SourceKindSystemImage,
 			trust:   identity.TrustOrdinary,
 			signers: platformReleaseSigners(),
 		},
 		{
-			// OEM 也不够：装包是平台职责
-			name:    "系统镜像但只有 OEM 信任",
+
+			name:    "permission test value df674f; OEM",
 			source:  catalog.SourceKindSystemImage,
 			trust:   identity.TrustOEM,
 			signers: platformReleaseSigners(),
 		},
 		{
-			// RequiredSignerRole=platform-release：信任够但签名角色不对
-			name:   "Platform 信任但非 platform-release 签名",
+
+			name:   "permission test value 54d9b8; Platform platform-release",
 			source: catalog.SourceKindSystemImage,
 			trust:  identity.TrustPlatform,
 			signers: catalog.SignerEvidence{
@@ -80,7 +75,7 @@ func TestPackageAdmin_DeniedWithoutFullAuthority(t *testing.T) {
 			},
 		},
 		{
-			name:    "无任何签名证据",
+			name:    "permission test value 572ba9",
 			source:  catalog.SourceKindSystemImage,
 			trust:   identity.TrustPlatform,
 			signers: catalog.SignerEvidence{},
@@ -96,10 +91,10 @@ func TestPackageAdmin_DeniedWithoutFullAuthority(t *testing.T) {
 				tc.source, tc.trust, tc.signers,
 			)
 			if slices.Contains(granted, permPackageAdmin) {
-				t.Fatalf("%s 竟然拿到了 %s", tc.name, permPackageAdmin)
+				t.Fatalf("unexpected permission result; value = %s %s", tc.name, permPackageAdmin)
 			}
 			if !slices.Contains(denied, permPackageAdmin) {
-				t.Fatalf("denied 里没有 %s: %v", permPackageAdmin, denied)
+				t.Fatalf("unexpected permission result; denied %s: %v", permPackageAdmin, denied)
 			}
 		})
 	}

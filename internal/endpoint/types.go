@@ -1,5 +1,7 @@
-// 本文件是本包的核心数据模型：两个独立的 endpoint_id 命名空间
-// （service 侧 registration / caller 侧 binding）必须分开生成、分开存储 -
+// 本文件是本包的核心数据模型: 两个独立的 endpoint_id 命名空间
+//
+//	(service 侧 registration / caller 侧 binding) 必须分开生成, 分开存储 -
+//
 // 同一个数字在两条连接上毫无关系
 package endpoint
 
@@ -10,18 +12,18 @@ import (
 	"github.com/nervus-os/nervud/internal/pkgregistry"
 )
 
-// ConnHandle 是某条 IPC 连接的不透明身份，由 internal/ipc 的 *conn 满足
+// ConnHandle 是某条 IPC 连接的不透明身份, 由 internal/ipc 的 *conn 满足
 //
-// 本包不知道也不需要知道 conn 的具体形状，避免反向依赖 ipc；它只需要
-// 作为可比较的 map key 唯一标识一条连接，
-// "另一个连接上的相同数字不是同一个 binding"靠的正是这份指针身份，
+// 本包不知道也不需要知道 conn 的具体形状, 避免反向依赖 ipc; 它只需要
+// 作为可比较的 map key 唯一标识一条连接,
+// "另一个连接上的相同数字不是同一个 binding"靠的正是这份指针身份,
 // 而不是数字本身
 type ConnHandle interface{}
 
 // RouteInfo 是 Route 查表成功后交给 ipc 的转发目标
 //
-// route_id 分配、Dispatch/DispatchResult 关联、执行 Lane 调度不在本包范围内
-// ，ipc 拿到 RouteInfo 后自行处理
+// route_id 分配, Dispatch/DispatchResult 关联, 执行 Lane 调度不在本包范围内
+// , ipc 拿到 RouteInfo 后自行处理
 type RouteInfo struct {
 	TargetConn          ConnHandle
 	ServiceEndpointID   uint64
@@ -29,9 +31,9 @@ type RouteInfo struct {
 	ProviderComponentID string
 	InterfaceID         string
 	InterfaceMajor      uint32
-	// InterfaceMinor / InterfaceSchemaHash 是【类型绑定】：调用方据它们恢复
-	// 解码 typed 载荷。长任务尤其需要——SDK 断线重连后手里只有一个
-	// operation_id，没有这份绑定就无从解码进度与结果。
+	// InterfaceMinor / InterfaceSchemaHash 是类型绑定: 调用方据它们恢复
+	// 解码 typed 载荷. 长任务尤其需要 - SDK 断线重连后手里只有一个
+	// operation_id, 没有这份绑定就无从解码进度与结果.
 	InterfaceMinor      uint32
 	InterfaceSchemaHash []byte
 	ResourceHandle      string
@@ -43,32 +45,33 @@ type RouteInfo struct {
 	ResourceGeneration     uint64
 	RequiredPermissions    []string
 
-	// Builtin 非 nil 表示目标是 nervud 自己实现的内建 endpoint（见 builtin.go）：
-	// 调用方应当就地执行它，而不是把 Dispatch 转发给某条 Service 连接。
+	// Builtin 非 nil 表示目标是 nervud 自己实现的内建 endpoint (见 builtin.go):
+	// 调用方应当就地执行它, 而不是把 Dispatch 转发给某条 Service 连接.
 	//
-	// 与 TargetConn 互斥：Builtin 非 nil 时 TargetConn 恒为 nil——内建没有连接。
-	// 调用方【先判 Builtin 再判 TargetConn】，顺序反了会把内建当成「路由成功但
-	// 没有转发目标」而回 UNAVAILABLE。
+	// 与 TargetConn 互斥: Builtin 非 nil 时 TargetConn 恒为 nil - 内建没有连接.
+	// 调用方先判 Builtin 再判 TargetConn, 顺序反了会把内建当成"路由成功但
+	// 没有转发目标"而回 UNAVAILABLE.
 	Builtin BuiltinHandler
 }
 
 // RouteError 是 Route 查表失败的结果
 //
-// Code 为零值（StatusCode_STATUS_CODE_UNSPECIFIED）表示未失败，调用方据此
-// 判空，照抄 ipcv1.Failure 系列对 zero code 的既有处理约定
+// Code 为零值 (StatusCode_STATUS_CODE_UNSPECIFIED) 表示未失败, 调用方据此
+// 判空, 照抄 ipcv1.Failure 系列对 zero code 的既有处理约定
 type RouteError struct {
 	Code ipcv1.StatusCode
 }
 
-// componentKey 唯一标识一个组件实例，供 on-demand 拉起等待队列使用
-// （照抄 internal/service 的同名 key 形状）
+// componentKey 唯一标识一个组件实例, 供 on-demand 拉起等待队列使用
+//
+//	(照抄 internal/service 的同名 key 形状)
 type componentKey struct {
 	pkg  string
 	comp string
 }
 
-// registrationKey 唯一标识一个 (Package, Component, Interface) 三元组，
-// 用于生成递增的 generation 号（供 binding 复核陈旧性，见 serviceRegistration）
+// registrationKey 唯一标识一个 (Package, Component, Interface) 三元组,
+// 用于生成递增的 generation 号 (供 binding 复核陈旧性, 见 serviceRegistration)
 type registrationKey struct {
 	pkg   string
 	comp  string
@@ -78,7 +81,7 @@ type registrationKey struct {
 // serviceRegistration 是一个 Service 通过 RegisterEndpoint 报到的一个
 // Interface 实现
 type serviceRegistration struct {
-	id             uint64 // service 侧命名空间，RegisterEndpointSuccess.endpoint_id
+	id             uint64 // service 侧命名空间, RegisterEndpointSuccess.endpoint_id
 	conn           ConnHandle
 	packageID      string
 	componentID    string
@@ -94,32 +97,32 @@ type serviceRegistration struct {
 	providerGeneration   uint64
 	resourceGeneration   uint64
 
-	// builtin 非 nil 表示这是 nervud 自己实现的内建 endpoint（见 builtin.go）：
-	// 没有 conn、恒 live，Route 返回它而不是转发目标。
+	// builtin 非 nil 表示这是 nervud 自己实现的内建 endpoint (见 builtin.go):
+	// 没有 conn, 恒 live, Route 返回它而不是转发目标.
 	builtin BuiltinHandler
 
 	// subscribeAdmit 非 nil 表示本内建接口的事件需要按实例作用域准入
-	// （见 BuiltinSubscribeAdmitter）。外部 registration 恒为 nil。
+	//  (见 BuiltinSubscribeAdmitter). 外部 registration 恒为 nil.
 	subscribeAdmit BuiltinSubscribeAdmitter
 
-	// live 为 false 表示该 registration 已失效（连接断开 / UnregisterEndpoint）。
-	// 引用它的 binding 在下次 Route 时据此判定失效 - 这是 v1 被动失效的落点，
-	// 主动 EndpointDied 推送依赖 ipc 写路径升级，
+	// live 为 false 表示该 registration 已失效 (连接断开 / UnregisterEndpoint).
+	// 引用它的 binding 在下次 Route 时据此判定失效 - 这是 v1 被动失效的落点,
+	// 主动 EndpointDied 推送依赖 ipc 写路径升级,
 	// 本包尚不依赖它
 	live bool
 }
 
 // binding 是一次 ResolveEndpoint 在某条 caller 连接上创建的路由句柄
 type binding struct {
-	id                 uint64 // caller 侧命名空间，ResolveEndpointSuccess.endpoint_id
+	id                 uint64 // caller 侧命名空间, ResolveEndpointSuccess.endpoint_id
 	conn               ConnHandle
 	callerPackageID    string
 	target             *serviceRegistration
-	targetGeneration   uint64 // 创建时快照的 serviceRegistration.generation，供诊断
+	targetGeneration   uint64 // 创建时快照的 serviceRegistration.generation, 供诊断
 	interfaceID        string
 	interfaceMajor     uint32
 	interfaceMinor     uint32
-	requiredPermission string // 来自中央 catalog，空表示无接口级额外裁决
+	requiredPermission string // 来自中央 catalog, 空表示无接口级额外裁决
 	resourceHandle     string
 
 	definitionGeneration uint64
@@ -129,7 +132,7 @@ type binding struct {
 
 // connState 是单条连接名下的全部注册与 binding
 //
-// service 侧 endpoint_id（nextRegID）与 caller 侧 endpoint_id（nextEndpointID）
+// service 侧 endpoint_id (nextRegID) 与 caller 侧 endpoint_id (nextEndpointID)
 // 是两个独立命名空间 - 同一条连接理论上可以既注册又解析
 type connState struct {
 	nextEndpointID uint64

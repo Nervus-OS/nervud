@@ -222,9 +222,6 @@ const (
 	platformReleaseRole     = "platform-release"
 )
 
-// packageManagerSource 复刻 nervus-system-server 的 pkgmanagerd/providergen
-// 随包分发的契约。返回的 schemaHash 是 RegisterEndpoint 必须原样带上的那份——
-// 空 hash 的兼容桥已经移除，现在所有 Provider 一视同仁。
 func packageManagerSource(t *testing.T) (catalog.Source, []byte) {
 	t.Helper()
 	bundle, err := ipcregistry.BuildSchemaBundle(
@@ -432,9 +429,6 @@ func TestRegisterEndpointRejectsComponentOutsideCatalogMembership(t *testing.T) 
 	}
 }
 
-// 曾经有一条只放行 nervus.pkgmanagerd 空 schema hash 的兼容桥，已随打包链落地
-// 而移除。本测试断言它真的没了：即便是身份完全正确的 pkgmanagerd，空 hash 也必须
-// 被拒；只有带上 Catalog 里那份真实 hash 才放行。
 func TestPackageManagerGetsNoSchemaHashExemption(t *testing.T) {
 	definitions := defaultCatalog(t)
 	source, schemaHash := packageManagerSource(t)
@@ -464,7 +458,7 @@ func TestPackageManagerGetsNoSchemaHashExemption(t *testing.T) {
 		InterfaceMajor: packageManagerMajor,
 	})
 	if code := empty.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION {
-		t.Fatalf("空 schema hash 仍被放行，兼容桥没有真正移除: code = %v", code)
+		t.Fatalf("unexpected endpoint result; schema hash: code = %v", code)
 	}
 
 	wrong := module.RegisterEndpoint("wrong", caller, &ipcv1.RegisterEndpoint{
@@ -484,7 +478,7 @@ func TestPackageManagerGetsNoSchemaHashExemption(t *testing.T) {
 		InterfaceSchemaHash: schemaHash,
 	})
 	if ok.GetSuccess() == nil {
-		t.Fatalf("带上真实 schema hash 仍被拒: %+v", ok.GetFailure())
+		t.Fatalf("unexpected endpoint result; schema hash: %+v", ok.GetFailure())
 	}
 }
 

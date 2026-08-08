@@ -1,16 +1,17 @@
-// 本文件定义各特权操作的请求类型与导出方法。每个操作 = 一个 XxxRequest
-// （Kind + Validate + 可选 Detail）+ 一个只有一行 do(...) 的 Gate 方法
+// 本文件定义各特权操作的请求类型与导出方法. 每个操作 = 一个 XxxRequest
 //
-// 只落地调用者形状已经确定的操作：
+//	(Kind + Validate + 可选 Detail) + 一个只有一行 do(...) 的 Gate 方法
+//
+// 只落地调用者形状已经确定的操作:
 //
 //	CreatePrivateDataDirectory / SetOwner / Reboot / InstallVerifiedPackage
 //
-// 其余 4 个 Kind（PrepareAppIdentity、StartSandboxedProcess、StopProcess、
-// EnableFsVerity）的请求形状由各自的第一个真实调用者（identity / service）
-// 落地时倒逼出来，现在定义只会是猜测。特别地 StopProcess 必须等 service 定型：
-// 裸 PID 有复用竞态（PID 被回收后杀错进程），正解是 service 在 spawn 时持有
-// pidfd、Authority 对 pidfd 发信号 - 那会直接改变请求字段。EnableFsVerity
-// 同样推迟：fs-verity 属于加固而非 v1 装包主链路的阻断项
+// 其余 4 个 Kind (PrepareAppIdentity, StartSandboxedProcess, StopProcess,
+// EnableFsVerity) 的请求形状由各自的第一个真实调用者 (identity / service)
+// 落地时倒逼出来, 现在定义只会是猜测. 特别地 StopProcess 必须等 service 定型:
+// 裸 PID 有复用竞态 (PID 被回收后杀错进程), 正解是 service 在 spawn 时持有
+// pidfd, Authority 对 pidfd 发信号 - 那会直接改变请求字段. EnableFsVerity
+// 同样推迟: fs-verity 属于加固而非 v1 装包主链路的阻断项
 package authority
 
 import (
@@ -21,12 +22,12 @@ import (
 // ---- CreatePrivateDataDirectory ------------------------------------------
 
 // CreateDataDirRequest 创建一个 App 私有数据目录
-// 父目录必须已存在：不做 MkdirAll - 每一级目录的创建都应是一次显式的特权操作
+// 父目录必须已存在: 不做 MkdirAll - 每一级目录的创建都应是一次显式的特权操作
 type CreateDataDirRequest struct {
-	Path string // 必须位于 Invariants.DataRoot 之下（斜杠分隔的 Linux 绝对路径）
-	UID  uint32 // 属主，必须落在 App UID 段
+	Path string // 必须位于 Invariants.DataRoot 之下 (斜杠分隔的 Linux 绝对路径)
+	UID  uint32 // 属主, 必须落在 App UID 段
 	GID  uint32
-	Perm uint32 // 如 0o700；不得对 group/other 开放
+	Perm uint32 // 如 0o700; 不得对 group/other 开放
 }
 
 func (CreateDataDirRequest) Kind() Kind { return KindCreatePrivateDataDir }
@@ -43,7 +44,7 @@ func (r CreateDataDirRequest) Validate(inv *Invariants) error {
 	if err := inv.CheckUID(r.GID); err != nil {
 		return err
 	}
-	// 私有数据目录不得对 group/other 开放：这是私有的定义本身，非策略选择
+	// 私有数据目录不得对 group/other 开放: 这是私有的定义本身, 非策略选择
 	if r.Perm&0o077 != 0 {
 		return fmt.Errorf("%w: perm %#o exposes private data dir to group/other",
 			ErrInvariantViolated, r.Perm)
@@ -51,8 +52,8 @@ func (r CreateDataDirRequest) Validate(inv *Invariants) error {
 	return nil
 }
 
-// DirHandle 是已创建目录的句柄。刻意不暴露裸 fd -
-// 裸 fd 传出包外后任何模块都能对它 write/mmap，Gate 就白设了
+// DirHandle 是已创建目录的句柄. 刻意不暴露裸 fd -
+// 裸 fd 传出包外后任何模块都能对它 write/mmap, Gate 就白设了
 type DirHandle struct{ Path string }
 
 func (g *Gate) CreatePrivateDataDirectory(
@@ -63,7 +64,7 @@ func (g *Gate) CreatePrivateDataDirectory(
 
 // ---- SetOwner -------------------------------------------------------------
 
-// SetOwnerRequest 修改 DataRoot 内单个路径的属主（非递归；符号链接本身不跟随）
+// SetOwnerRequest 修改 DataRoot 内单个路径的属主 (非递归; 符号链接本身不跟随)
 type SetOwnerRequest struct {
 	Path string // 必须位于 Invariants.DataRoot 之下
 	UID  uint32
@@ -91,11 +92,12 @@ func (g *Gate) SetOwner(ctx context.Context, subj Subject, req SetOwnerRequest) 
 
 // ---- Reboot ---------------------------------------------------------------
 
-// RebootRequest 重启整机。正常的故障恢复路径是 fail-fast 退出 + systemd 重启
-// nervud（StartLimitAction=reboot 兜底）；本操作留给确需主动重启整机的场景
-// （如系统更新提交）
+// RebootRequest 重启整机. 正常的故障恢复路径是 fail-fast 退出 + systemd 重启
+// nervud (StartLimitAction=reboot 兜底); 本操作留给确需主动重启整机的场景
+//
+//	(如系统更新提交)
 type RebootRequest struct {
-	Reason string // 必填：无理由的重启不接受，审计必须能回答为什么
+	Reason string // 必填: 无理由的重启不接受, 审计必须能回答为什么
 }
 
 func (RebootRequest) Kind() Kind { return KindReboot }
@@ -120,8 +122,8 @@ func (g *Gate) Reboot(ctx context.Context, subj Subject, req RebootRequest) erro
 type PowerAction uint8
 
 const (
-	// PowerActionUnspecified 零值即无效，防止未初始化的请求被当成合法操作。
-	// 缺省绝不能是「重启」——一个漏填字段的调用不该让整机重启
+	// PowerActionUnspecified 零值即无效, 防止未初始化的请求被当成合法操作.
+	// 缺省绝不能是"重启" - 一个漏填字段的调用不该让整机重启
 	PowerActionUnspecified PowerAction = iota
 	PowerActionReboot
 	PowerActionPowerOff
@@ -138,19 +140,19 @@ func (a PowerAction) String() string {
 	}
 }
 
-// PowerRequest 有序重启/关机整机（经 systemd 走完整 shutdown.target）。
+// PowerRequest 有序重启/关机整机 (经 systemd 走完整 shutdown.target).
 //
-// 与 RebootRequest 的分工见 authority/systemd/power.go 顶部：那个是 reboot(2)
-// 硬重启（故障恢复），这个是用户发起的正常电源动作
+// 与 RebootRequest 的分工见 authority/systemd/power.go 顶部: 那个是 reboot(2)
+// 硬重启 (故障恢复), 这个是用户发起的正常电源动作
 type PowerRequest struct {
 	Action PowerAction
-	Reason string // 必填：无理由的关机不接受，审计必须能回答为什么
+	Reason string // 必填: 无理由的关机不接受, 审计必须能回答为什么
 }
 
 func (PowerRequest) Kind() Kind { return KindPowerAction }
 
-// Detail 进审计的 Detail 字段。把 action 也带上——同一个 Kind 下
-// 「重启」和「关机」是两个不同的事件，审计必须能区分
+// Detail 进审计的 Detail 字段. 把 action 也带上 - 同一个 Kind 下
+// "重启"和"关机"是两个不同的事件, 审计必须能区分
 func (r PowerRequest) Detail() string { return r.Action.String() + ": " + r.Reason }
 
 func (r PowerRequest) Validate(*Invariants) error {
@@ -170,31 +172,31 @@ func (g *Gate) Power(ctx context.Context, subj Subject, req PowerRequest) error 
 
 // ---- InstallVerifiedPackage -------------------------------------------
 
-// InstallVerifiedPackageRequest 把已经完成签名、digest 和权限裁决的 staging
-// 目录原子提交为最终只读代码目录，避免 Authority 重复实现包验证
+// InstallVerifiedPackageRequest 把已经完成签名, digest 和权限裁决的 staging
+// 目录原子提交为最终只读代码目录, 避免 Authority 重复实现包验证
 //
-// 本请求只做"移动 + 收紧顶层属主"，不做压缩/展开/复核 - 压缩展开是
-// pkgmanagerd 的职责，复核是 pkgregistry 的职责，Authority 只负责这一步
+// 本请求只做"移动 + 收紧顶层属主", 不做压缩/展开/复核 - 压缩展开是
+// pkgmanagerd 的职责, 复核是 pkgregistry 的职责, Authority 只负责这一步
 // 唯一有权跨越信任边界的落盘动作
 //
-// 故意不带 UID/GID 字段：最终代码目录的属主是 nervud 自身（见 ops.go 的
-// finishInstalledPackage），不是该 Package 的 App UID - 只读代码目录必须
-// 让"谁也不能是自己代码的属主"这条底线成立，把属主设成 App UID 反而会让
-// 被攻破的 App 有能力 chmod 回可写、修改自己的可执行代码
+// 故意不带 UID/GID 字段: 最终代码目录的属主是 nervud 自身 (见 ops.go 的
+// finishInstalledPackage), 不是该 Package 的 App UID - 只读代码目录必须
+// 让"谁也不能是自己代码的属主"这条底线成立, 把属主设成 App UID 反而会让
+// 被攻破的 App 有能力 chmod 回可写, 修改自己的可执行代码
 type InstallVerifiedPackageRequest struct {
-	StagingDir string // pkgmanagerd 产出、已被 pkgregistry 复核过的 staging 目录
-	DestDir    string // 必须位于 Invariants.PackageRoot 之下：<PackageRoot>/<id>/<version>
+	StagingDir string // pkgmanagerd 产出, 已被 pkgregistry 复核过的 staging 目录
+	DestDir    string // 必须位于 Invariants.PackageRoot 之下: <PackageRoot>/<id>/<version>
 
-	// ReplaceExisting 允许覆盖一个【同路径已存在】的版本目录，用于同版本重装
-	// （修复损坏的安装）。
+	// ReplaceExisting 允许覆盖一个同路径已存在的版本目录, 用于同版本重装
+	//  (修复损坏的安装).
 	//
-	// 默认关闭，因为「同一个 <id>/<version> 出现第二次」通常意味着重复提交或
-	// 版本号复用，静默覆盖会把这两种错误吞掉。但 pkgregistry 的 checkUpgrade
-	// 明确允许同版本重装——那条策略之前交付不了，因为本层无条件用
-	// RENAME_NOREPLACE 拒绝，装包以裸 renameat2 EEXIST 失败。
+	// 默认关闭, 因为"同一个 <id>/<version> 出现第二次"通常意味着重复提交或
+	// 版本号复用, 静默覆盖会把这两种错误吞掉. 但 pkgregistry 的 checkUpgrade
+	// 明确允许同版本重装 - 那条策略之前交付不了, 因为本层无条件用
+	// RENAME_NOREPLACE 拒绝, 装包以裸 renameat2 EEXIST 失败.
 	//
-	// 做成显式开关而不是本层自己判断「是不是重装」：本层看不到 registry
-	// 记账，判不了。谁允许覆盖，必须由看得见上下文的那一层说出口。
+	// 做成显式开关而不是本层自己判断"是不是重装": 本层看不到 registry
+	// 记账, 判不了. 谁允许覆盖, 必须由看得见上下文的那一层说出口.
 	ReplaceExisting bool
 }
 

@@ -1,4 +1,4 @@
-// 本文件把 endpoint 接入 kernel.Module 生命周期，并集中持有 Register、Resolve
+// 本文件把 endpoint 接入 kernel.Module 生命周期, 并集中持有 Register, Resolve
 // 和 Route 共用的窄接口依赖与内部状态
 package endpoint
 
@@ -20,7 +20,7 @@ const (
 	permServiceRegisterPrivate = "perm.service.register.private"
 )
 
-// onDemandStartTimeout 限制等待 on-demand 组件启动并 RegisterEndpoint 的时间，
+// onDemandStartTimeout 限制等待 on-demand 组件启动并 RegisterEndpoint 的时间,
 // 避免一次解析永久占住调用方
 const onDemandStartTimeout = 3 * time.Second
 
@@ -35,11 +35,11 @@ var (
 	errOnDemandTimeout   = errors.New("endpoint: timed out waiting for on-demand component to register")
 )
 
-// 窄接口由消费者定义，具体类型隐式满足，避免 endpoint 依赖完整实现
+// 窄接口由消费者定义, 具体类型隐式满足, 避免 endpoint 依赖完整实现
 
-// PackageLookup 是对 pkgregistry.Registry 的窄接口：读已装包
+// PackageLookup 是对 pkgregistry.Registry 的窄接口: 读已装包
 //
-// 照抄 service.PackageLookup 的同名接口，不重新发明
+// 照抄 service.PackageLookup 的同名接口, 不重新发明
 type PackageLookup interface {
 	Lookup(id string) (pkgregistry.Entry, bool)
 	List() []pkgregistry.Entry
@@ -47,24 +47,24 @@ type PackageLookup interface {
 
 // PermissionChecker 查询某个 Package 是否已被授予某项 permission
 //
-// 接口定义与 ipc.PermissionChecker 完全一致，endpoint 和 ipc 各自持有一份到
+// 接口定义与 ipc.PermissionChecker 完全一致, endpoint 和 ipc 各自持有一份到
 // *permission.Registry 的窄引用
 type PermissionChecker interface {
 	AllowedAt(snapshot *catalog.Snapshot, packageID, permission string) bool
 }
 
-// ComponentStarter 拉起一个 on-demand 组件（Resolve 解析到它时调用）
+// ComponentStarter 拉起一个 on-demand 组件 (Resolve 解析到它时调用)
 //
-// service.Manager 已经预留了这个方法，接口在这里（消费者）定义
+// service.Manager 已经预留了这个方法, 接口在这里 (消费者) 定义
 type ComponentStarter interface {
 	EnsureStarted(ctx context.Context, pkg, comp string) error
 }
 
-// Module 是 endpoint 的 kernel.Module 实现，持有 Register/Resolve/Route 的
+// Module 是 endpoint 的 kernel.Module 实现, 持有 Register/Resolve/Route 的
 // 全部运行期状态
 //
-// v1 的 Start/Stop 基本是空操作：它不持有自己的 RT Lane 或后台循环，全部状态
-// 都挂在每条 IPC 连接的生命周期上，随连接创建或销毁
+// v1 的 Start/Stop 基本是空操作: 它不持有自己的 RT Lane 或后台循环, 全部状态
+// 都挂在每条 IPC 连接的生命周期上, 随连接创建或销毁
 type Module struct {
 	definitions *catalog.Registry
 	pkgs        PackageLookup
@@ -78,17 +78,17 @@ type Module struct {
 	byConn      map[ConnHandle]*connState
 	byInterface map[string][]*serviceRegistration
 
-	// pendingStarts 是 on-demand 拉起等待队列：Resolve 在 EnsureStarted 之后
-	// 挂一个 channel，RegisterEndpoint 到达时关闭全部等待者对应 channel 唤醒
+	// pendingStarts 是 on-demand 拉起等待队列: Resolve 在 EnsureStarted 之后
+	// 挂一个 channel, RegisterEndpoint 到达时关闭全部等待者对应 channel 唤醒
 	pendingStarts map[componentKey][]chan struct{}
 
-	// generations 记录每个 (pkg,comp,interface) 三元组已经历过的注册次数，
+	// generations 记录每个 (pkg,comp,interface) 三元组已经历过的注册次数,
 	// 供 serviceRegistration.generation 使用
 	generations map[registrationKey]uint64
 
-	// builtinSeq 给内建 endpoint 分配 service 侧 id。与外部注册共用
-	// serviceRegistration 结构但独立编号——内建没有 conn，那个 id 只用于
-	// 诊断，永远不会出现在任何一条 Dispatch 上。
+	// builtinSeq 给内建 endpoint 分配 service 侧 id. 与外部注册共用
+	// serviceRegistration 结构但独立编号 - 内建没有 conn, 那个 id 只用于
+	// 诊断, 永远不会出现在任何一条 Dispatch 上.
 	builtinSeq uint64
 }
 
@@ -164,7 +164,7 @@ func (m *Module) audit(caller identity.Caller, action string, denied bool, err e
 	})
 }
 
-// connStateLocked 取或建某条连接的状态。调用方必须持有 m.mu
+// connStateLocked 取或建某条连接的状态. 调用方必须持有 m.mu
 func (m *Module) connStateLocked(conn ConnHandle) *connState {
 	cs, ok := m.byConn[conn]
 	if !ok {
@@ -174,8 +174,8 @@ func (m *Module) connStateLocked(conn ConnHandle) *connState {
 	return cs
 }
 
-// removeFromInterfaceIndexLocked 把 reg 从 byInterface 索引摘掉。调用方必须
-// 持有 m.mu。reg.live 由调用方另行置为 false - 两者一起做才是一次完整的失效
+// removeFromInterfaceIndexLocked 把 reg 从 byInterface 索引摘掉. 调用方必须
+// 持有 m.mu. reg.live 由调用方另行置为 false - 两者一起做才是一次完整的失效
 func (m *Module) removeFromInterfaceIndexLocked(reg *serviceRegistration) {
 	list := m.byInterface[reg.interfaceID]
 	for i, r := range list {
@@ -192,8 +192,8 @@ func (m *Module) removeFromInterfaceIndexLocked(reg *serviceRegistration) {
 }
 
 // visibleCandidatesLocked 返回 byInterface[interfaceID] 中对 callerPkg 可见的
-// registration：跨包只看 VisibilityPublic，同包再加 VisibilityPackage
-// 。调用方必须持有 m.mu
+// registration: 跨包只看 VisibilityPublic, 同包再加 VisibilityPackage
+// . 调用方必须持有 m.mu
 func (m *Module) visibleCandidatesLocked(callerPkg, interfaceID string) []*serviceRegistration {
 	var out []*serviceRegistration
 	for _, reg := range m.byInterface[interfaceID] {
@@ -237,8 +237,8 @@ func (m *Module) manifestOnDemandCandidates(
 
 // tryOnDemandStart 拉起一个 on-demand 组件并等待它完成 RegisterEndpoint
 //
-// 等待 channel 必须在调用 EnsureStarted 之前登记，否则组件启动得足够快时，
-// RegisterEndpoint 的广播可能发生在我们登记等待者之前，永远等不到唤醒
+// 等待 channel 必须在调用 EnsureStarted 之前登记, 否则组件启动得足够快时,
+// RegisterEndpoint 的广播可能发生在我们登记等待者之前, 永远等不到唤醒
 func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, err error) {
 	if m == nil || m.starter == nil {
 		return false, errors.New("endpoint: component starter is unavailable")
@@ -271,7 +271,7 @@ func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, err error) {
 	}
 }
 
-// removeWaiterLocked 从等待队列摘掉一个超时放弃的等待者。调用方必须持有 m.mu
+// removeWaiterLocked 从等待队列摘掉一个超时放弃的等待者. 调用方必须持有 m.mu
 func (m *Module) removeWaiterLocked(key componentKey, ch chan struct{}) {
 	waiters := m.pendingStarts[key]
 	for i, w := range waiters {

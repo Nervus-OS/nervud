@@ -57,9 +57,6 @@ func (f fakeResource) Valid(h string) bool { return f.valid[h] }
 type fakeLease struct {
 	ok bool
 
-	// sawConn 记下最后一次校验拿到的连接，供断言 conn 确实被透传下来。
-	// 【它必须到达 control 侧】：leaseID 是连接作用域句柄，两条连接上的同一个
-	// 数字是两个毫无关系的租约。
 	sawConn ConnHandle
 }
 

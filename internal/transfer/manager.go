@@ -176,7 +176,7 @@ func (m *Manager) Begin(origin Origin, req *transferv1.BeginTransferRequest) (*t
 		return nil, status(ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT,
 			"transfer: requested direction exceeds method policy")
 	}
-	// 至少要允许一种本 build 实现的模式。FRAMED_RELAY 是基线，
+	// 至少要允许一种本 build 实现的模式. FRAMED_RELAY 是基线,
 	// SHARED_MEMORY_RING 需要方法显式允许
 	ringAllowed := modeAllowed(policy.GetAllowedModes(),
 		ipcv1.TransferMode_TRANSFER_MODE_SHARED_MEMORY_RING)
@@ -255,10 +255,10 @@ func (m *Manager) Begin(origin Origin, req *transferv1.BeginTransferRequest) (*t
 	id, _ := parseTransferID(idWire)
 	providerRole, callerRole, _ := rolesFor(direction)
 
-	// 模式裁决：只有「方法允许 + 调用方请求 + 本机支持」三者同时成立才用 ring。
+	// 模式裁决: 只有"方法允许 + 调用方请求 + 本机支持"三者同时成立才用 ring.
 	//
-	// 任何一项不成立都静默回落到 FRAMED_RELAY 而不是报错——ring 是性能优化，
-	// 不是语义变更，因为一台内核太老的开发机而让整条链路失败不划算。
+	// 任何一项不成立都静默回落到 FRAMED_RELAY 而不是报错 - ring 是性能优化,
+	// 不是语义变更, 因为一台内核太老的开发机而让整条链路失败不划算.
 	mode := ipcv1.TransferMode_TRANSFER_MODE_FRAMED_RELAY
 	var ring *ringResources
 	if ringAllowed &&
@@ -266,7 +266,7 @@ func (m *Manager) Begin(origin Origin, req *transferv1.BeginTransferRequest) (*t
 		ringModeSupported() {
 		res, ringErr := newRingResources(maxPacket)
 		if ringErr != nil {
-			// 建不出来同样回落。日志留在 Manager 侧，调用方只看到模式不同
+			// 建不出来同样回落. 日志留在 Manager 侧, 调用方只看到模式不同
 			if m.log != nil {
 				m.log.Warn("transfer: shared-memory ring unavailable, falling back to framed relay",
 					"err", ringErr)
@@ -712,10 +712,10 @@ func (m *Manager) closeLocked(r *record, reason terminalReason, now time.Time) [
 	r.terminalAt = now
 	r.closeSignal()
 	m.releaseLocked(r)
-	// 释放 ring 的 memfd 与 eventfd。
+	// 释放 ring 的 memfd 与 eventfd.
 	//
-	// nervud 关掉自己这两个 fd 之后，内存本身由两端已经收到的 fd 引用计数维持，
-	// 直到它们各自退出或关闭——这正是想要的：传输结束时内核不再持有引用，
+	// nervud 关掉自己这两个 fd 之后, 内存本身由两端已经收到的 fd 引用计数维持,
+	// 直到它们各自退出或关闭 - 这正是想要的: 传输结束时内核不再持有引用,
 	// 而对端在处理完最后一帧之前不会被抽掉内存
 	if r.ring != nil {
 		r.ring.close()
@@ -770,8 +770,8 @@ func handleMatches(r *record, side *transferSide, h *ipcv1.TransferHandle, endpo
 		h.GetDataPlaneEndpoint() == endpoint
 }
 
-// framedRelayAllowed：空集合表示只允许基线模式（见 TransferPolicy.allowed_modes
-// 的注释），因此空集合恒为 true。
+// framedRelayAllowed: 空集合表示只允许基线模式 (见 TransferPolicy.allowed_modes
+// 的注释), 因此空集合恒为 true.
 func framedRelayAllowed(modes []ipcv1.TransferMode) bool {
 	if len(modes) == 0 {
 		return true
@@ -779,11 +779,11 @@ func framedRelayAllowed(modes []ipcv1.TransferMode) bool {
 	return modeAllowed(modes, ipcv1.TransferMode_TRANSFER_MODE_FRAMED_RELAY)
 }
 
-// modeAllowed 判断某个模式是否在方法声明的白名单里。
+// modeAllowed 判断某个模式是否在方法声明的白名单里.
 //
-// 【空集合不代表允许任意模式】：它按 TransferPolicy 的定义等价于「只允许
-// FRAMED_RELAY」。因此 ring 必须被显式列出才可用——一个没想过共享内存的方法
-// 不该因为调用方请求就获得它。
+// 空集合不代表允许任意模式: 它按 TransferPolicy 的定义等价于"只允许
+// FRAMED_RELAY". 因此 ring 必须被显式列出才可用 - 一个没想过共享内存的方法
+// 不该因为调用方请求就获得它.
 func modeAllowed(modes []ipcv1.TransferMode, want ipcv1.TransferMode) bool {
 	for _, mode := range modes {
 		if mode == want {

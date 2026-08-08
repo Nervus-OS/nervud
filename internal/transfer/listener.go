@@ -96,10 +96,10 @@ func (m *Manager) serveAttach(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	// ring 模式：结果帧之后紧接着用 SCM_RIGHTS 送 memfd 与 eventfd。
+	// ring 模式: 结果帧之后紧接着用 SCM_RIGHTS 送 memfd 与 eventfd.
 	//
-	// 【必须在结果帧之后】：对端要先从结果里读到 mode 与几何参数，才知道
-	// 该不该去收 fd、收到之后按什么尺寸映射。
+	// 必须在结果帧之后: 对端要先从结果里读到 mode 与几何参数, 才知道
+	// 该不该去收 fd, 收到之后按什么尺寸映射.
 	if ring != nil {
 		if err := sendRingFDs(conn, ring); err != nil {
 			if m.log != nil {
@@ -115,8 +115,8 @@ func (m *Manager) serveAttach(conn net.Conn) {
 		m.closeID(id, terminalPeerClosed)
 		return
 	}
-	// 【ring 模式不起 relay】：两端 mmap 同一块内存直接收发，nervud 不在
-	// 数据路径上。起了 relay 反而会把两条控制连接当成数据流去读
+	// ring 模式不起 relay: 两端 mmap 同一块内存直接收发, nervud 不在
+	// 数据路径上. 起了 relay 反而会把两条控制连接当成数据流去读
 	if active && success.GetMode() != ipcv1.TransferMode_TRANSFER_MODE_SHARED_MEMORY_RING {
 		m.startRelay(id)
 	}

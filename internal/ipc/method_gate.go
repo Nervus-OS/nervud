@@ -71,12 +71,12 @@ func (s *Server) validateDispatchResult(
 			s.operations != nil); err != nil {
 			return s.rejectProviderResult(entry, err)
 		}
-		// 长任务的 ACCEPTED 走单独一条：载荷由【内核】写，不是 Provider。
+		// 长任务的 ACCEPTED 走单独一条: 载荷由内核写, 不是 Provider.
 		//
-		// 【Provider 不得自己写句柄】：operation_id 由 nervud 分配、状态机也归
-		// nervud。让 Provider 填这个字段等于让它指定「调用方拿到的是哪个
-		// operation」——填错或伪造的后果是取消永远取消不到、进度永远收不到，
-		// 而两边都不报错。
+		// Provider 不得自己写句柄: operation_id 由 nervud 分配, 状态机也归
+		// nervud. 让 Provider 填这个字段等于让它指定"调用方拿到的是哪个
+		// operation" - 填错或伪造的后果是取消永远取消不到, 进度永远收不到,
+		// 而两边都不报错.
 		if meta.GetReturnsOperation() &&
 			success.GetCode() == ipcv1.StatusCode_STATUS_CODE_ACCEPTED {
 			return s.operationAcceptedResponse(entry, success)
@@ -165,17 +165,17 @@ func (s *Server) validateBuiltinResult(
 		return internalResponse(requestID), false
 	}
 
-	// 内建的 typed error_detail。【与外部 Provider 的处置不同】：那一侧整条
-	// 拒绝（StatusCode 与 domain reason 之间没有机器可读的授权关系，一份来自
-	// 外部进程的 detail 看起来已认证却语义无据）；内建的 detail 由内核代码
-	// 生成，与 Code 出自同一处判定，那条顾虑不成立。
+	// 内建的 typed error_detail. 与外部 Provider 的处置不同: 那一侧整条
+	// 拒绝 (StatusCode 与 domain reason 之间没有机器可读的授权关系, 一份来自
+	// 外部进程的 detail 看起来已认证却语义无据); 内建的 detail 由内核代码
+	// 生成, 与 Code 出自同一处判定, 那条顾虑不成立.
 	if len(result.ErrorDetail) == 0 {
 		return failureResponse(requestID, result.Code), true
 	}
 	if route.Method.Meta.GetErrorDetailType() == "" {
-		// 契约没声明 error_detail_type，内建却给了一份。转发它等于让调用方
-		// 拿到一段【不知道该按什么类型解】的字节——而它多半会去猜。
-		// 当作内核装配 bug 拒掉，理由与 Provider 侧同源。
+		// 契约没声明 error_detail_type, 内建却给了一份. 转发它等于让调用方
+		// 拿到一段不知道该按什么类型解的字节 - 而它多半会去猜.
+		// 当作内核装配 bug 拒掉, 理由与 Provider 侧同源.
 		s.log.Error("ipc: builtin produced an error detail for a method that declares none",
 			"interface", route.InterfaceID, "method_id", route.Method.MethodID)
 		return internalResponse(requestID), false
@@ -191,8 +191,8 @@ func (s *Server) validateBuiltinResult(
 		RequestId: requestID,
 		Outcome: &ipcv1.Response_Failure{Failure: &ipcv1.Failure{
 			Code: result.Code,
-			// PublicMessage 仍然留空：协议规定它只能由 nervud 从受审计模板
-			// 生成，而 typed detail 已经承载了可区分的原因。
+			// PublicMessage 仍然留空: 协议规定它只能由 nervud 从受审计模板
+			// 生成, 而 typed detail 已经承载了可区分的原因.
 			ErrorDetail: detail,
 		}},
 	}, true

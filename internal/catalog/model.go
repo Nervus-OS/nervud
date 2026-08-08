@@ -29,18 +29,18 @@ const (
 	InterfaceTransferControl = "nervus.interface.transfer.control"
 	InterfacePower           = "nervus.interface.power"
 
-	// InterfaceResourceDirectory 是 Catalog 自己的只读视图。
+	// InterfaceResourceDirectory 是 Catalog 自己的只读视图.
 	//
-	// 它列在这里而 nervus.interface.camera 不在，区别不是「谁更重要」：目录
-	// 描述的是 Catalog 本身，除了内核没有第二个实现者；而摄像头是一项能力，
-	// 由签名的系统服务用 ProviderArtifacts 声明，内核不该认识它。
+	// 它列在这里而 nervus.interface.camera 不在, 区别不是"谁更重要": 目录
+	// 描述的是 Catalog 本身, 除了内核没有第二个实现者; 而摄像头是一项能力,
+	// 由签名的系统服务用 ProviderArtifacts 声明, 内核不该认识它.
 	InterfaceResourceDirectory = "nervus.interface.resource.directory"
 
-	// InterfaceOperationControl 是长任务的查询/取消/回报面。
+	// InterfaceOperationControl 是长任务的查询/取消/回报面.
 	//
-	// 它与资源目录同理由列在这里：Operation 的状态机归内核所有，除了 nervud
-	// 没有第二个实现者。摄像头那类【能力】由签名的系统服务用 ProviderArtifacts
-	// 声明，内核不该认识。
+	// 它与资源目录同理由列在这里: Operation 的状态机归内核所有, 除了 nervud
+	// 没有第二个实现者. 摄像头那类能力由签名的系统服务用 ProviderArtifacts
+	// 声明, 内核不该认识.
 	InterfaceOperationControl = "nervus.interface.operation.control"
 
 	ResourceMotionBase     = "nervus.resource.motion.base"
@@ -202,11 +202,13 @@ type MethodDefinition struct {
 	ProviderGeneration   uint64
 }
 
-// EventDefinition 是一个可订阅事件的权威定义，地位同 MethodDefinition。
+// EventDefinition 是一个可订阅事件的权威定义, 地位同 MethodDefinition.
 //
-// 订阅准入靠它回答三件事：谁能订阅（Meta.RequiredPermission）、推送多快
-// （Meta.MaxEventsPerSecond）、缺口意味着什么（Meta.DeliveryClass）。
-// 三者都不在事件载荷里，也【不能】由 Provider 在推送时自报。
+// 订阅准入靠它回答三件事: 谁能订阅 (Meta.RequiredPermission), 推送多快
+//
+//	(Meta.MaxEventsPerSecond), 缺口意味着什么 (Meta.DeliveryClass).
+//
+// 三者都不在事件载荷里, 也不能由 Provider 在推送时自报.
 type EventDefinition struct {
 	InterfaceID string
 	Major       uint32
@@ -265,10 +267,10 @@ type ResourceDefinition struct {
 	Owner            DefinitionOwner
 	ManagerOwner     DefinitionOwner
 
-	// Labels 是该资源的语义标签，供 ResourceSelector.labels 匹配。
+	// Labels 是该资源的语义标签, 供 ResourceSelector.labels 匹配.
 	//
-	// StableRole 是板级配置的产物（这块板上前视摄像头叫 cam.front 还是
-	// camera0），App 不该依赖它。标签让 App 按语义选设备，换板不用改 App。
+	// StableRole 是板级配置的产物 (这块板上前视摄像头叫 cam.front 还是
+	// camera0), App 不该依赖它. 标签让 App 按语义选设备, 换板不用改 App.
 	Labels map[string]string
 
 	DefinitionGeneration uint64
@@ -414,10 +416,10 @@ func (s *Snapshot) Event(interfaceID string, major, eventID uint32) (EventDefini
 	return out, true
 }
 
-// ProviderEvent 证明 packageID 确实是该接口的已接受实现者，再取事件定义。
+// ProviderEvent 证明 packageID 确实是该接口的已接受实现者, 再取事件定义.
 //
-// 与 ProviderMethod 同规：接口里【定义】了这个事件，不等于这个 Provider
-// 【被允许】提供它。
+// 与 ProviderMethod 同规: 接口里定义了这个事件, 不等于这个 Provider
+// 被允许提供它.
 func (s *Snapshot) ProviderEvent(
 	packageID string,
 	interfaceID string,
@@ -609,8 +611,8 @@ func cloneResourceDefinition(in ResourceDefinition) ResourceDefinition {
 	return out
 }
 
-// cloneLabels 深拷贝标签 map。Snapshot 是不可变的，返回内部 map 会让消费者
-// 能就地改写一份已发布的 Catalog。
+// cloneLabels 深拷贝标签 map. Snapshot 是不可变的, 返回内部 map 会让消费者
+// 能就地改写一份已发布的 Catalog.
 func cloneLabels(in map[string]string) map[string]string {
 	if in == nil {
 		return nil
@@ -622,8 +624,8 @@ func cloneLabels(in map[string]string) map[string]string {
 	return out
 }
 
-// sameLabels 比较两组标签。用于 sameResourceContract——两个 Provider 声明同一个
-// 资源时，标签也必须一致，否则 App 按标签选到的会是哪一个取决于发布顺序。
+// sameLabels 比较两组标签. 用于 sameResourceContract - 两个 Provider 声明同一个
+// 资源时, 标签也必须一致, 否则 App 按标签选到的会是哪一个取决于发布顺序.
 func sameLabels(left, right map[string]string) bool {
 	if len(left) != len(right) {
 		return false
