@@ -138,13 +138,23 @@ func TestReadWritePaths_UsesGrantedNotRequested(t *testing.T) {
 	}
 }
 
-func TestReadWritePaths_StorageUserRequiresRuntimeConsent(t *testing.T) {
+// 挂载门只看安装资格, 不看用户此刻同不同意.
+//
+// 这两道门被刻意分到不同的时间尺度上: 挂载在 spawn 时定死, 改它必须重启进程;
+// 而"用户同不同意"要能随时翻转, 于是交给目录上的 ACL - 它在 open(2) 时求值,
+// 增删对已经在跑的进程立即生效. 详见 supervise.readWritePaths 与
+// ProjectRuntimePermission.
+//
+// 因此这里断言的是: 运行期未同意【不】阻止目录被挂进来. 真正挡住写的是
+// preflight 把该目录设成 01770 之后, ACL 里没有这个 UID 的条目
+func TestReadWritePaths_StorageUserIgnoresRuntimeConsent(t *testing.T) {
 	m := newPathsManager()
 	entry := entryWithGrants("com.example.files", permStorageUser)
 
+	// perms 里没有 set 过, 即运行期未同意
 	got := m.readWritePaths(entry, "/data/x")
-	if slices.Contains(got, m.inv.UserDataRoot) {
-		t.Fatalf("install-eligible but runtime-denied package got UserDataRoot: %v", got)
+	if !slices.Contains(got, m.inv.UserDataRoot) {
+		t.Fatalf("挂载门不该看运行期同意状态, 但 UserDataRoot 没进来: %v", got)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nervus-os/nervud/internal/audit"
@@ -56,14 +57,24 @@ func testABI() string {
 }
 
 type fakeInstaller struct {
-	installErr error
-	dataDirErr error
-	removeErr  error
-	appUserErr error
-	installed  []authority.InstallVerifiedPackageRequest
-	dataDirs   []authority.CreateDataDirRequest
-	removed    []authority.RemovePackageTreeRequest
-	appUsers   []authority.EnsureAppUserRequest
+	installErr    error
+	dataDirErr    error
+	removeErr     error
+	appUserErr    error
+	userAccessErr error
+	installed     []authority.InstallVerifiedPackageRequest
+	dataDirs      []authority.CreateDataDirRequest
+	removed       []authority.RemovePackageTreeRequest
+	appUsers      []authority.EnsureAppUserRequest
+	userAccess    []authority.SetUserDataAccessRequest
+}
+
+// 卸载必须连带摘掉用户文档区的 ACL 条目, 否则 UID 复用会把写权限白送给新包
+func (f *fakeInstaller) SetUserDataAccess(
+	_ context.Context, _ authority.Subject, req authority.SetUserDataAccessRequest,
+) error {
+	f.userAccess = append(f.userAccess, req)
+	return f.userAccessErr
 }
 
 func (f *fakeInstaller) EnsureAppUser(
@@ -122,6 +133,17 @@ type fakePermissionArbiter struct {
 	replaced [][]permission.Grant
 	cleared  []string
 	clearErr error
+
+	// runtimeStates 记下每一次 SetRuntimeState, 供安装期同意的断言使用
+	runtimeStates []fakeRuntimeGrant
+	runtimeErr    error
+}
+
+// fakeRuntimeGrant 是一次 SetRuntimeState 调用的记录
+type fakeRuntimeGrant struct {
+	pkg   string
+	perm  string
+	state permission.GrantState
 }
 
 func (f *fakePermissionArbiter) IntersectAt(
@@ -148,6 +170,14 @@ func (f *fakePermissionArbiter) Replace(grants []permission.Grant) error {
 func (f *fakePermissionArbiter) ClearPackage(pkg string) error {
 	f.cleared = append(f.cleared, pkg)
 	return f.clearErr
+}
+
+func (f *fakePermissionArbiter) SetRuntimeState(
+	pkg, permissionID string, state permission.GrantState,
+) error {
+	f.runtimeStates = append(f.runtimeStates,
+		fakeRuntimeGrant{pkg: pkg, perm: permissionID, state: state})
+	return f.runtimeErr
 }
 
 func newTestInstaller(t *testing.T) (*Module, *fakeInstaller, *fakeIdentityUpdater, *fakeAuditor) {
@@ -209,6 +239,110 @@ func writeStagingMetadata(t *testing.T, staging string, manifestBytes, sig []byt
 	}
 	if err := os.WriteFile(filepath.Join(staging, SignatureFileName), sig, 0o644); err != nil {
 		t.Fatalf("write staging sig: %v", err)
+	}
+}
+
+// 安装期同意测试用到的三条内核 bootstrap 权限. 各代表一类判据:
+//
+//	permStorageUser   USER_CONSENT - 有运行期状态, 是同意能作用的唯一一档
+//	permPkgQuery      NORMAL       - 装上即生效, 没有运行期状态
+//	permMotionControl USER_CONSENT - 但测试里不申请它, 用来验证"不在授予集合里"
+const (
+	permStorageUser   = "perm.storage.user"
+	permPkgQuery      = "perm.pkg.query"
+	permMotionControl = "perm.motion.control"
+)
+
+// newStagingWithPermissions 造一个声明了 permissions 的 staging.
+//
+// fakePermissionArbiter 的默认 IntersectAt 原样批准全部请求, 因此 requested
+// 就是最终的 GrantedPermissions - 这正是要的: 本组测试关心的是同意清单怎么被
+// 裁剪, 不是安装期裁决本身
+func newStagingWithPermissions(
+	t *testing.T, root, packageID string, permissions []string,
+) (string, []byte, []byte) {
+	t.Helper()
+	staging := filepath.Join(root, "staging")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+	content := "#!/bin/true"
+	if err := os.WriteFile(filepath.Join(staging, "bin"), []byte(content), 0o755); err != nil {
+		t.Fatalf("write staging file: %v", err)
+	}
+	quoted := make([]string, 0, len(permissions))
+	for _, p := range permissions {
+		quoted = append(quoted, fmt.Sprintf("%q", p))
+	}
+	manifest := fmt.Sprintf(`{"schema":1,"package_id":%q,"version":"1.0.0","version_code":1,`+
+		`"min_nervus_api":1,"target_nervus_api":1,"supported_abis":[%q],`+
+		`"digests":{"bin":%q},"permissions":[%s],`+
+		`"components":[{"id":"main","type":"app","entry":"bin","runtime":"native","launch_mode":"manual"}]}`,
+		packageID, testABI(), hashOf(content), strings.Join(quoted, ","))
+	mb := []byte(manifest)
+	sig := signManifest(t, newDevKey(t), mb)
+	writeStagingMetadata(t, staging, mb, sig)
+	return staging, mb, sig
+}
+
+// TestInstallConsent_OnlyUserConsentInsideInstallSet 钉住安装期同意的裁剪判据.
+//
+// 确认屏递进来的清单是【上限而不是授权依据】: 只有同时满足"在安装期授予集合里"
+// 与"是 USER_CONSENT 这一档"的那些才落库. 少了任一条, 一个夸大的清单就能让包
+// 拿到没被裁决批准的权限, 或者给 NORMAL 权限写进一个它根本没有的运行期状态
+func TestInstallConsent_OnlyUserConsentInsideInstallSet(t *testing.T) {
+	mod, _, _, _, perm := newTestInstallerWithPerm(t)
+	root := t.TempDir()
+
+	// 只申请这两条: 一条 USER_CONSENT, 一条 NORMAL
+	staging, manifestBytes, sig := newStagingWithPermissions(
+		t, root, "com.example.consent", []string{permStorageUser, permPkgQuery})
+
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes,
+		SigBlock:      sig,
+		StagingDir:    staging,
+		Source:        SourceDynamicInstall,
+		ConsentedPermissions: []string{
+			permStorageUser,   // 该落: USER_CONSENT 且在授予集合里
+			permPkgQuery,      // 不该落: NORMAL 没有运行期状态这回事
+			permMotionControl, // 不该落: 压根没申请, 不在授予集合里
+		},
+	}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if len(perm.runtimeStates) != 1 {
+		t.Fatalf("SetRuntimeState calls = %+v, want exactly 1", perm.runtimeStates)
+	}
+	got := perm.runtimeStates[0]
+	if got.pkg != "com.example.consent" || got.perm != permStorageUser {
+		t.Fatalf("granted %s/%s, want com.example.consent/%s", got.pkg, got.perm, permStorageUser)
+	}
+	if got.state != permission.GrantStateGranted {
+		t.Fatalf("state = %v, want Granted", got.state)
+	}
+}
+
+// TestInstallConsent_EmptyConsentGrantsNothing: 没有同意任何权限时装包照常成功,
+// 只是一条运行期授予都不落. 用户之后仍可以在设置里补上
+func TestInstallConsent_EmptyConsentGrantsNothing(t *testing.T) {
+	mod, _, _, _, perm := newTestInstallerWithPerm(t)
+	root := t.TempDir()
+	staging, manifestBytes, sig := newStagingWithPermissions(
+		t, root, "com.example.noconsent", []string{permStorageUser})
+
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes,
+		SigBlock:      sig,
+		StagingDir:    staging,
+		Source:        SourceDynamicInstall,
+	}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if len(perm.runtimeStates) != 0 {
+		t.Fatalf("SetRuntimeState calls = %+v, want none", perm.runtimeStates)
 	}
 }
 

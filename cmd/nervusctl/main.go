@@ -31,7 +31,9 @@ Usage:
   nervusctl [--sock PATH] <command> [arguments...]
 
 Commands:
-  install <file.nspkg>              Unpack and trigger installation
+  install <file.nspkg> [perms]      Unpack and trigger installation. [perms] is a
+                                    comma-separated list of USER_CONSENT permissions
+                                    the operator consents to on the user's behalf
   uninstall <package_id>            Uninstall a Package
   list                              List installed Packages
   enable <package_id> <component>   Enable a Component

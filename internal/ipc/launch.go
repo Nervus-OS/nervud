@@ -36,6 +36,24 @@ import (
 // 也能把一个刚被停用又启用的组件立刻拉起. v1 只给 Launcher 与会话服务.
 const permSystemLaunch = "perm.system.launch"
 
+// permPermissionAdmin 是系统确认 UI 的身份凭据.
+//
+// 它 SYSTEM_ONLY + PLATFORM 信任 + platform-release 签名角色 (见 catalog
+// bootstrap), 因此持有者只可能是随只读系统镜像发布的那一个确认 UI.
+// 本包只用它回答"这次调用是不是确认 UI 发起的", 见 conn.callerIsConfirmationUI
+const permPermissionAdmin = "perm.permission.admin"
+
+// callerIsConfirmationUI 回答本连接的调用方是不是系统确认 UI.
+//
+// permission 未接线时 (最小装配/测试) 返回 false - 这一问必须 fail-closed:
+// 认错了等于让任意调用方直接触发需用户确认的操作
+func (co *conn) callerIsConfirmationUI() bool {
+	if co == nil || co.s == nil || co.s.permission == nil {
+		return false
+	}
+	return co.s.permission.Allowed(co.caller.PackageID, permPermissionAdmin)
+}
+
 // handleLaunchComponent 处理一次启动请求.
 func (co *conn) handleLaunchComponent(req *ipcv1.LaunchComponent) bool {
 	reqID := req.GetRequestId()

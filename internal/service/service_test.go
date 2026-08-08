@@ -190,6 +190,57 @@ func testInvariants() *authority.Invariants {
 	return authority.DefaultInvariants()
 }
 
+// recordingAuth 把 ACL 那两个操作从真 Gate 上截下来记账, 其余照旧委派.
+//
+// service 的职责是【正确地调用 authority】, 而不是自己写 xattr - 字节对不对
+// 是 authority 的测试对着真内核验的事 (acl_linux_test.go). 在这一层拦下来还
+// 顺带让用例不必依赖宿主机上真有 /var/lib/nervus/user-data
+type recordingAuth struct {
+	ProcessController
+
+	mu         sync.Mutex
+	userAccess []authority.SetUserDataAccessRequest
+	reconciled [][]uint32
+}
+
+func (r *recordingAuth) SetUserDataAccess(
+	_ context.Context, _ authority.Subject, req authority.SetUserDataAccessRequest,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.userAccess = append(r.userAccess, req)
+	return nil
+}
+
+func (r *recordingAuth) ReconcileUserDataAccess(
+	_ context.Context, _ authority.Subject, req authority.ReconcileUserDataAccessRequest,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reconciled = append(r.reconciled, append([]uint32(nil), req.UIDs...))
+	return nil
+}
+
+// grants 报告记账里最后一次针对 uid 的决定. 没记过任何一次即回落到对账结果
+func (r *recordingAuth) grants(uid uint32) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.userAccess) - 1; i >= 0; i-- {
+		if r.userAccess[i].UID == uid {
+			return r.userAccess[i].Allowed
+		}
+	}
+	for i := len(r.reconciled) - 1; i >= 0; i-- {
+		for _, u := range r.reconciled[i] {
+			if u == uid {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
 func makeEntry(pkg string, uid uint32, trust identity.TrustProfile, comps ...pkgregistry.Component) pkgregistry.Entry {
 	return pkgregistry.Entry{
 		Manifest:      pkgregistry.Manifest{PackageID: pkg, Version: "1.0.0", Components: comps},
@@ -212,7 +263,8 @@ func onDemandService(id string, crit pkgregistry.Criticality) pkgregistry.Compon
 }
 
 func newTestManager(t *testing.T, sp authority.UnitManager, pkgs PackageLookup, safety SafetyEscalator) *Manager {
-	return newTestManagerWithPermissions(t, sp, pkgs, &fakePermissions{}, safety)
+	m, _ := newTestManagerWithPermissions(t, sp, pkgs, &fakePermissions{}, safety)
+	return m
 }
 
 func newTestManagerWithPermissions(
@@ -221,7 +273,7 @@ func newTestManagerWithPermissions(
 	pkgs PackageLookup,
 	perms PermissionLookup,
 	safety SafetyEscalator,
-) *Manager {
+) (*Manager, *recordingAuth) {
 	t.Helper()
 	rec := &fakeRecorderDiscard{}
 	gate, err := authority.New(authority.Config{
@@ -230,11 +282,12 @@ func newTestManagerWithPermissions(
 	if err != nil {
 		t.Fatalf("authority.New: %v", err)
 	}
+	auth := &recordingAuth{ProcessController: gate}
 	aud := &fakeAud{}
-	m := New(gate, pkgs, perms, safety, aud, slog.New(slog.NewTextHandler(io.Discard, nil)), testInvariants())
+	m := New(auth, pkgs, perms, safety, aud, slog.New(slog.NewTextHandler(io.Discard, nil)), testInvariants())
 	m.backoffMin = time.Millisecond
 	m.backoffMax = 2 * time.Millisecond
-	return m
+	return m, auth
 }
 
 type fakeRecorderDiscard struct{}
@@ -459,45 +512,6 @@ func TestReloadPackage_TimeoutRetainsOldInstanceForRetry(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 2 })
 }
 
-func TestRuntimePermissionRestart_TimeoutIsRetryable(t *testing.T) {
-	sp := newCtrlSpawner()
-	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
-		makeEntry("com.example.app", 20001, identity.TrustOrdinary,
-			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
-	}}
-	m := newTestManager(t, sp, pkgs, &fakeSafety{})
-	defer func() { _ = m.Stop(context.Background()) }()
-	if err := m.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	unit := unitName("com.example.app", "worker")
-	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
-
-	stopGate := make(chan struct{})
-	releaseStop := sync.OnceFunc(func() { close(stopGate) })
-	defer releaseStop()
-	sp.setStopGate(stopGate)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := m.restartActivePackage(ctx, "com.example.app"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("restartActivePackage error = %v, want deadline exceeded", err)
-	}
-	if _, ok := m.LookupByUnit(unit); !ok {
-		t.Fatal("timed-out sandbox restart removed the old unit mapping")
-	}
-
-	releaseStop()
-	sp.setStopGate(nil)
-	waitFor(t, time.Second, func() bool {
-		inst, ok := m.LookupByUnit(unit)
-		return ok && inst.State == StateStopped
-	})
-	if err := m.restartActivePackage(context.Background(), "com.example.app"); err != nil {
-		t.Fatalf("retry restartActivePackage: %v", err)
-	}
-	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 2 })
-}
-
 func TestManagerDoesNotStartAfterStop(t *testing.T) {
 	sp := newCtrlSpawner()
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
@@ -562,7 +576,15 @@ func TestStopCancelsReloadWaitingForSupervisor(t *testing.T) {
 	}
 }
 
-func TestProjectRuntimePermission_RebuildsActiveSandbox(t *testing.T) {
+// 授予与撤销都【不】重启进程 —— 这是整套 ACL 改造的全部意义.
+//
+// 这里曾经断言相反的事: 每次 USER_CONSENT 变化都把整个包停掉重起, 好让新进程
+// 的 mount namespace 带上或去掉 ReadWritePaths. 用户在设置里点一下开关, 正在
+// 用的应用就当着他的面消失重来一次.
+//
+// 现在挂载恒定 (安装期资格决定), 能不能写由目录上那条 u:<uid>:rwx 的 ACL 条目
+// 决定; ACL 在 open(2) 时求值, 因此增删对已经在跑的进程立即生效
+func TestProjectRuntimePermission_TogglesACLWithoutRestart(t *testing.T) {
 	sp := newCtrlSpawner()
 	entry := makeEntry("com.example.files", 20001, identity.TrustOrdinary,
 		alwaysOnService("worker", pkgregistry.CriticalityOptional))
@@ -570,7 +592,7 @@ func TestProjectRuntimePermission_RebuildsActiveSandbox(t *testing.T) {
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{entry}}
 	perms := &fakePermissions{}
 	perms.set("com.example.files", permStorageUser, true)
-	m := newTestManagerWithPermissions(t, sp, pkgs, perms, &fakeSafety{})
+	m, auth := newTestManagerWithPermissions(t, sp, pkgs, perms, &fakeSafety{})
 	defer func() { _ = m.Stop(context.Background()) }()
 
 	if err := m.Start(context.Background()); err != nil {
@@ -578,9 +600,14 @@ func TestProjectRuntimePermission_RebuildsActiveSandbox(t *testing.T) {
 	}
 	unit := unitName("com.example.files", "worker")
 	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 1 })
+
+	// 挂载门只看安装资格, 因此目录一开始就在 ReadWritePaths 里
 	first, ok := sp.lastSpec(unit)
 	if !ok || !slices.Contains(first.Sandbox.ReadWritePaths, m.inv.UserDataRoot) {
 		t.Fatalf("initial ReadWritePaths = %v, want %q", first.Sandbox.ReadWritePaths, m.inv.UserDataRoot)
+	}
+	if !auth.grants(entry.UID) {
+		t.Fatal("Start 对账后 ACL 里没有已授予包的条目")
 	}
 
 	// permission.Registry commits the denied state before invoking this hook.
@@ -588,16 +615,27 @@ func TestProjectRuntimePermission_RebuildsActiveSandbox(t *testing.T) {
 	if err := m.ProjectRuntimePermission("com.example.files", permStorageUser, false); err != nil {
 		t.Fatalf("ProjectRuntimePermission: %v", err)
 	}
-	waitFor(t, time.Second, func() bool { return sp.starts(unit) == 2 })
-	if sp.stops(unit) == 0 {
-		t.Fatal("old unit was not stopped before sandbox projection returned")
+
+	if auth.grants(entry.UID) {
+		t.Error("撤销后 ACL 条目还在")
 	}
-	second, ok := sp.lastSpec(unit)
-	if !ok {
-		t.Fatal("replacement unit spec not recorded")
+	if got := sp.starts(unit); got != 1 {
+		t.Errorf("撤销重启了进程: starts=%d, want 1", got)
 	}
-	if slices.Contains(second.Sandbox.ReadWritePaths, m.inv.UserDataRoot) {
-		t.Fatalf("revoked UserDataRoot remained writable: %v", second.Sandbox.ReadWritePaths)
+	if got := sp.stops(unit); got != 0 {
+		t.Errorf("撤销停掉了进程: stops=%d, want 0", got)
+	}
+
+	// 再授予回来, 同样不该动进程
+	perms.set("com.example.files", permStorageUser, true)
+	if err := m.ProjectRuntimePermission("com.example.files", permStorageUser, true); err != nil {
+		t.Fatalf("重新授予: %v", err)
+	}
+	if !auth.grants(entry.UID) {
+		t.Error("重新授予后 ACL 条目没回来")
+	}
+	if got := sp.starts(unit); got != 1 {
+		t.Errorf("重新授予重启了进程: starts=%d, want 1", got)
 	}
 }
 
@@ -609,7 +647,7 @@ func TestRevokeInstallGrant_StopsActiveSandboxWithoutRestart(t *testing.T) {
 	pkgs := &fakePkgs{entries: []pkgregistry.Entry{entry}}
 	perms := &fakePermissions{}
 	perms.set("com.example.files", permStorageUser, true)
-	m := newTestManagerWithPermissions(t, sp, pkgs, perms, &fakeSafety{})
+	m, _ := newTestManagerWithPermissions(t, sp, pkgs, perms, &fakeSafety{})
 	defer func() { _ = m.Stop(context.Background()) }()
 
 	if err := m.Start(context.Background()); err != nil {

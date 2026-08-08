@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+
 	"github.com/nervus-os/nervud/internal/audit"
 	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/catalog"
@@ -64,6 +66,12 @@ type PackageInstaller interface {
 	// systemd 的 User= 即便给数字 UID 也要求它能被 NSS 解析, 否则 spawn 在
 	// step USER 失败 (217/USER). 没有这一步, 任何 Package 组件都起不来.
 	EnsureAppUser(ctx context.Context, subj authority.Subject, req authority.EnsureAppUserRequest) error
+	// SetUserDataAccess 增删用户文档区 ACL 里某个 UID 的条目.
+	//
+	// 卸载路径需要它: ClearPackage 只清 _grants.json 里的运行期状态, 而访问
+	// 权限现在落在文件系统的 ACL 上. 不摘掉那条, UID 被下一个包复用时它就
+	// 白拿到了用户文档区的写权限, 且没有任何界面显示过这次授予
+	SetUserDataAccess(ctx context.Context, subj authority.Subject, req authority.SetUserDataAccessRequest) error
 }
 
 // IdentityUpdater 是 pkgregistry 对 identity.Registry 的窄接口依赖:
@@ -86,6 +94,11 @@ type PermissionArbiter interface {
 	Replace(grants []permission.Grant) error
 	// ClearPackage 删除某 Package 的运行期授予状态 (卸载用)
 	ClearPackage(packageID string) error
+	// SetRuntimeState 设置一条 USER_CONSENT 权限的运行期授予状态.
+	//
+	// 安装期同意用它落库: 确认屏上用户点头的那批权限在这里变成 Granted.
+	// 它自带两道前置校验 (必须是 USER_CONSENT, 且必须已在安装期授予集合里)
+	SetRuntimeState(packageID, permissionID string, state permission.GrantState) error
 }
 
 // InstallTransaction 是一次装包事务的输入
@@ -94,6 +107,16 @@ type InstallTransaction struct {
 	SigBlock      []byte // 分离签名 manifest.sig
 	StagingDir    string // pkgmanagerd 产出的, 已展开的 staging 目录
 	Source        Source
+
+	// ConsentedPermissions 是用户在安装确认屏上点头的那批权限.
+	//
+	// 由确认 UI 采集后原样带进来. 内核【不信任这份清单本身】, 只把它当成一个
+	// 上限: 真正落库的是它与安装期授予集合, 以及 USER_CONSENT 这一档的交集
+	//  (见 applyInstallConsent). 一份夸大的清单不会让任何包多拿到一条权限
+	//
+	// 为空即"没有任何权限被同意", 装包照常进行 - 那些权限运行期就是拒绝状态,
+	// 用户之后仍可以在设置里补上
+	ConsentedPermissions []string
 }
 
 // Install 执行 动态安装流程里nervud 独立复核... 直到 Registry 登记的
@@ -366,6 +389,11 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 		return Entry{}, err
 	}
 	committed = true // commit 成功: 不再补偿删除
+
+	// 安装期同意必须在 commit 之后落: SetRuntimeState 要求权限已经在安装期
+	// 授予集合里, 而那个集合是上面 publishCatalogLast 里的 perm.Replace 才推
+	// 上去的. 早一步调用一律得到 "no installed grant"
+	m.applyInstallConsent(ctx, entry, tx.ConsentedPermissions, prepared.candidate.Snapshot())
 	// A successful upgrade or same-version replacement invalidates every route
 	// and stream authorized by the old package generation. Revoke after the
 	// catalog commit (a failed pre-commit install must not disturb the live
@@ -390,6 +418,58 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 
 	m.auditInstall(ctx, tx, true, nil)
 	return entry, nil
+}
+
+// applyInstallConsent 把安装确认屏上用户点头的那批权限落成运行期 Granted.
+//
+// # 只认三者的交集
+//
+// 落库的是 ConsentedPermissions ∩ entry.GrantedPermissions ∩ USER_CONSENT:
+//
+//	不在 GrantedPermissions 里 -> 安装期裁决压根没批 (信任不够, 签名角色不对,
+//	                              或来源不是系统镜像). 用户点头不能凭空补上
+//	不是 USER_CONSENT         -> 它没有"运行期状态"这回事: NORMAL 装上即生效,
+//	                              PRIVILEGED/SYSTEM_ONLY 由来源与签名决定.
+//	                              写进去只会从 SetRuntimeState 拿回一个错误
+//
+// 因此确认 UI 递进来一份夸大的清单, 不会让任何包多拿到一条权限 - 这份清单是
+// 上限而不是授权依据.
+//
+// # 失败为什么不回滚安装
+//
+// 走到这里包已经 commit 了. 一条权限没落上, 用户在设置里再点一次即可; 反过来
+// 为它把装好的包整个回滚, 代价与收益不成比例. 但必须留审计 - 否则用户会看到
+// 一个"同意了却没生效"的权限, 而系统里没有任何痕迹解释为什么
+func (m *Module) applyInstallConsent(
+	ctx context.Context, entry Entry, consented []string, snap *catalog.Snapshot,
+) {
+	if len(consented) == 0 || m.perm == nil || snap == nil {
+		return
+	}
+	installed := make(map[string]struct{}, len(entry.GrantedPermissions))
+	for _, p := range entry.GrantedPermissions {
+		installed[p] = struct{}{}
+	}
+	for _, permissionID := range consented {
+		if _, ok := installed[permissionID]; !ok {
+			continue
+		}
+		definition, ok := snap.Permission(permissionID)
+		if !ok || definition.GrantMode != ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
+			continue
+		}
+		if err := m.perm.SetRuntimeState(
+			entry.Manifest.PackageID, permissionID, permission.GrantStateGranted,
+		); err != nil {
+			m.aud.Record(ctx, audit.Event{
+				Action:  "pkgregistry.Install.consent",
+				Subject: entry.Manifest.PackageID,
+				Denied:  true,
+				Err:     err,
+				Detail:  permissionID,
+			})
+		}
+	}
 }
 
 // readPrevState 读取某 Package 已装版本的持久化记账; 无则第二返回值为 false

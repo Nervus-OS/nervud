@@ -104,6 +104,49 @@ func TestUninstall_RemovesEverything(t *testing.T) {
 	_ = e
 }
 
+// 卸载必须连带摘掉用户文档区的 ACL 条目.
+//
+// ClearPackage 只清 _grants.json 里的运行期状态, 而"能不能写用户文档"现在落在
+// 文件系统的 ACL 上. 漏掉这一步的后果不是"多一条无用记录": UID 被下一个包复用
+// 时, 那个包就白拿到了用户文档区的写权限, 而且没有任何界面显示过这次授予
+func TestUninstall_RevokesUserDataACL(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	mod.SetLifecycleHooks(&fakeStopper{}, nil)
+
+	e := installOne(t, mod, "com.example.app")
+	if err := mod.Uninstall(context.Background(), "com.example.app"); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	var revoked bool
+	for _, r := range auth.userAccess {
+		if r.UID == e.UID && !r.Allowed {
+			revoked = true
+		}
+	}
+	if !revoked {
+		t.Fatalf("卸载没有撤销 uid %d 的用户文档区 ACL: %+v", e.UID, auth.userAccess)
+	}
+}
+
+// ACL 撤销失败必须阻断卸载, 而不是继续删文件.
+//
+// 继续删的结果是一个"包没了但 ACL 条目还在"的状态, 而 UID 分配器之后会把那个
+// UID 发给别人. 失败留在这里, 卸载可重试
+func TestUninstall_ACLRevokeFailureStopsUninstall(t *testing.T) {
+	mod, auth, _, _ := newTestInstaller(t)
+	mod.SetLifecycleHooks(&fakeStopper{}, nil)
+	installOne(t, mod, "com.example.app")
+
+	auth.userAccessErr = errors.New("setxattr refused")
+	if err := mod.Uninstall(context.Background(), "com.example.app"); err == nil {
+		t.Fatal("ACL 撤销失败却卸载成功了")
+	}
+	if len(auth.removed) != 0 {
+		t.Fatalf("ACL 还没撤销就删了文件: %+v", auth.removed)
+	}
+}
+
 func TestUninstall_UIDNotReused(t *testing.T) {
 	mod, _, _, _ := newTestInstaller(t)
 	mod.SetLifecycleHooks(&fakeStopper{}, nil)

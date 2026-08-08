@@ -353,17 +353,24 @@ func (m *Manager) readWritePaths(e pkgregistry.Entry, dataDir string) []string {
 	// 共享用户文档区: 声明了 perm.storage.user 的包才拿得到. 文件管理器,
 	// 文件选择器和任何要打开用户文档的 app 靠它看到同一批文件.
 	//
-	// 判据同时用 GrantedPermissions (安装资格) 和 permission.Registry.Allowed
-	//  (当前运行期决策), 而不是 manifest.Permissions (申请). USER_CONSENT
-	// 权限只进入 GrantedPermissions 并不代表用户已同意; 只看这一层会在拒绝状态
-	// 下仍把共享目录绑定进 mount namespace.
+	// 【判据只看 GrantedPermissions, 不看运行期 Allowed】. 这两道门被刻意分到
+	// 不同的时间尺度上:
+	//
+	//	挂载门 (这里, 安装期静态): 包有没有资格碰用户文档区. 安装后不再变化,
+	//	                          因此不需要为它重启进程
+	//	访问门 (ACL, 运行期即时): 用户此刻同不同意. 见 ProjectRuntimePermission
+	//
+	// 曾经这里也查 Allowed, 于是"用户点一下开关"必须把整个包停掉重起才能让新的
+	// mount namespace 生效 - 正在用的应用会当着用户的面消失重来. 改判据之后
+	// 目录恒定挂进来, 真正决定能不能写的是目录上那条 u:<uid>:rwx 的 ACL 条目,
+	// 它在 open(2) 时求值, 增删对已经在跑的进程立即生效.
+	//
+	// 这不是把门放松了: 没有 ACL 条目的包即便挂到了这个目录也读写不了 -
+	// preflight 把它设成 01770, other 位是空的.
 	//
 	// 系统镜像包的 GrantedPermissions 由 pkgregistry.arbitrateSystemGrants 在
 	// 启动扫描时算出, 动态安装包由 Install 的 Intersect 算出, 两条路都已填好.
-	if m.inv.UserDataRoot != "" &&
-		hasPermission(e, permStorageUser) &&
-		m.perms != nil &&
-		m.perms.Allowed(e.Manifest.PackageID, permStorageUser) {
+	if m.inv.UserDataRoot != "" && hasPermission(e, permStorageUser) {
 		paths = append(paths, m.inv.UserDataRoot)
 	}
 	// 服务间共享区: 本包自己那个子目录可写.

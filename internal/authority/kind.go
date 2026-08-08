@@ -29,6 +29,10 @@ const (
 	// 属于故障恢复; 本操作是用户在设置里发起的正常电源动作.
 	// 具体是重启还是关机由 PowerRequest.Action 决定, 落进审计的 Detail
 	KindPowerAction Kind = 11
+	// KindSetUserDataAccess 增删用户文档区 ACL 里某个 UID 的条目, 即
+	// perm.storage.user 的运行期授予与撤销. 与 KindSetOwner 分开:
+	// 那是改属主, 这是改访问控制表, 两者的审计读者关心的问题不同
+	KindSetUserDataAccess Kind = 12
 )
 
 func (k Kind) String() string {
@@ -55,6 +59,8 @@ func (k Kind) String() string {
 		return "RemovePackageTree"
 	case KindPowerAction:
 		return "PowerAction"
+	case KindSetUserDataAccess:
+		return "SetUserDataAccess"
 	default:
 		return "Unspecified"
 	}

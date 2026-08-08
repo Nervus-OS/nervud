@@ -24,6 +24,25 @@ var ErrDuplicatePackageID = fmt.Errorf("permission: duplicate package id in gran
 type Grant struct {
 	PackageID   string
 	Permissions []string
+
+	// ConsentExempt 表示这个包的 USER_CONSENT 权限不需要运行期同意.
+	//
+	// 判据是"系统软件": 随只读系统镜像发布 + Platform 信任 + 平台角色签名.
+	// 由 pkgregistry 在投影时算出 (见 projectGrants), 不由本包判断 —— 包的
+	// 来源与信任是 pkgregistry 的事实.
+	//
+	// # 为什么系统软件不走运行时同意
+	//
+	// 运行时同意问的是"你信不信这个第三方应用". 系统软件与内核同批发布, 同一
+	// 条签名链, 用户装机时就已经接受了它们; 再问一遍不增加任何安全性 —— 用户
+	// 唯一能做的选择是"同意", 否则文件管理器打不开文件, 设置装不了包.
+	//
+	// 真正需要这道门的是普通应用: 摄像头, 用户文件, 运动控制这类权限对它们
+	// 必须逐次询问. 那条路走 GrantState, 与本字段无关.
+	//
+	// 注意它【不能】豁免安装期裁决: 系统软件照样只能拿到 IntersectAt 批准的
+	// 权限集合, 本字段只跳过"用户此刻同不同意"这一问.
+	ConsentExempt bool
 }
 
 // Registry 是 permission 的权威运行期状态
@@ -60,12 +79,19 @@ type Registry struct {
 
 type snapshot struct {
 	byPackage map[string]map[string]struct{}
+	// consentExempt 是"系统软件"集合, 见 Grant.ConsentExempt. 与 byPackage
+	// 同一次 Replace 原子换入 —— 两者分开更新会出现一个窗口, 期间某个包已经
+	// 拿到新权限却还带着旧的豁免判定
+	consentExempt map[string]struct{}
 }
 
 // NewRegistry binds runtime grants to the one central definition catalog.
 func NewRegistry(definitions *catalog.Registry) *Registry {
 	r := &Registry{definitions: definitions, grants: newGrantStore()}
-	r.snap.Store(&snapshot{byPackage: map[string]map[string]struct{}{}})
+	r.snap.Store(&snapshot{
+		byPackage:     map[string]map[string]struct{}{},
+		consentExempt: map[string]struct{}{},
+	})
 	return r
 }
 
@@ -213,6 +239,7 @@ func (r *Registry) IntersectAt(
 // 也不要装载一份自相矛盾的
 func (r *Registry) Replace(grants []Grant) error {
 	next := make(map[string]map[string]struct{}, len(grants))
+	exempt := make(map[string]struct{})
 	for _, g := range grants {
 		if g.PackageID == "" {
 			return fmt.Errorf("permission: grant has empty package id")
@@ -225,9 +252,12 @@ func (r *Registry) Replace(grants []Grant) error {
 			perms[p] = struct{}{}
 		}
 		next[g.PackageID] = perms
+		if g.ConsentExempt {
+			exempt[g.PackageID] = struct{}{}
+		}
 	}
 	r.stateMu.Lock()
-	previous := r.snap.Swap(&snapshot{byPackage: next})
+	previous := r.snap.Swap(&snapshot{byPackage: next, consentExempt: exempt})
 	r.stateMu.Unlock()
 	if previous != nil {
 		for packageID, oldPermissions := range previous.byPackage {
@@ -292,6 +322,12 @@ func (r *Registry) AllowedAt(
 	// access requires the system-owned runtime grant state.
 	// == Granted (两者都通过才放行)
 	if definition.GrantMode == ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
+		// 系统软件除外: 它与内核同批发布, 同一条签名链, 用户装机时就已经接受
+		// 了它们. 再问一遍不增加安全性 —— 用户唯一能做的选择是"同意", 否则
+		// 文件管理器打不开文件. 判据见 Grant.ConsentExempt
+		if _, exempt := snap.consentExempt[packageID]; exempt {
+			return true
+		}
 		return r.grants.state(packageID, permission) == GrantStateGranted
 	}
 	return true
@@ -300,8 +336,9 @@ func (r *Registry) AllowedAt(
 // SetRuntimeState 设置一个 GrantUser 权限的运行期授予状态并持久化. 只有 GrantUser 权限有运行期状态, 对其它 Mode 调用返回错误. 撤销
 // motion 组权限会联动 control 撤租 + 递增 motion epoch
 //
-// 调用入口需 perm.permission.admin (全系统只有权限确认 UI 有) - 该执法在 IPC 请求
-// 管线落地, 本方法是被执法后的机制落点
+// 目前唯一入口是 admin socket (nervusctl), 由 socket 自身的 peer 凭据把关.
+// 尚不存在面向应用的 IPC 授予接口: 那需要先定「谁显示授权弹窗」, 该组件必须是
+// platform-release 签名的独立系统服务, 不能是设置应用
 func (r *Registry) SetRuntimeState(packageID, permission string, state GrantState) error {
 	if r == nil {
 		return fmt.Errorf("permission: nil registry")

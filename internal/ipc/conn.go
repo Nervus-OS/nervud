@@ -641,6 +641,14 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 		return co.enqueue(responseEnvelope(failureResponse(
 			req.GetRequestId(), methodGateCode(err))))
 	}
+	// 需用户确认的方法: 只有系统确认 UI 自己能发起, 它在调用前刚问过用户.
+	// 其余调用方要走它代为发起 (见 protocheck.GateUserConfirmation)
+	if err := protocheck.GateUserConfirmation(
+		route.Method.Meta, co.callerIsConfirmationUI()); err != nil {
+		co.s.recordMethodGateFailure(co.caller, route, req.GetMethodId(), err)
+		return co.enqueue(responseEnvelope(failureResponse(
+			req.GetRequestId(), methodGateCode(err))))
+	}
 	payload, err := protocheck.ValidateRequest(
 		route.Method.Meta, route.Method.Request, req.GetPayload())
 	if err != nil {

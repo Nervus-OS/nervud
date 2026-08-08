@@ -109,17 +109,25 @@ func DefaultConfig(log *slog.Logger) Config {
 			{Path: "/var/lib/nervus/staging", Kind: kindDir, Perm: 0o711, PermExact: true, Writable: true},
 			{Path: inv.PackageRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			{Path: inv.DataRoot, Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
-			// 跨 Package 共享的用户文档区. 01777 = sticky, 语义同 /tmp:
-			// 任何声明了 perm.storage.user 的包都能在里面建文件, 读别人的文件,
-			// 但只能删自己创建的那些.
+			// 跨 Package 共享的用户文档区. 01770 = sticky + other 位全空.
 			//
-			// 为什么必须是 1777 而不是 0775 + 某个共享组: 各包以自己的 UID/GID
-			// 运行 (buildStartReq 里 GID = e.UID), 彼此不共享任何附加组, 0775 的
-			// group 位对它们一个也不生效 - 结果是除属主外谁都写不进去, 共享目录
-			// 就成了空谈. 要走组方案得先给每个包加 SupplementaryGroups, 那是 v2.
+			// 【other 位必须是空的】. 谁能进这个目录由目录上的 POSIX ACL 决定:
+			// 用户在设置里同意 perm.storage.user 之后, nervud 给该包的 UID 加一条
+			// u:<uid>:rwx (见 authority/acl_linux.go), 撤销就删掉那条. ACL 在
+			// open(2) 时求值, 因此授予与撤销对已经在跑的进程立即生效, 不需要
+			// 重启应用.
 			//
-			// sticky 位不可省: 没有它, 任何一个包都能删掉其它包 (以及用户) 的文件.
-			{Path: inv.UserDataRoot, Kind: kindDir, Perm: 0o1777, PermExact: true, Writable: true},
+			// 这里曾经是 01777. 那个值下 other 位是 rwx, 任何拿到挂载的包都能
+			// 读写, ACL 里写什么都不影响结果 - 换句话说 01777 会让整套运行期
+			// 授予变成空转. 两处必须一起改.
+			//
+			// 各包以自己的 UID/GID 运行 (buildStartReq 里 GID = e.UID), 彼此不
+			// 共享任何附加组, 所以 group 位在这里也不起作用; 承载共享语义的是
+			// ACL 里那一组 named-user 条目, 不是 group 位.
+			//
+			// sticky 位不可省: 没有它, 任何一个被授权的包都能删掉其它包
+			//  (以及用户) 的文件.
+			{Path: inv.UserDataRoot, Kind: kindDir, Perm: 0o1770, PermExact: true, Writable: true},
 			{Path: "/var/lib/nervus/jvm-cache", Kind: kindDir, Perm: 0o755, PermExact: true, Writable: true},
 			// 审计目录. 0700: 审计里有 package id, uid, 拒绝原因, 它的读者是
 			// 运维, 不是机器上的 App.
@@ -128,7 +136,7 @@ func DefaultConfig(log *slog.Logger) Config {
 			// 事后回答"谁在什么时候被拒绝了什么"的唯一地方. 权限放宽等于让
 			// 被审计的对象能读到自己的审计.
 			{Path: "/var/lib/nervus/audit", Kind: kindDir, Perm: 0o700, PermExact: true, Writable: true},
-			// 服务间共享区的两个根. 0755 而不是 UserDataRoot 的 01777:
+			// 服务间共享区的两个根. 0755 而不是 UserDataRoot 的 01770:
 			// 这两个根本身只由 nervud 写 (provisionAll 在其下按包建子目录),
 			// 包只往自己那个子目录里写. 根开放写权限等于允许任意包在根下造目录,
 			// 那就绕开了"一个包一个目录, 属主即写权"这条结构.

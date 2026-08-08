@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nervus-os/nervud/internal/authority"
 	"github.com/nervus-os/nervud/internal/sysprobe"
 )
 
@@ -149,5 +150,47 @@ func TestNonExactPermOnlyChecksGroupOtherWrite(t *testing.T) {
 	}
 	if err := Run(cfg); !errors.Is(err, ErrPreflight) {
 		t.Fatalf("0757 (other-writable) must fail non-exact read-only check, got %v", err)
+	}
+}
+
+// 用户文档区必须恰好是 01770, 而且必须是 PermExact.
+//
+// 这不是一条风格断言, 它是整套运行期授予的安全前提: 能不能写由目录上那条
+// u:<uid>:rwx 的 ACL 条目决定 (见 authority/acl_linux.go), 而 ACL 只在
+// other 位为空时才说得上话. 这里曾经是 01777 —— 那个值下任何拿到挂载的包
+// 都能读写, 授予与撤销全部变成空转, 且没有任何测试会因此变红.
+//
+// sticky 位同样不可省: 没有它, 任一被授权的包都能删掉其它包与用户的文件.
+func TestDefaultConfigUserDataRootIsExactly01770(t *testing.T) {
+	inv := authority.DefaultInvariants()
+	if inv.UserDataRoot == "" {
+		t.Fatal("DefaultInvariants 没给 UserDataRoot")
+	}
+
+	var found bool
+	for _, r := range DefaultConfig(nil).Rules {
+		if r.Path != inv.UserDataRoot {
+			continue
+		}
+		found = true
+		if r.Perm != 0o1770 {
+			t.Errorf("UserDataRoot perm = %#o, want 01770", r.Perm)
+		}
+		if !r.PermExact {
+			t.Error("UserDataRoot 必须 PermExact: 非精确匹配只堵 group/other 的 w 位, " +
+				"01777 会被放过去")
+		}
+		if r.Perm&0o007 != 0 {
+			t.Errorf("UserDataRoot other 位 = %#o, 必须为空, 否则 ACL 形同虚设", r.Perm&0o007)
+		}
+		if r.Perm&0o1000 == 0 {
+			t.Error("UserDataRoot 少了 sticky 位")
+		}
+		if !r.Writable {
+			t.Error("UserDataRoot 应在可写区, 否则权限漂移只报错不修正")
+		}
+	}
+	if !found {
+		t.Fatalf("生产规则表里没有 UserDataRoot (%s)", inv.UserDataRoot)
 	}
 }

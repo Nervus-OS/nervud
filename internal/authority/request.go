@@ -170,6 +170,80 @@ func (g *Gate) Power(ctx context.Context, subj Subject, req PowerRequest) error 
 	return err
 }
 
+// ---- SetUserDataAccess ----------------------------------------------------
+
+// SetUserDataAccessRequest 增删用户文档区 ACL 里某个 UID 的条目, 即
+// perm.storage.user 的运行期授予与撤销.
+//
+// 故意不带 Path: 本操作只作用于 Invariants.UserDataRoot 这一个目录. 开放路径
+// 参数等于把 Authority 变成一个通用的 chmod 服务 - doc.go 明令禁止的正是那种
+// "任意执行能力". 语义与实现见 acl_linux.go
+type SetUserDataAccessRequest struct {
+	UID     uint32
+	Allowed bool
+}
+
+func (SetUserDataAccessRequest) Kind() Kind { return KindSetUserDataAccess }
+
+// Detail 进审计: 授予与撤销是两个不同的事件, 只记 UID 分不出来
+func (r SetUserDataAccessRequest) Detail() string {
+	if r.Allowed {
+		return fmt.Sprintf("grant uid=%d", r.UID)
+	}
+	return fmt.Sprintf("revoke uid=%d", r.UID)
+}
+
+func (r SetUserDataAccessRequest) Validate(inv *Invariants) error {
+	if inv == nil || inv.UserDataRoot == "" {
+		return fmt.Errorf("%w: user data root is not configured", ErrInvariantViolated)
+	}
+	// 只允许 App UID 段. 放行系统 UID 会让一次授权把 root 或某个发行版服务
+	// 写进用户文档区的 ACL, 而那条记录没有任何东西会再把它摘掉
+	return inv.CheckUID(r.UID)
+}
+
+func (g *Gate) SetUserDataAccess(ctx context.Context, subj Subject, req SetUserDataAccessRequest) error {
+	_, err := do(ctx, g, subj, req, g.osSetUserDataAccess)
+	return err
+}
+
+// ReconcileUserDataAccessRequest 把用户文档区 ACL 里的 named-user 条目整体
+// 替换成 UIDs.
+//
+// 供启动时对账: ACL 与 _grants.json 各自持久化, nervud 没在跑的时候发生的
+// 卸载会让 ACL 条目变成孤儿, 而 UID 复用会把那条孤儿送给一个新包. 详见
+// acl_linux.go 的 osReconcileUserDataAccess
+//
+// UIDs 为空是合法输入, 含义是"当前没有任何包被授予", 结果是 ACL 被整个删掉
+type ReconcileUserDataAccessRequest struct {
+	UIDs []uint32
+}
+
+func (ReconcileUserDataAccessRequest) Kind() Kind { return KindSetUserDataAccess }
+
+func (r ReconcileUserDataAccessRequest) Detail() string {
+	return fmt.Sprintf("reconcile uids=%v", r.UIDs)
+}
+
+func (r ReconcileUserDataAccessRequest) Validate(inv *Invariants) error {
+	if inv == nil || inv.UserDataRoot == "" {
+		return fmt.Errorf("%w: user data root is not configured", ErrInvariantViolated)
+	}
+	for _, uid := range r.UIDs {
+		if err := inv.CheckUID(uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *Gate) ReconcileUserDataAccess(
+	ctx context.Context, subj Subject, req ReconcileUserDataAccessRequest,
+) error {
+	_, err := do(ctx, g, subj, req, g.osReconcileUserDataAccess)
+	return err
+}
+
 // ---- InstallVerifiedPackage -------------------------------------------
 
 // InstallVerifiedPackageRequest 把已经完成签名, digest 和权限裁决的 staging

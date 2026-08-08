@@ -107,6 +107,9 @@ func (s *Server) handleInstall(ctx context.Context, req adminwire.Request) admin
 		SigBlock:      sigBlock,
 		StagingDir:    staging,
 		Source:        pkgregistry.SourceDynamicInstall,
+		// 确认屏采集到的同意原样透传. 本层不做裁剪 - 裁剪归 Install,
+		// 它手上才有安装期授予集合与权限定义
+		ConsentedPermissions: req.ConsentedPermissions,
 	})
 	if err != nil {
 		// Install 失败时 staging 目录未被 renameat2 消费 (成功才会被移走), 补偿删除

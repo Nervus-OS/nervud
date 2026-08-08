@@ -122,11 +122,14 @@ func (i *Instance) snapshot() Instance {
 
 // ---- 窄接口依赖 (消费者定义, 具体类型隐式满足) ---------------------------
 
-// ProcessController 是对 authority.Gate 的窄接口: 起/停/等一个沙箱进程
+// ProcessController 是对 authority.Gate 的窄接口: 起/停/等一个沙箱进程,
+// 以及把一次 USER_CONSENT 决定落到用户文档区的 ACL 上
 type ProcessController interface {
 	StartSandboxedProcess(ctx context.Context, subj authority.Subject, req authority.StartSandboxedProcessRequest) (authority.ProcessHandle, error)
 	StopProcess(ctx context.Context, subj authority.Subject, req authority.StopProcessRequest) error
 	WaitProcess(ctx context.Context, h authority.ProcessHandle) (authority.ExitInfo, error)
+	SetUserDataAccess(ctx context.Context, subj authority.Subject, req authority.SetUserDataAccessRequest) error
+	ReconcileUserDataAccess(ctx context.Context, subj authority.Subject, req authority.ReconcileUserDataAccessRequest) error
 }
 
 // PackageLookup 是对 pkgregistry.Registry 的窄接口: 读已装包
@@ -258,7 +261,7 @@ func (m *Manager) Fatal() <-chan error { return m.fatal }
 //
 // 单个组件启动失败只记审计, 不阻断整条启动 - 一个坏组件不该拖垮内核启动. 真正
 // 阻断启动的是装配级错误 (如 auth/pkgs 为 nil), 那在 New 之前就该暴露
-func (m *Manager) Start(_ context.Context) error {
+func (m *Manager) Start(ctx context.Context) error {
 	m.sandboxReloadMu.Lock()
 	defer m.sandboxReloadMu.Unlock()
 
@@ -268,6 +271,16 @@ func (m *Manager) Start(_ context.Context) error {
 		return ErrManagerStopped
 	}
 	m.mu.Unlock()
+
+	// 先对账用户文档区的 ACL, 再拉组件: 第一个进程起来时就该看到正确的访问表.
+	//
+	// 【失败即阻断启动】, 与单个组件启动失败只记审计不同. 这不是"一个坏组件",
+	// 而是"内核无法在用户文档区上建立访问控制" - 上一次运行留下的 ACL 条目会
+	// 原样生效, 其中可能有已卸载包的孤儿条目, 而 UID 复用会把它送给新包.
+	// 带着一张无法核实的访问表继续启动, 比启动失败更糟
+	if err := m.ReconcileUserDataAccess(ctx); err != nil {
+		return fmt.Errorf("service: reconcile user-data access: %w", err)
+	}
 
 	for _, e := range m.pkgs.List() {
 		for _, c := range e.Manifest.Components {
@@ -520,22 +533,31 @@ func (m *Manager) RevokeInstallGrant(packageID, permission string) {
 	m.mu.Unlock()
 }
 
-// ProjectRuntimePermission rebuilds active component sandboxes after a
-// USER_CONSENT decision changes. Runtime state has already been committed by
-// permission.Registry before this method is called, so every replacement
-// process observes the new Allowed result while building ReadWritePaths.
+// ProjectRuntimePermission applies a USER_CONSENT decision to authority outside
+// the IPC data plane. Runtime state has already been committed by
+// permission.Registry before this method is called.
+//
+// # 为什么是改 ACL 而不是重启这个包
+//
+// 可写路径是 systemd 在 spawn 时烧进 mount namespace 的, 进程起来之后改不动.
+// 这个钩子曾经因此只能把整个包停掉重起 - 用户在设置里点一下开关, 正在用的
+// 应用就当着他的面消失重来一次.
+//
+// 现在挂载与访问分成两道门 (见 supervise.readWritePaths): 目录恒定挂进来,
+// 能不能写由目录上那条 u:<uid>:rwx 的 ACL 条目决定. ACL 在 open(2) 时求值,
+// 因此授予与撤销都对已经在跑的进程立即生效, 一个进程都不用动.
+//
+// 这也让 permission/runtime.go 开头那句"我们独有, Android 没有的立即撤销
+// 能力"名副其实 - 在此之前那个"立即"是靠杀进程做到的.
 //
 // This hook is intentionally not used by permission.Registry.Replace. Package
-// projection can run while pkgregistry holds its transaction mutex; waiting for
-// supervisors or looking the package up from that callback would introduce a
-// lock inversion and could restart a package during rollback or uninstall.
+// projection can run while pkgregistry holds its transaction mutex; looking the
+// package up from that callback would introduce a lock inversion.
 func (m *Manager) ProjectRuntimePermission(packageID, permission string, allowed bool) error {
 	if permission != permStorageUser {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), startStopTimeout)
-	defer cancel()
-	err := m.restartActivePackage(ctx, packageID)
+	err := m.projectUserDataAccess(packageID, allowed)
 	if m.aud != nil {
 		m.aud.Record(context.Background(), audit.Event{
 			Action:  "service.ProjectRuntimePermission",
@@ -548,63 +570,57 @@ func (m *Manager) ProjectRuntimePermission(packageID, permission string, allowed
 	return err
 }
 
-// restartActivePackage stops every live component of one package, waits until
-// its transient unit (and therefore its mount namespace) is gone, then starts
-// the same component set against the current package and permission snapshots.
-func (m *Manager) restartActivePackage(ctx context.Context, packageID string) error {
-	m.sandboxReloadMu.Lock()
-	defer m.sandboxReloadMu.Unlock()
-
-	m.mu.Lock()
-	if m.stopped {
-		m.mu.Unlock()
-		return ErrManagerStopped
-	}
-	olds := make([]*Instance, 0)
-	componentIDs := make([]string, 0)
-	for key, inst := range m.byKey {
-		if key.pkg != packageID ||
-			(!instanceMayBeRunning(inst.State) && !inst.sandboxRestartPending) {
-			continue
-		}
-		inst.sandboxRestartPending = true
-		olds = append(olds, inst)
-		componentIDs = append(componentIDs, key.comp)
-		m.requestStop(inst)
-	}
-	m.mu.Unlock()
-
-	for _, inst := range olds {
-		select {
-		case <-inst.done:
-		case <-ctx.Done():
-			return fmt.Errorf("service: project runtime permission for %q: %w", packageID, ctx.Err())
-		case <-m.ctx.Done():
-			return fmt.Errorf("service: project runtime permission for %q: %w", packageID, ErrManagerStopped)
-		}
-	}
-	if len(componentIDs) == 0 {
+// ReconcileUserDataAccess 用当前的授予状态全量重建用户文档区的 ACL.
+//
+// 启动时调一次. ACL 与 _grants.json 各自持久化, 因此它们会漂移: nervud 没在跑
+// 的时候卸载一个包, 授予记录随之清掉而 ACL 条目留在原地, 之后 UID 被复用就把
+// 写权限白送给了一个新包. 对账把不变量恢复成"ACL 是授予状态的投影".
+//
+// 逐包查 Allowed 而不是只看 GrantedPermissions: 前者才是"用户此刻同不同意",
+// 后者只是安装资格
+func (m *Manager) ReconcileUserDataAccess(ctx context.Context) error {
+	if m.auth == nil || m.pkgs == nil || m.inv == nil || m.inv.UserDataRoot == "" {
 		return nil
 	}
+	var uids []uint32
+	for _, e := range m.pkgs.List() {
+		if !hasPermission(e, permStorageUser) {
+			continue
+		}
+		if m.perms == nil || !m.perms.Allowed(e.Manifest.PackageID, permStorageUser) {
+			continue
+		}
+		uids = append(uids, e.UID)
+	}
+	err := m.auth.ReconcileUserDataAccess(ctx, authority.SubjectKernel(),
+		authority.ReconcileUserDataAccessRequest{UIDs: uids})
+	if m.aud != nil {
+		m.aud.Record(ctx, audit.Event{
+			Action: "service.ReconcileUserDataAccess", Subject: "kernel",
+			Denied: err != nil, Err: err,
+			Detail: fmt.Sprintf("granted uids=%v", uids),
+		})
+	}
+	return err
+}
 
+// projectUserDataAccess 把一次授予/撤销落到用户文档区的 ACL 上.
+//
+// 用包的 App UID 而不是包名: ACL 认的是 UID. 包不在 Registry 里 (已卸载, 或
+// 授予与卸载赛跑输了) 时静默返回 nil - 一个不存在的包没有可以撤销的访问权,
+// 把它当成错误只会让卸载路径莫名其妙地失败
+func (m *Manager) projectUserDataAccess(packageID string, allowed bool) error {
+	if m.auth == nil || m.inv == nil || m.inv.UserDataRoot == "" {
+		return nil
+	}
 	e, ok := m.pkgs.Lookup(packageID)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.detachInstancesLocked(olds)
 	if !ok {
 		return nil
 	}
-	if m.stopped {
-		return ErrManagerStopped
-	}
-	for _, componentID := range componentIDs {
-		component, exists := e.Manifest.Component(componentID)
-		if !exists || e.ComponentDisabled(componentID) {
-			continue
-		}
-		m.startLocked(e, component)
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), startStopTimeout)
+	defer cancel()
+	return m.auth.SetUserDataAccess(ctx, authority.SubjectKernel(),
+		authority.SetUserDataAccessRequest{UID: e.UID, Allowed: allowed})
 }
 
 func instanceMayBeRunning(state State) bool {

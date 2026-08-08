@@ -16,7 +16,7 @@ import (
 func methodGateCode(err error) ipcv1.StatusCode {
 	switch {
 	case errors.Is(err, protocheck.ErrOperationUnsupported),
-		errors.Is(err, protocheck.ErrConfirmationUnsupported):
+		errors.Is(err, protocheck.ErrConfirmationUnauthorized):
 		return ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE
 	default:
 		return ipcv1.StatusCode_STATUS_CODE_INTERNAL

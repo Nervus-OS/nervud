@@ -77,6 +77,13 @@ type Request struct {
 	Enabled     bool   `json:"enabled,omitempty"`
 	Permission  string `json:"permission,omitempty"`
 	GrantState  string `json:"grant_state,omitempty"`
+
+	// ConsentedPermissions 随 install 携带: 用户在安装确认屏上点头的那批权限.
+	//
+	// 内核只把它当上限, 真正落库的是它与安装期授予集合以及 USER_CONSENT 这一档
+	// 的交集 (见 pkgregistry.Module.applyInstallConsent), 因此这个字段夸大无害.
+	// 省略即"没有任何权限被同意", 装包照常进行
+	ConsentedPermissions []string `json:"consented_permissions,omitempty"`
 }
 
 // Response 是 nervud -> CLI 的结果. OK=false 时 Code/Message 说明原因.

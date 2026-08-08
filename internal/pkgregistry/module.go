@@ -167,7 +167,22 @@ func projectIdentity(entries []Entry) []identity.Package {
 func projectGrants(entries []Entry) []permission.Grant {
 	out := make([]permission.Grant, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, permission.Grant{PackageID: e.Manifest.PackageID, Permissions: e.GrantedPermissions})
+		out = append(out, permission.Grant{
+			PackageID:     e.Manifest.PackageID,
+			Permissions:   e.GrantedPermissions,
+			ConsentExempt: isSystemSoftware(e),
+		})
 	}
 	return out
+}
+
+// isSystemSoftware 判定一个包是否随只读系统镜像发布且受平台信任.
+//
+// 这类包的 USER_CONSENT 权限不需要运行期同意 (见 permission.Grant.ConsentExempt).
+//
+// 两个条件都要: 只看 Source 会让一个塞进镜像目录的低信任包蒙混过关; 只看 Trust
+// 会让一个动态安装的平台签名包也免掉询问 —— 而"装机时用户已经接受了它"这条
+// 理由只对随镜像发布的那批成立
+func isSystemSoftware(e Entry) bool {
+	return e.Source == SourceSystemImage && e.Trust == identity.TrustPlatform
 }

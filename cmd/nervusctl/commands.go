@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/nervus-os/nervud/internal/adminwire"
@@ -20,9 +21,22 @@ func outf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, 
 func outln(w io.Writer, a ...any)               { _, _ = fmt.Fprintln(w, a...) }
 
 // cmdInstall: begin-staging -> 解包.nspkg 进 nervud 掌控的目录 -> install.
+//
+// 可选的第二个参数是逗号分隔的同意权限清单, 等价于用户在安装确认屏上对这几条
+// 点了头. 这是【运维口子, 不是授权界面】: 真正面向用户的确认屏是
+// nervus.permissionui. 它存在的意义是让内核这半条链在 UI 落地之前就能端到端
+// 验证 —— 以及在没有图形界面的机器上装包时仍然给得出同意
 func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
-	if len(args) != 1 {
-		return badUsage("install requires exactly one <file.nspkg>")
+	if len(args) < 1 || len(args) > 2 {
+		return badUsage("install requires <file.nspkg> [consented,permissions]")
+	}
+	var consented []string
+	if len(args) == 2 && args[1] != "" {
+		for _, p := range strings.Split(args[1], ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				consented = append(consented, p)
+			}
+		}
 	}
 	nspkgPath := args[0]
 	if _, err := os.Stat(nspkgPath); err != nil {
@@ -46,7 +60,9 @@ func cmdInstall(c *adminwire.Client, args []string, out io.Writer) error {
 	}
 
 	// 3) 触发安装: nervud 复核签名/digest/权限后原子提交.
-	resp, err := c.Do(adminwire.Request{Cmd: adminwire.CmdInstall, StagingDir: staging})
+	resp, err := c.Do(adminwire.Request{
+		Cmd: adminwire.CmdInstall, StagingDir: staging, ConsentedPermissions: consented,
+	})
 	if err != nil {
 		return err
 	}

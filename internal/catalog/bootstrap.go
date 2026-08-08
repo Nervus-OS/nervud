@@ -263,8 +263,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"Read diagnostics",
-			"Read diagnostics",
+			permText{
+				NameZhCN: "读取诊断信息",
+				NameEN:   "Read diagnostics",
+				DescZhCN: "读取本机的运行状态与诊断数据",
+				DescEN:   "Read this device's runtime status and diagnostic data",
+			},
 		),
 		bootstrapPermission(
 			"perm.service.register.private",
@@ -273,8 +277,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"Register a package-private service",
-			"Register a package-private service",
+			permText{
+				NameZhCN: "注册包内私有服务",
+				NameEN:   "Register a package-private service",
+				DescZhCN: "在本应用内部注册只有自己能解析的服务",
+				DescEN:   "Register a service inside this package that only the package itself can resolve",
+			},
 		),
 		bootstrapPermission(
 			"perm.service.register",
@@ -283,8 +291,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_OEM,
 			"",
 			"",
-			"Register a public system service",
-			"Register a public system service",
+			permText{
+				NameZhCN: "注册公开系统服务",
+				NameEN:   "Register a public system service",
+				DescZhCN: "注册可被本机其它应用解析的公开服务",
+				DescEN:   "Register a service that other applications on this device can resolve",
+			},
 		),
 		// perm.storage.shared 是服务之间交换配置, 模型, 缓存的门槛.
 		//
@@ -302,8 +314,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"storage",
-			"Read and write the inter-service shared area",
-			"Read and write the inter-service shared area",
+			permText{
+				NameZhCN: "读写服务间共享区",
+				NameEN:   "Read and write the inter-service shared area",
+				DescZhCN: "在服务之间交换配置、模型与缓存文件，不含访问你的个人文档",
+				DescEN:   "Exchange configuration, models and cache files between services; does not include access to your personal documents",
+			},
 		),
 		bootstrapPermission(
 			"perm.storage.user",
@@ -312,8 +328,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"storage",
-			"Access user files",
-			"Access user files",
+			permText{
+				NameZhCN: "访问用户文件",
+				NameEN:   "Access user files",
+				DescZhCN: "读取和修改你保存在本机上的文档、图片等文件",
+				DescEN:   "Read and modify the documents, images and other files you keep on this device",
+			},
 		),
 		bootstrapPermission(
 			"perm.system.launch",
@@ -322,8 +342,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			"",
 			"",
-			"Launch system components",
-			"Launch system components",
+			permText{
+				NameZhCN: "启动系统组件",
+				NameEN:   "Launch system components",
+				DescZhCN: "拉起本机上的其它应用与系统组件",
+				DescEN:   "Start other applications and system components on this device",
+			},
 		),
 		bootstrapPermission(
 			"perm.motion.control",
@@ -332,8 +356,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"motion",
-			"Control robot motion",
-			"Control robot motion",
+			permText{
+				NameZhCN: "控制机器人移动",
+				NameEN:   "Control robot motion",
+				DescZhCN: "驱动底盘让本机器人移动，可能造成碰撞或人身伤害",
+				DescEN:   "Drive the chassis to move this robot, which may cause collisions or injury",
+			},
 		),
 		bootstrapPermission(
 			"perm.manipulator.control",
@@ -342,8 +370,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"motion",
-			"Control the manipulator",
-			"Control the manipulator",
+			permText{
+				NameZhCN: "控制机械臂",
+				NameEN:   "Control the manipulator",
+				DescZhCN: "驱动机械臂动作，可能造成碰撞或人身伤害",
+				DescEN:   "Move the manipulator, which may cause collisions or injury",
+			},
 		),
 		bootstrapPermission(
 			"perm.platform.control",
@@ -352,8 +384,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			"",
 			"",
-			"Platform control",
-			"Platform control",
+			permText{
+				NameZhCN: "平台控制",
+				NameEN:   "Platform control",
+				DescZhCN: "更改影响整机行为的平台级设置",
+				DescEN:   "Change platform-level settings that affect the whole device",
+			},
 		),
 		bootstrapPermission(
 			"perm.authority.reboot",
@@ -362,8 +398,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"Emergency reboot",
-			"Emergency reboot",
+			permText{
+				NameZhCN: "紧急重启",
+				NameEN:   "Emergency reboot",
+				DescZhCN: "不经有序关停直接重启本机，用于故障恢复",
+				DescEN:   "Reboot this device immediately without an orderly shutdown, for fault recovery",
+			},
 		),
 		bootstrapPermission(
 			"perm.authority.power",
@@ -372,8 +412,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			"",
 			"",
-			"Orderly power control",
-			"Orderly power control",
+			permText{
+				NameZhCN: "电源控制",
+				NameEN:   "Orderly power control",
+				DescZhCN: "有序重启或关闭本机",
+				DescEN:   "Restart or shut down this device in an orderly way",
+			},
 		),
 		bootstrapPermission(
 			"perm.safety.observe",
@@ -382,8 +426,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_OEM,
 			"",
 			"",
-			"Observe safety state",
-			"Observe safety state",
+			permText{
+				NameZhCN: "观察安全状态",
+				NameEN:   "Observe safety state",
+				DescZhCN: "读取安全系统的当前状态与状态迁移，不含解除保护的能力",
+				DescEN:   "Read the safety system's current state and its transitions; does not include clearing a trip",
+			},
 		),
 		bootstrapPermission(
 			"perm.safety.rearm",
@@ -392,8 +440,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"Re-arm the safety system",
-			"Re-arm the safety system",
+			permText{
+				NameZhCN: "重置安全系统",
+				NameEN:   "Re-arm the safety system",
+				DescZhCN: "在安全系统触发后解除保护状态，使机器人恢复可动",
+				DescEN:   "Clear the safety system's protective state after a trip, allowing the robot to move again",
+			},
 		),
 		bootstrapPermission(
 			"perm.pkg.install",
@@ -402,8 +454,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"Install or uninstall packages",
-			"Install or uninstall packages",
+			permText{
+				NameZhCN: "安装和卸载应用",
+				NameEN:   "Install or uninstall packages",
+				DescZhCN: "在本机上安装、卸载应用，或启用停用它们的组件",
+				DescEN:   "Install and uninstall applications on this device, or enable and disable their components",
+			},
 		),
 		// perm.pkg.admin 取代了曾经写死在 main.go 里的"哪个 Package ID 能连
 		// 管理通道". 持有它的包可以连上 admin UDS 并获得可写 staging 目录.
@@ -425,8 +481,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"Administer packages and grants on behalf of the system",
-			"Administer packages and grants on behalf of the system",
+			permText{
+				NameZhCN: "代表系统管理应用",
+				NameEN:   "Administer packages and grants on behalf of the system",
+				DescZhCN: "连接内核管理通道，代表系统执行装包与授权变更",
+				DescEN:   "Connect to the kernel administration channel and perform package and grant changes on behalf of the system",
+			},
 		),
 		// perm.resource.query 是设备发现的门槛.
 		//
@@ -442,8 +502,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"List hardware resources on this device",
-			"List hardware resources on this device",
+			permText{
+				NameZhCN: "查看硬件资源",
+				NameEN:   "List hardware resources on this device",
+				DescZhCN: "列出本机有哪些摄像头、底盘等硬件，不含使用它们的权限",
+				DescEN:   "List which cameras, chassis and other hardware this device has; does not include permission to use them",
+			},
 		),
 		bootstrapPermission(
 			"perm.pkg.query",
@@ -452,8 +516,12 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_ORDINARY,
 			"",
 			"",
-			"List installed packages",
-			"List installed packages",
+			permText{
+				NameZhCN: "查看已安装应用",
+				NameEN:   "List installed packages",
+				DescZhCN: "列出本机已安装的应用及其组件",
+				DescEN:   "List the applications installed on this device and their components",
+			},
 		),
 		bootstrapPermission(
 			"perm.permission.admin",
@@ -462,10 +530,27 @@ func bootstrapPermissions() []*ipcv1.DefinedPermission {
 			ipcv1.PermissionTrustFloor_PERMISSION_TRUST_FLOOR_PLATFORM,
 			rolePlatformRelease,
 			"",
-			"Manage runtime grants",
-			"Manage runtime grants",
+			permText{
+				NameZhCN: "管理运行期授权",
+				NameEN:   "Manage runtime grants",
+				DescZhCN: "代表系统查看并更改各应用的敏感权限授予状态",
+				DescEN:   "View and change other applications' sensitive permission grants on behalf of the system",
+			},
 		),
 	}
+}
+
+// permText 是一条权限的对外文案.
+//
+// Name 与 Desc 必须分开: 授权屏上前者是那一行的标题 ("访问用户文件"), 后者是
+// 标题下面解释这意味着什么的那句话 ("读取和修改你保存在设备上的文档"). 二者
+// 曾经共用同一个串, 那样授权屏上标题与说明会一模一样, 等于没有说明.
+//
+// 中英各一份且都不能省: 这是用户在授权屏上唯一读得到的东西, ZhCn 位置放英文
+// 占位等于中文界面上直接显示英文.
+type permText struct {
+	NameZhCN, NameEN string
+	DescZhCN, DescEN string
 }
 
 func bootstrapPermission(
@@ -475,8 +560,7 @@ func bootstrapPermission(
 	minimum ipcv1.PermissionTrustFloor,
 	requiredRole string,
 	group string,
-	zhCN string,
-	en string,
+	text permText,
 ) *ipcv1.DefinedPermission {
 	return &ipcv1.DefinedPermission{
 		Id:                 id,
@@ -485,7 +569,7 @@ func bootstrapPermission(
 		MinimumTrust:       minimum,
 		RequiredSignerRole: requiredRole,
 		Group:              group,
-		DisplayName:        &ipcv1.LocalizedText{ZhCn: zhCN, En: en},
-		Description:        &ipcv1.LocalizedText{ZhCn: zhCN, En: en},
+		DisplayName:        &ipcv1.LocalizedText{ZhCn: text.NameZhCN, En: text.NameEN},
+		Description:        &ipcv1.LocalizedText{ZhCn: text.DescZhCN, En: text.DescEN},
 	}
 }

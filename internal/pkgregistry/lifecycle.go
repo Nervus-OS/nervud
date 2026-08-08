@@ -263,6 +263,18 @@ func (m *Module) Uninstall(ctx context.Context, pkgID string) error {
 
 	// Delete code and private data through authority.
 	subj := authority.Subject{PackageID: pkgID, UID: st.UID}
+
+	// 用户文档区的访问权落在 ACL 上, 不在 _grants.json 里 - ClearPackage 清不掉
+	// 它. 留着那条记录, UID 被下一个包复用时它就白拿到了写权限.
+	//
+	// 这里用手上的 st.UID 而不是回查 Registry: 本函数正持有事务锁, 而 ACL 认的
+	// 本来就是 UID
+	if aerr := m.auth.SetUserDataAccess(ctx, subj,
+		authority.SetUserDataAccessRequest{UID: st.UID, Allowed: false}); aerr != nil {
+		m.aud.Record(ctx, audit.Event{
+			Action: "pkgregistry.Uninstall.revokeUserData", Subject: pkgID, Denied: true, Err: aerr})
+		return aerr
+	}
 	codeDir := filepath.Join(m.packageRoot, pkgID)
 	if err := m.auth.RemovePackageTree(ctx, subj, authority.RemovePackageTreeRequest{Root: m.packageRoot, Path: codeDir}); err != nil {
 		m.aud.Record(ctx, audit.Event{Action: "pkgregistry.Uninstall.rmCode", Subject: pkgID, Denied: true, Err: err})

@@ -28,7 +28,24 @@ const manifestSchemaV1 = 1
 // manifest 的 min_nervus_api 高于它即无法在本机运行 - 两段解析的第一段会先
 // 用它给出 ErrPlatformTooOld, 而不是让新 schema 的 manifest 撞上
 // DisallowUnknownFields 后报一个含义模糊的未知字段
-const CurrentAPILevel uint32 = 1
+//
+// # 各 Level 的含义
+//
+// 这个数字必须跟着"平台对外能力发生了不向后兼容的变化"走, 而不是跟着版本号
+// 或发布节奏走. 已定义的两级:
+//
+//	1: 初版平台面. IPC 协议 major 1, 无事件订阅, 无共享内存传输
+//	2: IPC 协议 major 2 (移除旧版隐式默认, 不向后兼容) + 事件订阅与事件实例
+//	   归属 + 共享内存环传输 + Operation 长任务 + 资源目录
+//
+// 声明 min_nervus_api=1 的包在 Level 2 的内核上照常安装 (判据是
+// MinNervusAPI > CurrentAPILevel), 因此提升本值不会赶走旧包.
+//
+// 曾经这里长期停在 1, 而平台已经做完了上面 Level 2 的全部变更 - 结果是
+// camerad 这类如实声明 min_nervus_api=2 的服务在目标机上被 ErrPlatformTooOld
+// 挡住, 且审计里只留下一句看不出根因的 "platform api level too old".
+// 【改动平台对外能力时必须一并复核本值】
+const CurrentAPILevel uint32 = 2
 
 // NSOS Package 的 canonical ABI token. 这些是 NSOS 包格式标识,
 // 不是 Android NDK 名称 (arm64-v8a 等), 也不是裸 CPU 名 (aarch64 等) - 后两类
