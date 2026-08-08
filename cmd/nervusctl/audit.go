@@ -54,6 +54,9 @@ func cmdAuditVerify(args []string, stdout io.Writer) error {
 	anchored := false
 	total := 0
 	skippedTotal := 0
+	// 非正常停机的位置。链在这些点上仍然自洽，但尾部可能少了记录——
+	// 不报出来的话，「验证通过」这句话会比它实际的意思强。
+	var unclean []audit.Record
 
 	for _, path := range files {
 		records, skipped, err := audit.ReadFile(path)
@@ -81,6 +84,11 @@ func cmdAuditVerify(args []string, stdout io.Writer) error {
 			seq = records[n-1].Seq + 1
 		}
 		total += len(records)
+		for _, rec := range records {
+			if rec.Action == audit.ActionUncleanShutdown {
+				unclean = append(unclean, rec)
+			}
+		}
 		outf(stdout, "ok    %-20s %d records\n", filepath.Base(path), len(records))
 	}
 
@@ -106,6 +114,20 @@ func cmdAuditVerify(args []string, stdout io.Writer) error {
 		// 悄悄跳过会让审计看起来一直很干净。
 		outf(stdout, "note: %d partial record(s) skipped — the machine was not shut down cleanly\n",
 			skippedTotal)
+	}
+	if len(unclean) > 0 {
+		// 【「链完整」不等于「一条没少」】。
+		//
+		// 掉电会丢掉尾部若干条已写入但还没 fsync 的记录，而剩下的链完全自洽：
+		// 序号连续、prev 相扣、哈希全对。不报出这些点，上面那句 "chain verified"
+		// 就成了一个假的确定性——它只证明了「留下来的没被改」，证明不了
+		// 「该有的都在」。
+		outf(stdout,
+			"note: %d unclean shutdown(s) — records may be missing just before each\n",
+			len(unclean))
+		for _, rec := range unclean {
+			outf(stdout, "      seq=%d %s\n", rec.Seq, rec.Detail)
+		}
 	}
 	return nil
 }

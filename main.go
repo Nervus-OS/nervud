@@ -264,6 +264,12 @@ func assemble(
 		if cerr := aud.Close(); cerr != nil {
 			logger.Error("audit: close", "err", cerr)
 		}
+		// Close 之后再读：它会补写终结记录并做最后一次 fsync，这两笔都要算进去。
+		//
+		// records/syncs 的比值说明批量的实际效果。两者接近说明几乎每条都是
+		// Denied——那不是配置问题，是有什么在被反复拒绝，值得去看。
+		records, syncs := aud.Stats()
+		logger.Info("audit: closed", "records", records, "syncs", syncs)
 	})
 
 	// systemd D-Bus 连接：起进程（StartSandboxedProcess）的后端。
