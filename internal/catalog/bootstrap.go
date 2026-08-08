@@ -107,6 +107,11 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("catalog: build permission-admin bootstrap schema: %w", err)
 	}
+	permissionUIBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfacePermissionUI, 1, permissionv1.PermissionUiMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build permission-ui bootstrap schema: %w", err)
+	}
 	// 带事件枚举: OperationChanged 有载荷, 必须走 bundle 而不是内联到
 	// descriptor - 内联那条路是给元数据接口用的, 它不允许 payload_type.
 	operationBundle, err := ipcregistry.BuildSchemaBundleWithEvents(
@@ -190,6 +195,24 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 				"",
 				"",
 			),
+			// 确认界面. 与上面那条相反, 【本接口不由内核实现】 —— 它列在这里
+			// 只是把契约与门槛钉死, 实现者是 nervus.permissionui, 与
+			// InterfacePackageManager (实现者是 pkgmanagerd) 同一形态. 因此它
+			// 不出现在 Exports 里, 内核也不为它注册任何 handler.
+			//
+			// required_permission 取 perm.pkg.query 而不是 perm.pkg.install:
+			// 接口门槛只该管"谁能解析到确认界面", 而两个方法各自的门槛更严
+			//  (ConfirmInstall 要 perm.pkg.install). 接口门槛若直接取
+			// install, 一个只想打开权限管理页的调用方就得先申请装包权限
+			bootstrapInterface(
+				InterfacePermissionUI,
+				permissionUIBundle,
+				"perm.pkg.query",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
 			// 不设 required_permission: 能不能查一个 operation, 由它
 			// 自己的所有者关系决定 (Manager.Get 的 canSee), 不由一条全局
 			// 权限决定. 加一条权限只会让"持有它就能看全机 operation"
@@ -229,6 +252,7 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 		resourceDirBundle,
 		operationBundle,
 		permissionBundle,
+		permissionUIBundle,
 	}}
 	return parseArtifacts(descriptor, bundles, "bootstrap")
 }

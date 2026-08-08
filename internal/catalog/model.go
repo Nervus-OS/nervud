@@ -45,6 +45,17 @@ const (
 	// 正是为了不让它被替换.
 	InterfacePermissionAdmin = "nervus.interface.permission.admin"
 
+	// InterfacePermissionUI 是"请向用户展示确认"的请求面.
+	//
+	// 【与上面那条反向, 且实现者不是内核】: .admin 由 nervud 内建实现, 被
+	// permissionui 调用; 本接口由 permissionui 实现, 被设置与桌面调用. 内核
+	// 只声明契约与门槛, 不注册 handler —— 与 InterfacePackageManager 同一形态
+	//  (那条也在这里, 实现者是 pkgmanagerd).
+	//
+	// 两者不合并成一个 interface_id: ExportBinding 是组件与接口一对一, 同一个
+	// ID 由两个 Provider 各实现一半会让 Resolve 无法确定该路由到哪一侧.
+	InterfacePermissionUI = "nervus.interface.permission.ui"
+
 	// InterfaceOperationControl 是长任务的查询/取消/回报面.
 	//
 	// 它与资源目录同理由列在这里: Operation 的状态机归内核所有, 除了 nervud
