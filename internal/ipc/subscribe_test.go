@@ -142,3 +142,135 @@ func TestPublishEvent_RejectedFromNonService(t *testing.T) {
 	}
 	expectClosed(t, c)
 }
+
+// ---- 实例作用域 -----------------------------------------------------------
+//
+// 契约（EventMeta.scoped）与 Subscribe.scope 必须对得上，四种组合里只有两种
+// 放行。两侧不一致时全部 fail closed——任何一个方向的猜测都有实际后果：
+// 猜「按实例」会让合法订阅收不到事件，猜「按 endpoint」会把别人的事件送出去。
+
+// newScopedServer 造一个事件声明了 scoped 的 Server。
+func newScopedServer(t *testing.T, admit endpoint.BuiltinSubscribeAdmitter) (*Server, string) {
+	t.Helper()
+	meta := &ipcv1.EventMeta{
+		EventId:       1,
+		DeliveryClass: ipcv1.DeliveryClass_DELIVERY_CLASS_STATE,
+		Scoped:        true,
+	}
+	fe := &fakeEndpoints{
+		eventRoute: endpoint.EventRoute{
+			ProviderConn:       nil,
+			ProviderEndpointID: 7,
+			InterfaceID:        "nervus.interface.test",
+			InterfaceMajor:     1,
+			Event:              catalog.EventDefinition{EventID: 1, Meta: meta},
+			Admit:              admit,
+		},
+		providerEvent: catalog.EventDefinition{EventID: 1, Meta: meta},
+	}
+	return newTestServerWithEndpoints(t, selfUIDInvariants(t), fe)
+}
+
+func scopedSubscribeEnv(reqID, scope uint64) *ipcv1.Envelope {
+	return &ipcv1.Envelope{Body: &ipcv1.Envelope_Subscribe{Subscribe: &ipcv1.Subscribe{
+		RequestId: reqID, EndpointId: 5, EventId: 1, Scope: scope,
+	}}}
+}
+
+// 内建准入放行时订阅成功，scope 原样进登记。
+func TestSubscribe_ScopedAdmittedByBuiltin(t *testing.T) {
+	var sawScope uint64
+	_, sock := newScopedServer(t, func(call endpoint.BuiltinSubscribeCall) endpoint.BuiltinSubscribeResult {
+		sawScope = call.Scope
+		return endpoint.BuiltinSubscribeResult{Code: ipcv1.StatusCode_STATUS_CODE_OK}
+	})
+	c := dialHandshaked(t, sock)
+
+	if err := WriteFrame(c, mustMarshal(t, scopedSubscribeEnv(1, 42))); err != nil {
+		t.Fatal(err)
+	}
+	res := readEnv(t, c).GetSubscribeResult()
+	if res.GetSuccess() == nil {
+		t.Fatalf("准入放行却失败了: %v", res.GetFailure().GetCode())
+	}
+	if sawScope != 42 {
+		t.Fatalf("准入拿到 scope = %d, want 42", sawScope)
+	}
+}
+
+// 准入拒绝时原样回它给的码。
+//
+// 【NOT_FOUND 而不是 PERMISSION_DENIED】：后者会告诉调用方「这个实例存在，
+// 只是不归你」——那本身就是信息。
+func TestSubscribe_ScopedRejectedByBuiltin(t *testing.T) {
+	_, sock := newScopedServer(t, func(endpoint.BuiltinSubscribeCall) endpoint.BuiltinSubscribeResult {
+		return endpoint.BuiltinSubscribeResult{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+	})
+	c := dialHandshaked(t, sock)
+
+	if err := WriteFrame(c, mustMarshal(t, scopedSubscribeEnv(1, 42))); err != nil {
+		t.Fatal(err)
+	}
+	res := readEnv(t, c).GetSubscribeResult()
+	if res.GetSuccess() != nil {
+		t.Fatal("被拒的订阅却成功了")
+	}
+	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_NOT_FOUND {
+		t.Fatalf("code = %v, want NOT_FOUND", code)
+	}
+}
+
+// 【scoped 事件必须指定实例】。0 不表示「全部」——那正是本机制要消灭的广播。
+func TestSubscribe_ScopedRequiresNonZeroScope(t *testing.T) {
+	_, sock := newScopedServer(t, func(endpoint.BuiltinSubscribeCall) endpoint.BuiltinSubscribeResult {
+		t.Error("scope 为 0 时不该走到准入")
+		return endpoint.BuiltinSubscribeResult{Code: ipcv1.StatusCode_STATUS_CODE_OK}
+	})
+	c := dialHandshaked(t, sock)
+
+	if err := WriteFrame(c, mustMarshal(t, scopedSubscribeEnv(1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	res := readEnv(t, c).GetSubscribeResult()
+	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT {
+		t.Fatalf("code = %v, want INVALID_ARGUMENT", code)
+	}
+}
+
+// 【非 scoped 事件带了 scope 也要拒】。
+//
+// 静默忽略会让调用方以为自己在观察某一个实例，实际收到的是全部——而它
+// 永远不会发现，因为事件本身看起来完全正常。
+func TestSubscribe_UnscopedEventRejectsScope(t *testing.T) {
+	// newSubscribeServer 的事件没有 scoped。
+	_, sock := newSubscribeServer(t, ipcv1.DeliveryClass_DELIVERY_CLASS_STATE)
+	c := dialHandshaked(t, sock)
+
+	env := &ipcv1.Envelope{Body: &ipcv1.Envelope_Subscribe{Subscribe: &ipcv1.Subscribe{
+		RequestId: 1, EndpointId: 5, EventId: 1, Scope: 42,
+	}}}
+	if err := WriteFrame(c, mustMarshal(t, env)); err != nil {
+		t.Fatal(err)
+	}
+	res := readEnv(t, c).GetSubscribeResult()
+	if res.GetSuccess() != nil {
+		t.Fatal("非 scoped 事件接受了 scope")
+	}
+	if code := res.GetFailure().GetCode(); code != ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT {
+		t.Fatalf("code = %v, want INVALID_ARGUMENT", code)
+	}
+}
+
+// 外部 Provider（Admit 为 nil）走归属表，未登记即拒。
+func TestSubscribe_ScopedExternalRequiresBinding(t *testing.T) {
+	_, sock := newScopedServer(t, nil)
+	c := dialHandshaked(t, sock)
+
+	if err := WriteFrame(c, mustMarshal(t, scopedSubscribeEnv(1, 42))); err != nil {
+		t.Fatal(err)
+	}
+	res := readEnv(t, c).GetSubscribeResult()
+	if res.GetSuccess() != nil {
+		t.Fatal("没登记归属却订上了")
+	}
+}

@@ -481,6 +481,9 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 	case *ipcv1.Envelope_Unsubscribe:
 		return co.handleUnsubscribe(body.Unsubscribe)
 
+	case *ipcv1.Envelope_BindEventScope:
+		return co.handleBindEventScope(body.BindEventScope)
+
 	case *ipcv1.Envelope_PublishEvent:
 		return co.handlePublishEvent(body.PublishEvent)
 

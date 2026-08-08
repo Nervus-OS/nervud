@@ -222,6 +222,12 @@ type EndpointResolver interface {
 	// endpoint，以及该 event_id 是否在契约里声明过
 	LookupProviderEvent(conn endpoint.ConnHandle, serviceEndpointID uint64, eventID uint32) (catalog.EventDefinition, endpoint.RouteError)
 
+	// OwnsEndpoint 回答「这条连接是否拥有这个 registration」。
+	//
+	// BindEventScope 走它：少了这道检查，任何一个系统服务都能替别的 endpoint
+	// 登记实例归属——进而把自己塞进别人的事件流。
+	OwnsEndpoint(conn endpoint.ConnHandle, serviceEndpointID uint64) bool
+
 	// ConnClosed 由 ipc 在连接的 serve 循环退出时调用一次，让 endpoint 清理
 	// 该连接名下的全部 registration/binding，并使仍存活的关联 binding 失效
 	ConnClosed(conn endpoint.ConnHandle)
@@ -287,10 +293,13 @@ type Server struct {
 	// subscriptions 持有全部事件订阅。为 nil 时 Subscribe 回 UNAVAILABLE，
 	// PublishEvent 静默丢弃——最小装配与大量测试并不需要订阅。
 	subscriptions *subscription.Registry
-	leases        ControlLeases
-	launcher      ComponentLauncher
-	resources     ResourceResolver
-	transfer      TransferManager
+	// eventScopes 记录事件实例的归属（见 eventscope.go）。外部 Provider 的
+	// 按实例订阅靠它裁决。
+	eventScopes *eventScopes
+	leases      ControlLeases
+	launcher    ComponentLauncher
+	resources   ResourceResolver
+	transfer    TransferManager
 	// operations 拥有长任务的状态机。为 nil 时【声明了 returns_operation 的
 	// 方法一律被拒】——不是静默降级成普通调用：那会让调用方拿到一个 OK
 	// 而机器还在动，而它以为已经做完了。
@@ -392,6 +401,7 @@ func New(cfg Config) (*Server, error) {
 		components:      cfg.Components,
 		endpoints:       cfg.Endpoints,
 		subscriptions:   subscription.New(),
+		eventScopes:     newEventScopes(),
 		leases:          cfg.Leases,
 		launcher:        cfg.Launcher,
 		resources:       cfg.Resources,
@@ -800,6 +810,12 @@ func (s *Server) serve(c *net.UnixConn, caller identity.Caller) {
 		// endpoint 失效链路负责，不在这里。
 		defer s.subscriptions.CloseConn(co)
 	}
+	if s.eventScopes != nil {
+		// 两个方向都要清：这条连接可能是登记方（Provider），也可能是被登记的
+		// 归属方（调用方）。少任一边都会留下永远清不掉的条目。
+		defer s.eventScopes.closeProvider(co)
+		defer s.eventScopes.closeOwner(co)
+	}
 	if s.leases != nil {
 		// 撤掉本连接名下的全部 ControlLease。租约绑连接、断开即失效，不撤的话
 		// 一个断了线的 App 仍然「持有」执行器控制权，谁也抢不走，直到 TTL
@@ -1090,6 +1106,25 @@ func (s *Server) auditViolation(caller identity.Caller, err error) {
 // 【独立 Action】：Provider 推一个它不拥有的 endpoint 或契约外的 event_id，
 // 既不是协议违规（body 本身合法）也不是能力缺口（本 build 实现了它），
 // 而是 Provider 侧的 bug 或越权尝试。混进上面两类里会让真正的信号被淹没。
+// auditScopeRejected 记一次被拒的实例归属登记。
+//
+// 独立 Action：它既不是协议违规（body 合法）也不是能力缺口（已实现），
+// 混进那两类会淹没真正的信号。
+func (s *Server) auditScopeRejected(
+	caller identity.Caller, endpointID, scope uint64, code ipcv1.StatusCode,
+) {
+	if !s.violationLog.allow() {
+		return
+	}
+	s.auditor.Record(context.Background(), audit.Event{
+		Action:  "ipc.BindEventScopeRejected",
+		Subject: caller.String(),
+		Denied:  true,
+		Detail: fmt.Sprintf("endpoint=%d scope=%d code=%s",
+			endpointID, scope, code),
+	})
+}
+
 func (s *Server) auditPublishRejected(
 	caller identity.Caller, endpointID uint64, eventID uint32, code ipcv1.StatusCode,
 ) {

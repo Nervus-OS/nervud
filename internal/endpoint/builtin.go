@@ -84,40 +84,39 @@ type BuiltinHandler func(BuiltinCall) BuiltinResult
 
 // BuiltinSubscribeCall 是一次订阅准入询问。
 //
-// 【只在事件声明了 EventMeta.subscribe_payload_type 时发生】。没声明的事件
-// 是 endpoint 作用域的，谁能 Resolve 到这个 endpoint 谁就能订，不需要再问。
+// 【只在事件声明了 EventMeta.scoped 时发生】。没声明的事件是 endpoint 作用域
+// 的，谁能 Resolve 到这个 endpoint 谁就能订，不需要再问。
 type BuiltinSubscribeCall struct {
 	Caller  identity.Caller
 	EventID uint32
-	// Payload 是 Subscribe.payload 原始字节，类型由 subscribe_payload_type 决定。
-	// 由 endpoint 所有者解码——内核不替它猜。
-	Payload []byte
+	// Scope 是 Subscribe.scope 原值，即调用方想观察的那个实例。
+	//
+	// 【内核已经看懂了它】：scope 是 Envelope 上的一个 uint64，不需要按
+	// Provider 的 schema 解码。实现只需回答「这个调用方能不能看它」。
+	Scope uint64
 }
 
-// BuiltinSubscribeResult 是准入结果。
+// BuiltinSubscribeResult 是准入结果。Code 为 OK 表示放行，其余值原样回给订阅方。
 type BuiltinSubscribeResult struct {
-	// Scope 是这次订阅绑定的实例（operation_id、stream_id 一类）。
-	// Code 为 OK 时【必须非 0】：0 表示不分实例，而那正是准入要防的广播。
-	Scope uint64
-	// Code 为 OK 表示放行。其余值原样回给订阅方。
 	Code ipcv1.StatusCode
 }
 
-// BuiltinSubscribeAdmitter 判定一次订阅是否放行，并给出它的实例作用域。
+// BuiltinSubscribeAdmitter 判定一次订阅是否放行。
 //
 // # 为什么这道判定必须在 Subscribe 时做，而不是扇出时过滤
 //
 // 订上了再逐条丢弃会让调用方以为自己在观察，然后一直等一个永远不来的事件。
 // 「订不上」是一次明确的失败，调用方立刻知道该怎么办。
 //
-// # 为什么只有内建 endpoint 有这个能力
+// # 内建与外部 Provider 走不同的判定，但【同一套 wire】
 //
-// 本函数跑在【连接的读循环里】。内建的实现是进程内的一次查表，微秒级；
-// 换成外部 Provider 就意味着一次往返，而那会让整条连接上的请求响应、Ping、
-// 乃至别的订阅一起卡住。外部 Provider 的订阅准入需要先把 Subscribe 做成
-// 异步（与 Request/Dispatch 同形），那是另一件事。
+// 内建的所有权归内核自己（operation 就是 nervud 的），一次查表就能回答，
+// 所以直接用本回调。外部 Provider 的所有权只有它自己知道，靠 BindEventScope(54)
+// 预先登记给 internal/ipc 的归属表——两条路径在 Subscribe 上是同一个 body、
+// 同一个 scope 字段，客户端分辨不出差别，也不需要分辨。
 //
-// 因此实现【不得阻塞、不得 panic】。它是内核代码，两条都由作者保证。
+// 本函数跑在【连接的读循环里】，因此实现【不得阻塞、不得 panic】。
+// 它是内核代码，两条都由作者保证。
 type BuiltinSubscribeAdmitter func(BuiltinSubscribeCall) BuiltinSubscribeResult
 
 // RegisterBuiltin 注册一个由 nervud 自己实现的 Interface。

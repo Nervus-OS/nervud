@@ -117,6 +117,9 @@ func (r *routingEndpoints) Route(
 	}, endpoint.RouteError{}
 }
 
+// OwnsEndpoint 恒真：本文件的用例不验归属，那由 eventscope 的测试覆盖。
+func (r *routingEndpoints) OwnsEndpoint(_ endpoint.ConnHandle, _ uint64) bool { return true }
+
 func (r *routingEndpoints) ConnClosed(endpoint.ConnHandle) {}
 
 func registerSuccessResult(epID uint64) *ipcv1.RegisterEndpointResult {

@@ -31,6 +31,9 @@ type fakeEndpoints struct {
 	providerEvent catalog.EventDefinition
 	eventErr      endpoint.RouteError
 
+	// ownsEndpoint 是 BindEventScope 的归属检查结果。
+	ownsEndpoint bool
+
 	connClosed []endpoint.ConnHandle
 }
 
@@ -66,6 +69,8 @@ func (f *fakeEndpoints) LookupProviderEvent(
 ) (catalog.EventDefinition, endpoint.RouteError) {
 	return f.providerEvent, f.eventErr
 }
+
+func (f *fakeEndpoints) OwnsEndpoint(_ endpoint.ConnHandle, _ uint64) bool { return f.ownsEndpoint }
 
 func (f *fakeEndpoints) ConnClosed(conn endpoint.ConnHandle) {
 	f.mu.Lock()

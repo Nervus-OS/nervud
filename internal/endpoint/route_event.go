@@ -139,3 +139,24 @@ func (m *Module) LookupProviderEvent(
 	}
 	return event, RouteError{}
 }
+
+// OwnsEndpoint 回答「这条连接是否拥有这个 registration」。
+//
+// BindEventScope 走它：少了这道检查，任何一个系统服务都能替别的 endpoint
+// 登记实例归属——进而把自己塞进别人的事件流。
+//
+// 【只看 registration，不看 binding】：登记归属的是【提供方】，用的是它自己
+// RegisterEndpoint 拿到的句柄，与调用方那侧的 binding 是两个命名空间。
+func (m *Module) OwnsEndpoint(conn ConnHandle, serviceEndpointID uint64) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cs, ok := m.byConn[conn]
+	if !ok {
+		return false
+	}
+	reg, ok := cs.registrations[serviceEndpointID]
+	return ok && reg.live
+}

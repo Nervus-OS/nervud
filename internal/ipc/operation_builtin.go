@@ -75,31 +75,17 @@ func (s *Server) OperationSubscribeAdmitter() endpoint.BuiltinSubscribeAdmitter 
 			}
 		}
 
-		var req operationv1.OperationSubscription
-		if err := proto.Unmarshal(call.Payload, &req); err != nil {
-			return endpoint.BuiltinSubscribeResult{
-				Code: ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT,
-			}
-		}
-		if req.GetOperationId() == 0 {
-			// 0 不表示「全部」。见 OperationSubscription 的说明。
-			return endpoint.BuiltinSubscribeResult{
-				Code: ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT,
-			}
-		}
-
+		// scope 就是 operation_id。内核自己看得懂它，不需要解 Provider 的 proto。
+		//
 		// 【跨 caller 一律 NOT_FOUND，不是 PERMISSION_DENIED】。后者会告诉
 		// 调用方「这个 operation 存在，只是不归你」——那本身就是信息。
 		// 与 Manager.Get 的不可区分投影一致。
-		if _, ok := s.operations.Get(call.Caller, req.GetOperationId()); !ok {
+		if _, ok := s.operations.Get(call.Caller, call.Scope); !ok {
 			return endpoint.BuiltinSubscribeResult{
 				Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
 			}
 		}
-		return endpoint.BuiltinSubscribeResult{
-			Scope: req.GetOperationId(),
-			Code:  ipcv1.StatusCode_STATUS_CODE_OK,
-		}
+		return endpoint.BuiltinSubscribeResult{Code: ipcv1.StatusCode_STATUS_CODE_OK}
 	}
 }
 

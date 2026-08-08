@@ -93,53 +93,104 @@ func (co *conn) handleSubscribe(req *ipcv1.Subscribe) bool {
 
 // admitSubscription 裁决一次订阅的实例作用域。
 //
-// 【契约说了算】：EventMeta.subscribe_payload_type 非空 = 本事件按实例分，
-// 必须有人回答「这个调用方能不能订这个实例」；为空 = endpoint 作用域，
-// 谁能 Resolve 到就能订。
+// 【契约说了算】：EventMeta.scoped = 本事件按实例分，Subscribe.scope 必填且
+// 必须属于这个调用方；未声明 = endpoint 作用域，谁能 Resolve 到就能订。
 //
-// 四种组合里只有一种放行，其余全部 fail closed——两侧不一致时，任何一个方向的
-// 猜测都会造成实际后果：猜「按实例」会让合法订阅收不到事件，猜「按 endpoint」
-// 会把别人的事件送出去。
+// 两侧不一致时全部 fail closed——任何一个方向的猜测都有实际后果：猜「按实例」
+// 会让合法订阅收不到事件，猜「按 endpoint」会把别人的事件送出去。
 func (co *conn) admitSubscription(
 	route endpoint.EventRoute, req *ipcv1.Subscribe,
 ) (uint64, ipcv1.StatusCode) {
-	scoped := route.Event.Meta.GetSubscribePayloadType() != ""
+	scope := req.GetScope()
 
-	if !scoped {
-		if len(req.GetPayload()) != 0 {
-			// 契约没声明订阅参数，调用方却带了一份。静默忽略会让它以为自己
-			// 加了过滤条件，然后收到全部事件却不知道过滤没生效。
+	if !route.Event.Meta.GetScoped() {
+		if scope != 0 {
+			// 契约说本事件不分实例，调用方却指定了一个。静默忽略会让它以为
+			// 自己在观察某一个实例，实际收到的是全部。
 			return 0, ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT
 		}
 		return 0, ipcv1.StatusCode_STATUS_CODE_OK
 	}
 
-	if route.Admit == nil {
-		// 契约要求按实例订阅，但这个 endpoint 没有准入实现——当前只有内建
-		// 支持（见 BuiltinSubscribeAdmitter 的说明）。
-		//
-		// 【必须拒绝】：放行等于按 endpoint 作用域订阅一个明确声明了要按实例
-		// 分的事件，那正是契约在防的泄漏。回 UNAVAILABLE 而不是 INTERNAL——
-		// 这是能力缺口，不是调用方的错。
-		return 0, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE
+	if scope == 0 {
+		// 按实例分发的事件必须说清楚要看哪一个。0 不表示「全部」——
+		// 那正是本机制要消灭的广播。
+		return 0, ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT
 	}
 
-	result := route.Admit(endpoint.BuiltinSubscribeCall{
-		Caller:  co.caller,
-		EventID: req.GetEventId(),
-		Payload: req.GetPayload(),
-	})
-	if result.Code != ipcv1.StatusCode_STATUS_CODE_OK {
-		return 0, result.Code
+	// 内建 endpoint：所有权归内核自己，直接问它。
+	if route.Admit != nil {
+		result := route.Admit(endpoint.BuiltinSubscribeCall{
+			Caller:  co.caller,
+			EventID: req.GetEventId(),
+			Scope:   scope,
+		})
+		if result.Code != ipcv1.StatusCode_STATUS_CODE_OK {
+			return 0, result.Code
+		}
+		return scope, ipcv1.StatusCode_STATUS_CODE_OK
 	}
-	if result.Scope == 0 {
-		// 准入放行却没给作用域。0 表示「不分实例」，用在这里等于广播——
-		// 而这条路径存在的全部理由就是不广播。当成内核装配 bug 拒掉。
-		co.log.Error("ipc: builtin subscribe admitter returned OK with zero scope",
-			"event_id", req.GetEventId())
-		return 0, ipcv1.StatusCode_STATUS_CODE_INTERNAL
+
+	// 外部 Provider：查归属表。表由 Provider 经 BindEventScope 预先登记，
+	// 【未登记即拒绝】——放行一个没登记的 scope 等于回到广播。
+	provider, ok := route.ProviderConn.(*conn)
+	if !ok || provider == nil {
+		return 0, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE
 	}
-	return result.Scope, ipcv1.StatusCode_STATUS_CODE_OK
+	if !co.s.eventScopes.allows(provider, route.ProviderEndpointID, scope, co) {
+		// 【NOT_FOUND 而不是 PERMISSION_DENIED】：后者会告诉调用方「这个实例
+		// 存在，只是不归你」——那本身就是信息。与 operation 的不可区分投影一致。
+		return 0, ipcv1.StatusCode_STATUS_CODE_NOT_FOUND
+	}
+	return scope, ipcv1.StatusCode_STATUS_CODE_OK
+}
+
+// handleBindEventScope 处理 Provider 的一次实例归属登记。
+//
+// 【单向，没有结果】。与 PublishEvent 同理：给它配结果会让 Provider 的处理
+// 流程多一次往返，而它不需要——本 body 与随后的 DispatchResult 走同一条有序
+// 连接，nervud 生成调用方 Response 时登记必然已经生效。
+//
+// 因此这里的失败只记审计并丢弃，不回消息、也不关连接。
+func (co *conn) handleBindEventScope(req *ipcv1.BindEventScope) bool {
+	if co.s.endpoints == nil || co.s.eventScopes == nil {
+		return true
+	}
+	// 只有 Service 能登记：普通 App 发这个 body 属于方向错误。
+	if co.componentType != pkgregistry.ComponentService {
+		co.log.Warn("ipc: non-service sent BindEventScope, closing")
+		co.s.auditViolation(co.caller, errUnexpectedBody)
+		return false
+	}
+	if req.GetScope() == 0 {
+		co.s.auditScopeRejected(co.caller, req.GetEndpointId(), req.GetScope(),
+			ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT)
+		return true
+	}
+
+	// endpoint 必须真的属于这条连接。少了这道检查，任何一个系统服务都能替
+	// 别的 endpoint 登记归属——进而把自己塞进别人的事件流。
+	if !co.s.endpoints.OwnsEndpoint(co, req.GetEndpointId()) {
+		co.s.auditScopeRejected(co.caller, req.GetEndpointId(), req.GetScope(),
+			ipcv1.StatusCode_STATUS_CODE_NOT_FOUND)
+		return true
+	}
+
+	if req.GetReleased() {
+		co.s.eventScopes.release(co, req.GetEndpointId(), req.GetScope())
+		return true
+	}
+
+	// 归属【靠 route 证明，不靠自报】：Provider 说的是「属于我正在处理的这次
+	// 调用的调用方」，而那次调用是谁发起的 nervud 自己知道。
+	entry, ok := co.s.dispatch.origin(req.GetOriginRouteId(), co)
+	if !ok || entry.source == nil {
+		co.s.auditScopeRejected(co.caller, req.GetEndpointId(), req.GetScope(),
+			ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION)
+		return true
+	}
+	co.s.eventScopes.bind(co, req.GetEndpointId(), req.GetScope(), entry.source)
+	return true
 }
 
 func (co *conn) handleUnsubscribe(req *ipcv1.Unsubscribe) bool {
