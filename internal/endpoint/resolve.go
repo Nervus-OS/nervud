@@ -4,6 +4,7 @@ package endpoint
 
 import (
 	"bytes"
+	"fmt"
 
 	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 	"google.golang.org/protobuf/proto"
@@ -178,7 +179,7 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 			}
 
 			attemptedStart = true
-			started, err := m.tryOnDemandStart(candidate.pkg, candidate.comp)
+			started, rejected, err := m.tryOnDemandStart(candidate.pkg, candidate.comp)
 			if err != nil {
 				// EnsureStarted 失败 (如组件被禁用): 原样映射为 FAILED_PRECONDITION
 				m.audit(caller, "endpoint.ResolveEndpoint", true, err, interfaceID)
@@ -186,9 +187,23 @@ func (m *Module) ResolveEndpoint(conn ConnHandle, caller identity.Caller, req *i
 					ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_UNSPECIFIED)
 			}
 			if !started {
-				m.audit(caller, "endpoint.ResolveEndpoint", true, errOnDemandTimeout, interfaceID)
-				return resolveFailure(reqID, ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION,
-					ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_RESOURCE_NOT_FOUND)
+				// 走到这里说明 selector 已经在 authorizeOnDemandStart 里解析成功了
+				// (否则拿到的是 onDemandResourceMismatch), 所以这【不是】资源问题.
+				// 曾经这里回 RESOURCE_NOT_FOUND, 于是一个 Provider 报到被拒
+				// (schema hash 不符) 会让调用方去查自己的 selector - 那条路上
+				// 没有任何东西可改.
+				//
+				// INTERFACE_NOT_FOUND 才是实情: 没有 endpoint 注册这个接口.
+				// 而 UNAVAILABLE 表达它是时序性的 - 提供方存在且已获准启动,
+				// 只是此刻没能就绪, 重试有意义.
+				failure := error(errOnDemandTimeout)
+				if rejected != "" {
+					failure = fmt.Errorf("%w: %s/%s: %s",
+						errOnDemandRejected, candidate.pkg, candidate.comp, rejected)
+				}
+				m.audit(caller, "endpoint.ResolveEndpoint", true, failure, interfaceID)
+				return resolveFailure(reqID, ipcv1.StatusCode_STATUS_CODE_UNAVAILABLE,
+					ipcv1.ResolveEndpointReason_RESOLVE_ENDPOINT_REASON_INTERFACE_NOT_FOUND)
 			}
 
 			// 被唤醒: 回到候选检查, 不假设"广播即成功"

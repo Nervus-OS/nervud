@@ -33,7 +33,18 @@ var (
 	errInterfaceNotFound = errors.New("endpoint: interface not visible to caller")
 	errAmbiguous         = errors.New("endpoint: interface resolves to more than one candidate")
 	errOnDemandTimeout   = errors.New("endpoint: timed out waiting for on-demand component to register")
+	errOnDemandRejected  = errors.New("endpoint: on-demand component started but its registration was rejected")
 )
+
+// registrationRejection 记下一个组件最近一次 RegisterEndpoint 被拒的原因.
+//
+// 它只服务诊断: on-demand 拉起失败时, 调用方拿到的是 ResolveEndpoint 的失败,
+// 而真因在另一条审计记录 (endpoint.RegisterEndpoint denied=true) 里. 两条记录
+// 之间原本没有任何线索, 于是"schema hash 不符"会被读成"selector 选不到设备".
+type registrationRejection struct {
+	at     time.Time
+	reason string
+}
 
 // 窄接口由消费者定义, 具体类型隐式满足, 避免 endpoint 依赖完整实现
 
@@ -86,6 +97,11 @@ type Module struct {
 	// 供 serviceRegistration.generation 使用
 	generations map[registrationKey]uint64
 
+	// rejections 保存每个组件最近一次被拒的报到. 每 key 只留最后一条 - 这不是
+	// 审计 (审计有自己的记录), 只是给正在等它启动的 Resolve 一个即时线索.
+	// key 数量受已装组件数约束, 不随时间增长
+	rejections map[componentKey]registrationRejection
+
 	// builtinSeq 给内建 endpoint 分配 service 侧 id. 与外部注册共用
 	// serviceRegistration 结构但独立编号 - 内建没有 conn, 那个 id 只用于
 	// 诊断, 永远不会出现在任何一条 Dispatch 上.
@@ -116,6 +132,7 @@ func New(
 		byInterface:   make(map[string][]*serviceRegistration),
 		pendingStarts: make(map[componentKey][]chan struct{}),
 		generations:   make(map[registrationKey]uint64),
+		rejections:    make(map[componentKey]registrationRejection),
 	}
 }
 
@@ -239,12 +256,17 @@ func (m *Module) manifestOnDemandCandidates(
 //
 // 等待 channel 必须在调用 EnsureStarted 之前登记, 否则组件启动得足够快时,
 // RegisterEndpoint 的广播可能发生在我们登记等待者之前, 永远等不到唤醒
-func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, err error) {
+//
+// 没等到时第二个返回值给出【本次等待期间】该组件被拒的报到原因 (没有则为空).
+// 只认本次窗口内的记录: 一条上次启动留下的旧原因会把"这次它压根没起来"
+// 说成"这次它被拒了", 那比没有线索更糟
+func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, rejected string, err error) {
 	if m == nil || m.starter == nil {
-		return false, errors.New("endpoint: component starter is unavailable")
+		return false, "", errors.New("endpoint: component starter is unavailable")
 	}
 	key := componentKey{pkg: pkg, comp: comp}
 	ch := make(chan struct{})
+	since := time.Now()
 
 	m.mu.Lock()
 	m.pendingStarts[key] = append(m.pendingStarts[key], ch)
@@ -257,18 +279,34 @@ func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, err error) {
 		m.mu.Lock()
 		m.removeWaiterLocked(key, ch)
 		m.mu.Unlock()
-		return false, serr
+		return false, "", serr
 	}
 
 	select {
 	case <-ch:
-		return true, nil
+		return true, "", nil
 	case <-time.After(onDemandStartTimeout):
 		m.mu.Lock()
 		m.removeWaiterLocked(key, ch)
+		reason := ""
+		if r, ok := m.rejections[key]; ok && !r.at.Before(since) {
+			reason = r.reason
+		}
 		m.mu.Unlock()
-		return false, nil
+		return false, reason, nil
 	}
+}
+
+// recordRejection 记下一次被拒的报到. 调用方不得持有 m.mu
+func (m *Module) recordRejection(pkg, comp, reason string) {
+	if m == nil || pkg == "" || comp == "" {
+		return
+	}
+	m.mu.Lock()
+	m.rejections[componentKey{pkg: pkg, comp: comp}] = registrationRejection{
+		at: time.Now(), reason: reason,
+	}
+	m.mu.Unlock()
 }
 
 // removeWaiterLocked 从等待队列摘掉一个超时放弃的等待者. 调用方必须持有 m.mu

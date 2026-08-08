@@ -23,6 +23,9 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 
 	fail := func(code ipcv1.StatusCode, detail string) *ipcv1.RegisterEndpointResult {
 		m.audit(caller, "endpoint.RegisterEndpoint", true, errors.New(detail), interfaceID)
+		// 同时留给正在等这个组件启动的 Resolve. 没有这一步, 那边只能报
+		// "等超时", 而超时不区分"没起来"与"起来了但被拒"
+		m.recordRejection(caller.PackageID, caller.ComponentID, detail)
 		return registerFailure(reqID, code)
 	}
 
