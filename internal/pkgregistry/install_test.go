@@ -137,6 +137,11 @@ type fakePermissionArbiter struct {
 	// runtimeStates 记下每一次 SetRuntimeState, 供安装期同意的断言使用
 	runtimeStates []fakeRuntimeGrant
 	runtimeErr    error
+
+	// existingStates 是 GrantStateOf 的返回值, 键为 "pkg\x00perm".
+	// 缺省 (零值 map / 未登记) 即 NotRequested —— 与真实 Registry 一致:
+	// 一个从没被决定过的权限就是 NOT_REQUESTED
+	existingStates map[string]permission.GrantState
 }
 
 // fakeRuntimeGrant 是一次 SetRuntimeState 调用的记录
@@ -178,6 +183,20 @@ func (f *fakePermissionArbiter) SetRuntimeState(
 	f.runtimeStates = append(f.runtimeStates,
 		fakeRuntimeGrant{pkg: pkg, perm: permissionID, state: state})
 	return f.runtimeErr
+}
+
+func (f *fakePermissionArbiter) GrantStateOf(pkg, permissionID string) permission.GrantState {
+	return f.existingStates[pkg+"\x00"+permissionID]
+}
+
+// setExistingState 预置一条既有的运行期决定, 供"升级不覆盖用户决定"的断言使用.
+func (f *fakePermissionArbiter) setExistingState(
+	pkg, permissionID string, state permission.GrantState,
+) {
+	if f.existingStates == nil {
+		f.existingStates = make(map[string]permission.GrantState)
+	}
+	f.existingStates[pkg+"\x00"+permissionID] = state
 }
 
 func newTestInstaller(t *testing.T) (*Module, *fakeInstaller, *fakeIdentityUpdater, *fakeAuditor) {
@@ -285,16 +304,21 @@ func newStagingWithPermissions(
 	return staging, mb, sig
 }
 
-// TestInstallConsent_OnlyUserConsentInsideInstallSet 钉住安装期同意的裁剪判据.
+// TestInstallDefaultGrant_OnlyUserConsentInsideInstallSet 钉住默认授予的裁剪判据.
 //
-// 确认屏递进来的清单是【上限而不是授权依据】: 只有同时满足"在安装期授予集合里"
-// 与"是 USER_CONSENT 这一档"的那些才落库. 少了任一条, 一个夸大的清单就能让包
-// 拿到没被裁决批准的权限, 或者给 NORMAL 权限写进一个它根本没有的运行期状态
-func TestInstallConsent_OnlyUserConsentInsideInstallSet(t *testing.T) {
+// V2 起装完即给 (见 applyInstallConsent 的说明), 但"给什么"的判据没有放松:
+// 只有同时满足"在安装期授予集合里"与"是 USER_CONSENT 这一档"的那些才落库.
+//
+//	NORMAL 权限        装上即生效, 没有运行期状态这回事. 给它写一个状态
+//	                   只会从 SetRuntimeState 拿回一个错误
+//	没申请过的权限      不在 GrantedPermissions 里, 默认给不能凭空补上 ——
+//	                   否则任何包都能拿到它压根没申请的能力
+func TestInstallDefaultGrant_OnlyUserConsentInsideInstallSet(t *testing.T) {
 	mod, _, _, _, perm := newTestInstallerWithPerm(t)
 	root := t.TempDir()
 
-	// 只申请这两条: 一条 USER_CONSENT, 一条 NORMAL
+	// 只申请这两条: 一条 USER_CONSENT, 一条 NORMAL.
+	// permMotionControl 刻意不申请, 用来验证"不在授予集合里就不给"
 	staging, manifestBytes, sig := newStagingWithPermissions(
 		t, root, "com.example.consent", []string{permStorageUser, permPkgQuery})
 
@@ -303,11 +327,6 @@ func TestInstallConsent_OnlyUserConsentInsideInstallSet(t *testing.T) {
 		SigBlock:      sig,
 		StagingDir:    staging,
 		Source:        SourceDynamicInstall,
-		ConsentedPermissions: []string{
-			permStorageUser,   // 该落: USER_CONSENT 且在授予集合里
-			permPkgQuery,      // 不该落: NORMAL 没有运行期状态这回事
-			permMotionControl, // 不该落: 压根没申请, 不在授予集合里
-		},
 	}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -324,13 +343,43 @@ func TestInstallConsent_OnlyUserConsentInsideInstallSet(t *testing.T) {
 	}
 }
 
-// TestInstallConsent_EmptyConsentGrantsNothing: 没有同意任何权限时装包照常成功,
-// 只是一条运行期授予都不落. 用户之后仍可以在设置里补上
-func TestInstallConsent_EmptyConsentGrantsNothing(t *testing.T) {
+// TestInstallDefaultGrant_KeepsUserDecision 钉住"升级不覆盖用户的既有决定".
+//
+// 卸载才清 _grants.json (ClearPackage 只在卸载路径调用), 升级不清. 因此重装时
+// 上一次的决定还在, 而【用户明确关掉的权限绝不能因为一次版本更新被重新打开】——
+// 否则给每个应用留了一条绕过用户决定的路: 发个新版本就把权限拿回来.
+func TestInstallDefaultGrant_KeepsUserDecision(t *testing.T) {
+	mod, _, _, _, perm := newTestInstallerWithPerm(t)
+	root := t.TempDir()
+
+	// 用户此前明确关掉了这条权限
+	perm.setExistingState("com.example.revoked", permStorageUser, permission.GrantStateDenied)
+
+	staging, manifestBytes, sig := newStagingWithPermissions(
+		t, root, "com.example.revoked", []string{permStorageUser})
+
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes,
+		SigBlock:      sig,
+		StagingDir:    staging,
+		Source:        SourceDynamicInstall,
+	}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if len(perm.runtimeStates) != 0 {
+		t.Fatalf("unexpected SetRuntimeState calls = %+v; a revoked permission must not "+
+			"be re-granted by an upgrade", perm.runtimeStates)
+	}
+}
+
+// TestInstallDefaultGrant_NoPermissionsGrantsNothing: 一条权限都不申请的包装完
+// 也不该产生任何运行期授予写入.
+func TestInstallDefaultGrant_NoPermissionsGrantsNothing(t *testing.T) {
 	mod, _, _, _, perm := newTestInstallerWithPerm(t)
 	root := t.TempDir()
 	staging, manifestBytes, sig := newStagingWithPermissions(
-		t, root, "com.example.noconsent", []string{permStorageUser})
+		t, root, "com.example.noperms", nil)
 
 	if _, err := mod.Install(context.Background(), InstallTransaction{
 		ManifestBytes: manifestBytes,

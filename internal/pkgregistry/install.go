@@ -96,9 +96,15 @@ type PermissionArbiter interface {
 	ClearPackage(packageID string) error
 	// SetRuntimeState 设置一条 USER_CONSENT 权限的运行期授予状态.
 	//
-	// 安装期同意用它落库: 确认屏上用户点头的那批权限在这里变成 Granted.
+	// 安装期默认授予用它落库: 装完之后那批权限直接变成 Granted.
 	// 它自带两道前置校验 (必须是 USER_CONSENT, 且必须已在安装期授予集合里)
 	SetRuntimeState(packageID, permissionID string, state permission.GrantState) error
+	// GrantStateOf 读一条权限当前的运行期授予状态.
+	//
+	// 升级路径必须有它: 卸载才清 _grants.json (见 lifecycle.go 的 ClearPackage
+	// 调用点), 升级不清. 因此重装时旧决定还在, 而"用户上次关掉的权限"绝不能
+	// 因为一次版本更新被悄悄打开 - 那等于给了每个应用一条绕过用户决定的路.
+	GrantStateOf(packageID, permissionID string) permission.GrantState
 }
 
 // InstallTransaction 是一次装包事务的输入
@@ -390,10 +396,10 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	}
 	committed = true // commit 成功: 不再补偿删除
 
-	// 安装期同意必须在 commit 之后落: SetRuntimeState 要求权限已经在安装期
+	// 默认授予必须在 commit 之后落: SetRuntimeState 要求权限已经在安装期
 	// 授予集合里, 而那个集合是上面 publishCatalogLast 里的 perm.Replace 才推
 	// 上去的. 早一步调用一律得到 "no installed grant"
-	m.applyInstallConsent(ctx, entry, tx.ConsentedPermissions, prepared.candidate.Snapshot())
+	m.applyInstallConsent(ctx, entry, prepared.candidate.Snapshot())
 	// A successful upgrade or same-version replacement invalidates every route
 	// and stream authorized by the old package generation. Revoke after the
 	// catalog commit (a failed pre-commit install must not disturb the live
@@ -420,49 +426,74 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	return entry, nil
 }
 
-// applyInstallConsent 把安装确认屏上用户点头的那批权限落成运行期 Granted.
+// applyInstallConsent 把本包申请到的 USER_CONSENT 权限落成运行期 Granted.
 //
-// # 只认三者的交集
+// # 为什么是"默认给"而不是"问过才给"
 //
-// 落库的是 ConsentedPermissions ∩ entry.GrantedPermissions ∩ USER_CONSENT:
+// USER_CONSENT 权限的运行期状态默认是 NOT_REQUESTED, 而应用【没有】请求权限的
+// API. 于是在有安装确认屏之前, 一个普通应用申请的敏感权限【永远】拿不到 ——
+// 应用无法自救, 用户也没有界面可批, 症状是功能静默不工作.
+//
+// 本系统的选择是装完即给, 用户之后可在权限管理界面逐条关掉:
+//
+//	装完      -> 申请到的 USER_CONSENT 权限直接 Granted, 应用即刻可用
+//	不想给    -> 设置 → 权限, 关掉哪条哪条立即失效 (ACL 与路由都会热更新)
+//	被关掉后  -> 应用可以再发起一次动态申请, 由用户当场决定
+//
+// 【这是一个明确的取舍, 不是疏忽】. 代价是应用装上那一刻就拿到了它申请的全部
+// 敏感能力 (包括运动控制), 用户是事后知情而不是事前同意. 换来的是权限系统从
+// "全都拿不到"变成"全都能用且可撤销" —— 前者不是更安全, 只是让敏感功能整体不
+// 可用, 而不可用的功能不会有人去关它.
+//
+// # 仍然只认两者的交集
+//
+// 落库的是 entry.GrantedPermissions ∩ USER_CONSENT:
 //
 //	不在 GrantedPermissions 里 -> 安装期裁决压根没批 (信任不够, 签名角色不对,
-//	                              或来源不是系统镜像). 用户点头不能凭空补上
+//	                              或来源不是系统镜像). 默认给不能凭空补上
 //	不是 USER_CONSENT         -> 它没有"运行期状态"这回事: NORMAL 装上即生效,
 //	                              PRIVILEGED/SYSTEM_ONLY 由来源与签名决定.
 //	                              写进去只会从 SetRuntimeState 拿回一个错误
 //
-// 因此确认 UI 递进来一份夸大的清单, 不会让任何包多拿到一条权限 - 这份清单是
-// 上限而不是授权依据.
+// # 升级不覆盖用户的既有决定
+//
+// 卸载才清 _grants.json (ClearPackage 只在卸载路径调用), 升级不清. 因此重装时
+// 上一次的决定还在, 而【用户明确关掉的权限绝不能因为一次版本更新被重新打开】——
+// 那等于给每个应用一条绕过用户决定的路: 发个新版本就把权限拿回来.
+//
+// 所以只对 NOT_REQUESTED (从没被决定过) 的那些默认给. Denied /
+// DeniedPermanent 一律跳过, 已经是 Granted 的也不必再写一次.
 //
 // # 失败为什么不回滚安装
 //
 // 走到这里包已经 commit 了. 一条权限没落上, 用户在设置里再点一次即可; 反过来
 // 为它把装好的包整个回滚, 代价与收益不成比例. 但必须留审计 - 否则用户会看到
-// 一个"同意了却没生效"的权限, 而系统里没有任何痕迹解释为什么
+// 一个"装上了却没生效"的权限, 而系统里没有任何痕迹解释为什么
 func (m *Module) applyInstallConsent(
-	ctx context.Context, entry Entry, consented []string, snap *catalog.Snapshot,
+	ctx context.Context, entry Entry, snap *catalog.Snapshot,
 ) {
-	if len(consented) == 0 || m.perm == nil || snap == nil {
+	if m.perm == nil || snap == nil {
 		return
 	}
-	installed := make(map[string]struct{}, len(entry.GrantedPermissions))
-	for _, p := range entry.GrantedPermissions {
-		installed[p] = struct{}{}
-	}
-	for _, permissionID := range consented {
-		if _, ok := installed[permissionID]; !ok {
-			continue
-		}
+	for _, permissionID := range entry.GrantedPermissions {
 		definition, ok := snap.Permission(permissionID)
 		if !ok || definition.GrantMode != ipcv1.GrantMode_GRANT_MODE_USER_CONSENT {
+			continue
+		}
+		// 见上面"升级不覆盖用户的既有决定": 只给从没被决定过的那些
+		if state := m.perm.GrantStateOf(entry.Manifest.PackageID, permissionID); state != permission.GrantStateNotRequested {
+			m.aud.Record(ctx, audit.Event{
+				Action:  "pkgregistry.Install.defaultGrant.kept",
+				Subject: entry.Manifest.PackageID,
+				Detail:  fmt.Sprintf("%s state=%v", permissionID, state),
+			})
 			continue
 		}
 		if err := m.perm.SetRuntimeState(
 			entry.Manifest.PackageID, permissionID, permission.GrantStateGranted,
 		); err != nil {
 			m.aud.Record(ctx, audit.Event{
-				Action:  "pkgregistry.Install.consent",
+				Action:  "pkgregistry.Install.defaultGrant",
 				Subject: entry.Manifest.PackageID,
 				Denied:  true,
 				Err:     err,
