@@ -40,6 +40,15 @@ func (f *fakeGrants) GrantStateOf(pkg, perm string) permission.GrantState {
 	return f.states[[2]string{pkg, perm}]
 }
 
+// AllowedAt 是 permission.self 的 granted 字段来源.
+//
+// fake 里只按运行期状态判定: 本包的测试用的权限都是 USER_CONSENT, 而真实
+// Registry 还会叠加安装期集合与授予模式那两道 —— 那两道的行为归
+// internal/permission 的测试管, 在这里复刻一份只会让 fake 与真实实现同时漂移.
+func (f *fakeGrants) AllowedAt(_ *catalog.Snapshot, pkg, perm string) bool {
+	return f.GrantStateOf(pkg, perm) == permission.GrantStateGranted
+}
+
 func (f *fakeGrants) SetRuntimeState(pkg, perm string, state permission.GrantState) error {
 	f.sets = append(f.sets, [3]string{pkg, perm, string(rune('0' + int(state)))})
 	if f.setErr != nil {

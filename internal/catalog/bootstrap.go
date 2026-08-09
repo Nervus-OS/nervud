@@ -43,6 +43,11 @@ func DefaultBootstrap() ([]Source, error) {
 			{ComponentID: "builtin.resourcedir", InterfaceID: InterfaceResourceDirectory},
 			{ComponentID: "builtin.operation", InterfaceID: InterfaceOperationControl},
 			{ComponentID: "builtin.permission", InterfaceID: InterfacePermissionAdmin},
+			// 自查面与授权面同属一个内建组件: 两者读的是同一份状态
+			// (permission.Registry), 而组件是"谁在实现"的单位, 不是"门槛多高"的
+			// 单位 —— 门槛在各自的 bootstrapInterface 里, 差别很大 (一个要
+			// perm.permission.admin, 一个无门槛), 但实现者确实是同一处代码.
+			{ComponentID: "builtin.permission", InterfaceID: InterfacePermissionSelf},
 		},
 		Artifacts: artifacts,
 		KernelBuiltins: []KernelBuiltin{{
@@ -111,6 +116,11 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 		InterfacePermissionUI, 1, permissionv1.PermissionUiMethod(0).Descriptor())
 	if err != nil {
 		return nil, fmt.Errorf("catalog: build permission-ui bootstrap schema: %w", err)
+	}
+	permissionSelfBundle, err := ipcregistry.BuildSchemaBundle(
+		InterfacePermissionSelf, 1, permissionv1.PermissionSelfMethod(0).Descriptor())
+	if err != nil {
+		return nil, fmt.Errorf("catalog: build permission-self bootstrap schema: %w", err)
 	}
 	// 带事件枚举: OperationChanged 有载荷, 必须走 bundle 而不是内联到
 	// descriptor - 内联那条路是给元数据接口用的, 它不允许 payload_type.
@@ -213,6 +223,26 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 				"",
 				"",
 			),
+			// 自查面. 由内核内建实现 (与 .admin 同一个 Module), 因此它出现在
+			// Exports 里.
+			//
+			// 不设 required_permission —— 与 operation.control 同一形态, 但理由
+			// 不同: 那条靠所有者关系约束, 这条靠"目标恒为调用方自己"约束
+			//  (请求里没有 package_id, 身份取自 BuiltinCall.Caller). 因此无门槛
+			// 放行的只是"查我自己", 不是"查任意包".
+			//
+			// 加一条权限反而有害: 那条权限若也是 USER_CONSENT, 就成了"要先有
+			// 权限才能查自己有没有权限"的环; 若是 NORMAL, 则等于人人都有,
+			// 只是让每个应用的 manifest 多一行噪音.
+			bootstrapInterface(
+				InterfacePermissionSelf,
+				permissionSelfBundle,
+				"",
+				ipcv1.RiskClass_RISK_CLASS_UNSPECIFIED,
+				nil,
+				"",
+				"",
+			),
 			// 不设 required_permission: 能不能查一个 operation, 由它
 			// 自己的所有者关系决定 (Manager.Get 的 canSee), 不由一条全局
 			// 权限决定. 加一条权限只会让"持有它就能看全机 operation"
@@ -253,6 +283,7 @@ func buildBootstrapArtifacts() (*ipcregistry.ProviderArtifacts, error) {
 		operationBundle,
 		permissionBundle,
 		permissionUIBundle,
+		permissionSelfBundle,
 	}}
 	return parseArtifacts(descriptor, bundles, "bootstrap")
 }

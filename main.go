@@ -537,6 +537,21 @@ func assemble(
 	}
 	logger.Info("endpoint: builtin registered", "interface", permissionadmin.BuiltinInterfaceID)
 
+	// 自查面: 同一个 Module 的第二个接口. 应用在调需要敏感权限的方法之前先问
+	// 一句 "我有没有" (对应 Android 的 checkSelfPermission), 没有再去申请.
+	//
+	// 与上面那条【共用 Module 但门槛完全不同】: .admin 要 perm.permission.admin
+	// (SYSTEM_ONLY + platform-release), 自查无门槛 —— 目标恒为调用方自己, 由
+	// BuiltinCall.Caller 决定, 请求里没有 package_id. 门槛写在 catalog bootstrap
+	// 的两次 bootstrapInterface 里, 不在这里.
+	if err := epMod.RegisterBuiltin(
+		permissionadmin.SelfBuiltinInterfaceID, 1, 0, permissionAdminMod.SelfBuiltinHandler(),
+	); err != nil {
+		return nil, cleanup, fmt.Errorf(
+			"register builtin %s: %w", permissionadmin.SelfBuiltinInterfaceID, err)
+	}
+	logger.Info("endpoint: builtin registered", "interface", permissionadmin.SelfBuiltinInterfaceID)
+
 	k.Register(epMod)
 
 	// Operation Manager: 给机械臂轨迹/回零/移到位姿这类系统协调长任务一个由 nervud

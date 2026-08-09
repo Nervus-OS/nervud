@@ -72,6 +72,16 @@ type PackageLister interface {
 type GrantReader interface {
 	GrantStateOf(packageID, permissionID string) permission.GrantState
 	SetRuntimeState(packageID, permissionID string, state permission.GrantState) error
+	// AllowedAt 是"此刻能不能用"的权威结论, 自查接口 (permission.self) 用它.
+	//
+	// 【必须复用这个方法而不是在本包重算】: 它是内核授权判定的同一处代码,
+	// 已经把在不在安装期集合里, 哪一档授予模式, USER_CONSENT 的运行期状态,
+	// 以及系统软件的 consent 豁免合起来算过. 重算一份等于造出第二个真相源,
+	// 两边一旦不一致, 应用会看到"自查说有, 实际调用被拒".
+	//
+	// 带 Snapshot 参数是为了让一次回答只用一个 Catalog 修订版 —— 与
+	// endpoint.Route 用它的理由相同.
+	AllowedAt(definitions *catalog.Snapshot, packageID, permissionID string) bool
 }
 
 // Module 持有授权查询与变更所需的最小依赖.

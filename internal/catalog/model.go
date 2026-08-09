@@ -56,6 +56,26 @@ const (
 	// ID 由两个 Provider 各实现一半会让 Resolve 无法确定该路由到哪一侧.
 	InterfacePermissionUI = "nervus.interface.permission.ui"
 
+	// InterfacePermissionSelf 是"我有没有这条权限"的自查面, 由内核内建实现.
+	//
+	// # 为什么不是 .admin 上的一个方法
+	//
+	// .admin 的接口级门槛就是 perm.permission.admin 本身, 普通应用连 Resolve
+	// 都过不去; 而自查恰恰是【每个应用都要能做】的事. Catalog 的模型里一个
+	// interface_id 只有一份门槛, 要让门槛不同就必须是两个接口.
+	//
+	// # 为什么它没有 required_permission
+	//
+	// 自查不是一种特权: 调用方随时可以试着调那个方法, 从 PERMISSION_DENIED 里
+	// 得到同一个答案, 只是代价大得多 (一次注定失败的调用, 对有副作用的方法还
+	// 根本不能这么试). 反过来给它加一条 USER_CONSENT 权限会造出一个环 ——
+	// 要先有权限才能查自己有没有权限.
+	//
+	// 目标包恒为调用方自己 (请求里没有 package_id 字段, 身份取自
+	// BuiltinCall.Caller), 因此它不构成"查任意包授权状态"的无门槛入口 ——
+	// 那属于 .admin.
+	InterfacePermissionSelf = "nervus.interface.permission.self"
+
 	// InterfaceOperationControl 是长任务的查询/取消/回报面.
 	//
 	// 它与资源目录同理由列在这里: Operation 的状态机归内核所有, 除了 nervud
