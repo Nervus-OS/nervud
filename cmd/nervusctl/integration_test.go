@@ -46,6 +46,17 @@ func (b *backend) Install(_ context.Context, tx pkgregistry.InstallTransaction) 
 	return e, nil
 }
 
+func (b *backend) Inspect(_ context.Context, stagingDir string) (pkgregistry.InspectResult, error) {
+	if _, err := os.Stat(filepath.Join(stagingDir, "bin", "app")); err != nil {
+		return pkgregistry.InspectResult{}, err
+	}
+	return pkgregistry.InspectResult{
+		PackageID:   "com.example.demo",
+		Version:     "1.0.0",
+		VersionCode: 100,
+	}, nil
+}
+
 func (b *backend) Uninstall(_ context.Context, pkgID string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

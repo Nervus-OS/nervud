@@ -16,6 +16,8 @@ import (
 	"path"
 	"path/filepath"
 
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+
 	"github.com/nervus-os/nervud/internal/adminwire"
 	"github.com/nervus-os/nervud/internal/permission"
 	"github.com/nervus-os/nervud/internal/pkgregistry"
@@ -26,6 +28,8 @@ func (s *Server) dispatch(ctx context.Context, req adminwire.Request) adminwire.
 	switch req.Cmd {
 	case adminwire.CmdBeginStaging:
 		return s.handleBeginStaging()
+	case adminwire.CmdInspect:
+		return s.handleInspect(ctx, req)
 	case adminwire.CmdInstall:
 		return s.handleInstall(ctx, req)
 	case adminwire.CmdUninstall:
@@ -77,6 +81,54 @@ func (s *Server) handleBeginStaging() adminwire.Response {
 
 	s.audit("admin.BeginStaging", dir, false, nil, "")
 	return adminwire.Response{OK: true, Code: adminwire.CodeOK, StagingDir: dir}
+}
+
+// handleInspect 校验 staging 路径后触发 pkgregistry.Inspect: 解析并验签, 返回
+// 该包申请的 USER_CONSENT 权限清单. 只读, 不改任何状态.
+//
+// # 失败时【不清理】staging
+//
+// 与 handleInstall 相反. 理由是这条路的调用方是确认屏, 它的正常流程是
+// inspect -> 给用户看 -> install, 两次指向同一个 staging 目录:
+//
+//	成功后清理 → 紧接着的 install 找不到目录, 装包必然失败
+//	失败后清理 → 确认屏无法就同一棵树重试 inspect (解析瞬时失败, 或 devmode
+//	             刚被打开), 而重新走一遍 begin-staging + 解包代价不小
+//
+// 孤儿 staging 由 handleBeginStaging 的 sweepStaleStaging 回收, 不需要这里兜.
+func (s *Server) handleInspect(ctx context.Context, req adminwire.Request) adminwire.Response {
+	staging, err := s.validateStagingChild(req.StagingDir)
+	if err != nil {
+		s.audit("admin.Inspect", req.StagingDir, true, err, "staging path rejected")
+		return badRequest("%v", err)
+	}
+
+	result, err := s.pkgs.Inspect(ctx, staging)
+	if err != nil {
+		s.audit("admin.Inspect", staging, true, err, "inspect")
+		return failed("inspect: %v", err)
+	}
+
+	info := adminwire.InspectInfo{
+		ID:          result.PackageID,
+		Version:     result.Version,
+		VersionCode: result.VersionCode,
+	}
+	for _, p := range result.ConsentPermissions {
+		info.ConsentPermissions = append(info.ConsentPermissions, adminwire.ConsentPermissionInfo{
+			ID:              p.ID,
+			DisplayNameZhCN: p.DisplayNameZhCN,
+			DisplayNameEN:   p.DisplayNameEN,
+			DescriptionZhCN: p.DescriptionZhCN,
+			DescriptionEN:   p.DescriptionEN,
+			RiskClass:       riskClassToWire(p.RiskClass),
+		})
+	}
+
+	s.audit("admin.Inspect", result.PackageID, false, nil,
+		fmt.Sprintf("version=%s consent_permissions=%d",
+			result.Version, len(result.ConsentPermissions)))
+	return adminwire.Response{OK: true, Code: adminwire.CodeOK, Inspect: &info}
 }
 
 // handleInstall 校验 staging 路径后触发 pkgregistry.Install. nervud 自己从 staging
@@ -255,6 +307,27 @@ func grantStateFromWire(s string) (permission.GrantState, bool) {
 		return permission.GrantStateDeniedPermanent, true
 	default:
 		return 0, false
+	}
+}
+
+// riskClassToWire 把 RiskClass 映射为 adminwire 的字符串表示.
+//
+// adminwire 是叶子包, 不 import ipcv1 (与 GrantState 同一理由), 因此映射在这一层.
+//
+// 未知值映射为 UNSPECIFIED 而不是原样透出数字: 确认屏拿到一个不认识的等级时,
+// 该按"最不确定"处理 (不做降级展示), 而不是显示一个它无从解释的编号.
+func riskClassToWire(rc ipcv1.RiskClass) string {
+	switch rc {
+	case ipcv1.RiskClass_RISK_CLASS_NORMAL:
+		return adminwire.RiskClassNormal
+	case ipcv1.RiskClass_RISK_CLASS_PRIVACY_SENSITIVE:
+		return adminwire.RiskClassPrivacySensitive
+	case ipcv1.RiskClass_RISK_CLASS_PHYSICAL_CONTROL:
+		return adminwire.RiskClassPhysicalControl
+	case ipcv1.RiskClass_RISK_CLASS_CRITICAL_SAFETY:
+		return adminwire.RiskClassCriticalSafety
+	default:
+		return adminwire.RiskClassUnspecified
 	}
 }
 

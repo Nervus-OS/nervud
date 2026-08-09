@@ -63,6 +63,13 @@ type PackageService interface {
 	Install(ctx context.Context, tx pkgregistry.InstallTransaction) (pkgregistry.Entry, error)
 	Uninstall(ctx context.Context, pkgID string) error
 	SetComponentEnabled(ctx context.Context, pkgID, compID string, enabled bool) error
+	// Inspect 只读检视一个 staging 里的包: 解析 + 验签 + 算出它申请的
+	// USER_CONSENT 权限清单, 不写任何状态.
+	//
+	// 确认屏靠它在【装之前】知道该问用户什么. 没有它, 唯一的替代是让确认屏
+	// 自己解包读 manifest —— 把验签之前的不受信解析放进持有
+	// perm.permission.admin 的进程里.
+	Inspect(ctx context.Context, stagingDir string) (pkgregistry.InspectResult, error)
 }
 
 // PackageLister 是对 pkgregistry.Registry 的窄接口依赖: 列出全部已装 Package

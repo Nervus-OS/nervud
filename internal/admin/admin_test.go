@@ -23,6 +23,17 @@ type fakePkgService struct {
 	uninstErr  error
 	setEnabled []string // "pkg/comp=enabled"
 	setEnabErr error
+	inspectDir []string
+	inspectErr error
+	inspectOut pkgregistry.InspectResult
+}
+
+func (f *fakePkgService) Inspect(_ context.Context, stagingDir string) (pkgregistry.InspectResult, error) {
+	f.inspectDir = append(f.inspectDir, stagingDir)
+	if f.inspectErr != nil {
+		return pkgregistry.InspectResult{}, f.inspectErr
+	}
+	return f.inspectOut, nil
 }
 
 func (f *fakePkgService) Install(_ context.Context, tx pkgregistry.InstallTransaction) (pkgregistry.Entry, error) {

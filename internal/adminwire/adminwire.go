@@ -47,6 +47,16 @@ const (
 	CmdSetEnabled = "set-enabled"
 	// CmdSetPermission 设置一个运行期 (GrantUser) 权限的授予状态 (grant/revoke).
 	CmdSetPermission = "set-permission"
+	// CmdInspect 只解析一个已 staging 目录, 回报它申请的 USER_CONSENT 权限,
+	// 【不安装, 不改任何状态】.
+	//
+	// 安装确认屏用它: 用户必须在装之前看到这个包要什么权限, 而待装的包还不在
+	// Catalog 里, 没有任何已有命令能查到.
+	//
+	// 与 CmdInstall 共用同一个 staging 目录: 确认屏先 inspect 再 install, 两次
+	// 指的必须是同一棵树. 各自 staging 一次的话, 中间就出现一个"看的是 A,
+	// 装的是 B"的缝 - 而用户看到的权限清单来自 A.
+	CmdInspect = "inspect"
 )
 
 // 授予状态的 wire 表示. 与 permission.GrantState 一一对应, 但本包不 import
@@ -56,6 +66,20 @@ const (
 	GrantStateGranted         = "granted"
 	GrantStateDenied          = "denied"
 	GrantStateDeniedPermanent = "denied-permanent"
+)
+
+// 风险等级的 wire 表示. 与 ipcv1.RiskClass 一一对应, 但本包不 import ipcv1
+// (保持叶子包), 映射由服务端完成 - 与 GrantState 同一形态.
+//
+// 用字符串而不是数字: 这条通道的另一端是 pkgmanagerd 手抄的一份结构体, 而
+// JSON 里一个裸数字改了枚举顺序就会静默变成另一档风险. 字符串写岔会得到一个
+// 空值, 界面按"未知风险"处理, 不会把 CRITICAL_SAFETY 显示成 NORMAL.
+const (
+	RiskClassUnspecified      = ""
+	RiskClassNormal           = "normal"
+	RiskClassPrivacySensitive = "privacy-sensitive"
+	RiskClassPhysicalControl  = "physical-control"
+	RiskClassCriticalSafety   = "critical-safety"
 )
 
 // 机器可读的结果码. CLI 据此决定退出码/措辞; Message 只作人类可读补充.
@@ -94,6 +118,38 @@ type Response struct {
 	StagingDir string        `json:"staging_dir,omitempty"` // begin-staging 的产物
 	Package    *PackageInfo  `json:"package,omitempty"`     // install 的产物
 	Packages   []PackageInfo `json:"packages,omitempty"`    // list 的产物
+	Inspect    *InspectInfo  `json:"inspect,omitempty"`     // inspect 的产物
+}
+
+// InspectInfo 是一次只读检视的结果 (inspect 的产物).
+//
+// 与 PackageInfo 刻意分开: 那份描述的是【已装】包的状态 (trust, source, 已授予
+// 权限), 而这份描述的是一个【尚未安装】的候选包 —— 它还没有 trust 裁决结果,
+// 也还没有任何已授予权限. 复用同一个类型会让两种含义不同的空字段混在一起.
+type InspectInfo struct {
+	ID          string `json:"id"`
+	Version     string `json:"version"`
+	VersionCode uint64 `json:"version_code"`
+
+	// ConsentPermissions 是本包申请的, 需要用户点头的敏感权限.
+	// 已由 nervud 按 Catalog 定义过滤成 USER_CONSENT 那一档.
+	ConsentPermissions []ConsentPermissionInfo `json:"consent_permissions,omitempty"`
+}
+
+// ConsentPermissionInfo 是确认屏要展示的一条待同意权限.
+//
+// 文案由内核从 Catalog 的权限定义里取出, 而不是由界面写死: 第三方包可以定义
+// 自己的权限, 界面不可能预先知道它们的名称与说明.
+//
+// RiskClass 用 wire 上的字符串而不是数字: 本包是叶子包, 不 import ipcv1
+// (与 GrantState 同一理由), 映射由服务端完成.
+type ConsentPermissionInfo struct {
+	ID              string `json:"id"`
+	DisplayNameZhCN string `json:"display_name_zh_cn,omitempty"`
+	DisplayNameEN   string `json:"display_name_en,omitempty"`
+	DescriptionZhCN string `json:"description_zh_cn,omitempty"`
+	DescriptionEN   string `json:"description_en,omitempty"`
+	RiskClass       string `json:"risk_class,omitempty"`
 }
 
 // PackageInfo 是一个已装 Package 的对外投影 (install 结果 / list 项).
