@@ -22,6 +22,8 @@ package pkgregistry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -71,6 +73,29 @@ type InspectResult struct {
 	//
 	// 按权限 ID 排序, 让确认屏的条目顺序稳定 (同一个包每次看到的顺序一样).
 	ConsentPermissions []ConsentPermission
+
+	// ManifestDigest 是 sha256(manifest 原始字节) 的十六进制串, 用来把这次
+	// Inspect 的结果与随后那次 Install 绑在同一份内容上.
+	//
+	// # 它关的是哪个缝
+	//
+	// .nspkg 放在跨包共享的 user-data 里 (见 pkgmanagerd 的 handoffRoot),
+	// 因此调用方在 Inspect 与 Install 【之间】完全可以把文件换掉: 用户在确认屏
+	// 上看到的权限清单来自 A, 真正装进去的是 B. 两次调用各自都是合法的, 没有
+	// 任何一步能单独发现这件事 —— 只有把两次绑起来才能.
+	//
+	// 用法: 确认屏把本字段原样回传给 Install, 内核比对不符即拒。
+	//
+	// # 为什么 manifest 的摘要就够, 不用遍历整棵树
+	//
+	// manifest 里含【全部文件的 digests】, 而 manifest 本身被签名覆盖. 因此
+	// "manifest 字节相同" 蕴含 "所有文件的期望摘要相同", 而文件内容与那些摘要
+	// 是否一致由 Install 的 VerifyDigests 复核. 换掉任何一个文件都要么让
+	// VerifyDigests 失败, 要么需要改 manifest —— 而那会改变本摘要.
+	//
+	// 所以这里不需要再遍历一次文件树: 那是 Install 已经做的事, 在 Inspect 里
+	// 重做一遍只为了算个标识, 会让"看一眼要什么权限"多花几秒.
+	ManifestDigest string
 }
 
 // Inspect 解析并验签 staging 里的包, 返回它申请的 USER_CONSENT 权限清单.
@@ -152,6 +177,10 @@ func (m *Module) Inspect(ctx context.Context, stagingDir string) (InspectResult,
 		PackageID:   manifest.PackageID,
 		Version:     manifest.Version,
 		VersionCode: manifest.VersionCode,
+		// 对【验签覆盖的那份原始字节】算摘要, 而不是对 ParseManifest 之后的
+		// 结构体重新序列化: 后者会把 manifest 里我们不认识的字段丢掉, 于是两个
+		// 内容不同的包可能算出同一个摘要 —— 那正是本字段要防的事.
+		ManifestDigest: hex.EncodeToString(sha256Sum(manifestBytes)),
 	}
 	for _, permissionID := range manifest.Permissions {
 		definition, ok := snapshot.Permission(permissionID)
@@ -198,3 +227,15 @@ func consentPermission(d catalog.PermissionDefinition) ConsentPermission {
 		RiskClass:       d.RiskClass,
 	}
 }
+
+// sha256Sum 是 sha256.Sum256 的切片形式, 省掉调用点的 [:] 转换.
+func sha256Sum(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
+}
+
+// ErrManifestDigestMismatch 装的内容与用户确认时看到的不是同一份.
+//
+// 只在 InstallTransaction.ExpectedManifestDigest 非空时可能出现. 它不是"包坏了"
+// —— 签名与 digest 都可能完全有效, 只是这份包不是确认屏摊给用户看的那一份.
+var ErrManifestDigestMismatch = errors.New("pkgregistry: manifest digest does not match the confirmed package")

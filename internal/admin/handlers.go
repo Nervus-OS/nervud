@@ -113,6 +113,8 @@ func (s *Server) handleInspect(ctx context.Context, req adminwire.Request) admin
 		ID:          result.PackageID,
 		Version:     result.Version,
 		VersionCode: result.VersionCode,
+		// 必须带出去: 确认屏要靠它把 install 绑回这次看到的内容
+		ManifestDigest: result.ManifestDigest,
 	}
 	for _, p := range result.ConsentPermissions {
 		info.ConsentPermissions = append(info.ConsentPermissions, adminwire.ConsentPermissionInfo{
@@ -161,7 +163,8 @@ func (s *Server) handleInstall(ctx context.Context, req adminwire.Request) admin
 		Source:        pkgregistry.SourceDynamicInstall,
 		// 确认屏采集到的同意原样透传. 本层不做裁剪 - 裁剪归 Install,
 		// 它手上才有安装期授予集合与权限定义
-		ConsentedPermissions: req.ConsentedPermissions,
+		ConsentedPermissions:   req.ConsentedPermissions,
+		ExpectedManifestDigest: req.ExpectedManifestDigest,
 	})
 	if err != nil {
 		// Install 失败时 staging 目录未被 renameat2 消费 (成功才会被移走), 补偿删除

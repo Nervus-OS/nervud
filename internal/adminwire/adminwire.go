@@ -108,6 +108,15 @@ type Request struct {
 	// 的交集 (见 pkgregistry.Module.applyInstallConsent), 因此这个字段夸大无害.
 	// 省略即"没有任何权限被同意", 装包照常进行
 	ConsentedPermissions []string `json:"consented_permissions,omitempty"`
+
+	// ExpectedManifestDigest 随 install 携带: 确认屏那次 inspect 回的摘要.
+	//
+	// 把"用户看过的那一份"与"现在要装的这一份"绑在一起. .nspkg 放在跨包共享的
+	// user-data 里, 调用方在 inspect 与 install 之间能把文件换掉 -- 两次调用
+	// 各自都合法, 只有绑起来才发现得了.
+	//
+	// 空 = 不校验: 装机脚本与 deploy 从来没有 inspect 那一步.
+	ExpectedManifestDigest string `json:"expected_manifest_digest,omitempty"`
 }
 
 // Response 是 nervud -> CLI 的结果. OK=false 时 Code/Message 说明原因.
@@ -130,6 +139,10 @@ type InspectInfo struct {
 	ID          string `json:"id"`
 	Version     string `json:"version"`
 	VersionCode uint64 `json:"version_code"`
+
+	// ManifestDigest 是这次检视到的内容的摘要. 确认屏必须原样带回 install,
+	// 否则用户看到的权限清单与真正装进去的包可能不是同一份.
+	ManifestDigest string `json:"manifest_digest,omitempty"`
 
 	// ConsentPermissions 是本包申请的, 需要用户点头的敏感权限.
 	// 已由 nervud 按 Catalog 定义过滤成 USER_CONSENT 那一档.

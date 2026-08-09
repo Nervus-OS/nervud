@@ -6,6 +6,7 @@ package pkgregistry
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -123,6 +124,20 @@ type InstallTransaction struct {
 	// 为空即"没有任何权限被同意", 装包照常进行 - 那些权限运行期就是拒绝状态,
 	// 用户之后仍可以在设置里补上
 	ConsentedPermissions []string
+
+	// ExpectedManifestDigest 是确认屏那次 Inspect 回的 InspectResult.ManifestDigest,
+	// 原样回传. 不符即拒.
+	//
+	// # 它关的是"看的是 A, 装的是 B"
+	//
+	// .nspkg 放在跨包共享的 user-data 里, 调用方在 Inspect 与 Install 之间能把
+	// 文件换掉. 两次调用各自都合法, 单看任何一次都发现不了 —— 而用户是基于 A 的
+	// 权限清单点的头, 落库的 ConsentedPermissions 却会被用到 B 上.
+	//
+	// 【为空表示不校验】. 必须允许为空: 系统装机脚本与 deploy 直接调 Install,
+	// 从来没有 Inspect 那一步, 强制要求会把它们全部打断. 判断"哪些调用方必须
+	// 带上它"属于策略, 不在本层 —— 本层只保证"带了就一定校验".
+	ExpectedManifestDigest string
 }
 
 // Install 执行 动态安装流程里nervud 独立复核... 直到 Registry 登记的
@@ -161,6 +176,31 @@ func (m *Module) Install(ctx context.Context, tx InstallTransaction) (Entry, err
 	if err := verifyStagingMetadata(tx.StagingDir, tx.ManifestBytes, tx.SigBlock); err != nil {
 		m.auditInstall(ctx, tx, false, err)
 		return Entry{}, err
+	}
+
+	// ---- 确认屏绑定: 装的必须是用户看过的那一份 ----
+	//
+	// 放在 verifyStagingMetadata 之后: 那一步已经保证 tx.ManifestBytes 与 staging
+	// 里落盘的那份逐字节一致, 因此在这里对 tx.ManifestBytes 算摘要就等于对
+	// staging 里那份算. 反过来 (先比摘要) 则挡不住"验签 A, 落盘 B".
+	//
+	// 空 = 不校验, 见 ExpectedManifestDigest 的说明.
+	if tx.ExpectedManifestDigest != "" {
+		actual := hex.EncodeToString(sha256Sum(tx.ManifestBytes))
+		if actual != tx.ExpectedManifestDigest {
+			// 【不要把两个摘要写进给调用方的错误里】. 这条路径的意义是"内容在
+			// 确认之后被换过", 而调用方正是可能换它的那一方 —— 回显摘要等于告诉
+			// 它试探结果. 详情进审计, 给调用方一句结论.
+			err := fmt.Errorf("%w: package content changed after user confirmation", ErrManifestDigestMismatch)
+			m.aud.Record(ctx, audit.Event{
+				Action:  "pkgregistry.Install.ManifestDigestMismatch",
+				Subject: manifest.PackageID,
+				Denied:  true,
+				Detail:  fmt.Sprintf("expected=%s actual=%s", tx.ExpectedManifestDigest, actual),
+			})
+			m.auditInstall(ctx, tx, false, err)
+			return Entry{}, err
+		}
 	}
 
 	// 修复: 动态安装不得占用系统镜像包的 package_id. 否则可覆盖系统 Entry,

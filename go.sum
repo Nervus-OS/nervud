@@ -6,6 +6,8 @@ github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi
 github.com/klauspost/compress v1.19.2/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/nervus-os/nervus-ipc v0.0.0-20260809162314-5c1d32c28b2f h1:YLkWI+ki8Z4qtL3Omb62sTyxUuBn/PAecCB8hSddc38=
 github.com/nervus-os/nervus-ipc v0.0.0-20260809162314-5c1d32c28b2f/go.mod h1:N/COXrxqEnI3ydxcGPZdEapC4HQyLumIn/T830KUqis=
+github.com/nervus-os/nervus-ipc v0.0.0-20260809195120-01df3374f82f h1:/3yeoyv/3QfXufB+od43oJolkHG17NknstkU8uzbUO4=
+github.com/nervus-os/nervus-ipc v0.0.0-20260809195120-01df3374f82f/go.mod h1:N/COXrxqEnI3ydxcGPZdEapC4HQyLumIn/T830KUqis=
 golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
 golang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=

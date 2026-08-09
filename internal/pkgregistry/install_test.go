@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -826,5 +827,97 @@ func TestProvisionAll_OneFailureDoesNotBlockOthers(t *testing.T) {
 
 	if len(auth.appUsers) != 2 {
 		t.Fatalf("unexpected package registry result; value = %d", len(auth.appUsers))
+	}
+}
+
+// TestInstall_RejectsContentChangedAfterConfirmation 钉住确认屏绑定.
+//
+// .nspkg 放在跨包共享的 user-data 里, 调用方在 Inspect 与 Install 之间能把文件
+// 换掉. 两次调用各自都合法, 单看任何一次都发现不了 —— 而用户是基于 A 的权限
+// 清单点的头, ConsentedPermissions 却会被用到 B 上.
+func TestInstall_RejectsContentChangedAfterConfirmation(t *testing.T) {
+	mod, auth, idReg, _ := newTestInstaller(t)
+	root := t.TempDir()
+	staging, manifestBytes, sig := newValidStaging(t, root, "com.example.app", "1.0.0")
+
+	_, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes, SigBlock: sig, StagingDir: staging,
+		Source: SourceDynamicInstall,
+		// 用户确认时看到的是另一份内容
+		ExpectedManifestDigest: "0000000000000000000000000000000000000000000000000000000000000000",
+	})
+	if !errors.Is(err, ErrManifestDigestMismatch) {
+		t.Fatalf("err = %v, want ErrManifestDigestMismatch", err)
+	}
+	// 必须在动任何状态【之前】拒掉
+	if len(auth.installed) != 0 || len(auth.dataDirs) != 0 {
+		t.Fatalf("Authority 不该被调用: installed=%d dataDirs=%d", len(auth.installed), len(auth.dataDirs))
+	}
+	if len(idReg.replaced) != 0 {
+		t.Fatal("identity 不该被更新")
+	}
+	if mod.registry.Len() != 0 {
+		t.Fatal("Registry 不该被更新")
+	}
+}
+
+// TestInstall_AcceptsMatchingDigest: Inspect 回的摘要原样带回来时照常安装.
+//
+// 与上一条合起来才说明这道门是「按内容判定」而不是「凡带摘要就拒」。
+func TestInstall_AcceptsMatchingDigest(t *testing.T) {
+	mod, _, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	staging, manifestBytes, sig := newValidStaging(t, root, "com.example.app", "1.0.0")
+
+	digest := hex.EncodeToString(sha256Sum(manifestBytes))
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes, SigBlock: sig, StagingDir: staging,
+		Source:                 SourceDynamicInstall,
+		ExpectedManifestDigest: digest,
+	}); err != nil {
+		t.Fatalf("摘要相符仍被拒: %v", err)
+	}
+	if mod.registry.Len() != 1 {
+		t.Fatalf("Registry 条目数 = %d, want 1", mod.registry.Len())
+	}
+}
+
+// TestInstall_EmptyDigestSkipsBinding: 空 = 不校验.
+//
+// 【必须保持这个语义】: 系统装机脚本与 deploy 直接调 Install, 从来没有 Inspect
+// 那一步. 若空也要校验, 它们会全部被打断 —— 而那是装机流程, 症状是刷完机一个
+// 包都没装上.
+func TestInstall_EmptyDigestSkipsBinding(t *testing.T) {
+	mod, _, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	staging, manifestBytes, sig := newValidStaging(t, root, "com.example.app", "1.0.0")
+
+	if _, err := mod.Install(context.Background(), InstallTransaction{
+		ManifestBytes: manifestBytes, SigBlock: sig, StagingDir: staging,
+		Source: SourceDynamicInstall,
+		// ExpectedManifestDigest 留空
+	}); err != nil {
+		t.Fatalf("空摘要应跳过校验, 却失败了: %v", err)
+	}
+}
+
+// TestInspect_DigestMatchesInstallExpectation 钉住两侧算的是同一个值.
+//
+// Inspect 与 Install 各自算一次摘要. 两处若用了不同的输入 (比如一边对原始字节,
+// 另一边对重新序列化的结构体), 每一次带摘要的安装都会失败 —— 而那是个只在
+// 「确认屏走完整流程」时才暴露的故障, 单测两侧都看不出来.
+func TestInspect_DigestMatchesInstallExpectation(t *testing.T) {
+	mod, _, _, _ := newTestInstaller(t)
+	root := t.TempDir()
+	staging, manifestBytes, _ := newValidStaging(t, root, "com.example.app", "1.0.0")
+
+	got, err := mod.Inspect(context.Background(), staging)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	want := hex.EncodeToString(sha256Sum(manifestBytes))
+	if got.ManifestDigest != want {
+		t.Fatalf("Inspect 的摘要 = %q, Install 期待 %q —— 两侧算法不一致, "+
+			"每次带摘要的安装都会失败", got.ManifestDigest, want)
 	}
 }
