@@ -174,15 +174,30 @@ func messageHasUnknown(message protoreflect.Message, depth int) bool {
 	}
 	unknown := false
 	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		// 【map 必须最先判, 且判完就 return】.
+		//
+		// protoreflect 里一个 map 字段的 field.Kind() 恒为 MessageKind —— map 在
+		// wire 上就是 repeated 的合成 entry 消息, 与它的值类型无关. 因此把 map
+		// 交给下面任何一个按 field.Kind() 分派的分支, 都会对一个标量值调
+		// value.Message() 并 panic.
+		//
+		// 这正是 nervud 起不来的原因: ProviderDescriptor.resources[].labels 是
+		// map<string,string>, 开机扫描到任何带 labels 的系统包就崩在这里.
+		//
+		// 是否递归只看【值类型】: 值是消息才往下走, 标量 map 没有子消息可查.
+		if field.IsMap() {
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, entry protoreflect.Value) bool {
+					if messageHasUnknown(entry.Message(), depth+1) {
+						unknown = true
+						return false
+					}
+					return true
+				})
+			}
+			return !unknown
+		}
 		switch {
-		case field.IsMap() && field.MapValue().Kind() == protoreflect.MessageKind:
-			value.Map().Range(func(_ protoreflect.MapKey, entry protoreflect.Value) bool {
-				if messageHasUnknown(entry.Message(), depth+1) {
-					unknown = true
-					return false
-				}
-				return true
-			})
 		case field.IsList() && field.Kind() == protoreflect.MessageKind:
 			list := value.List()
 			for i := 0; i < list.Len(); i++ {
