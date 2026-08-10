@@ -21,8 +21,47 @@ const (
 )
 
 // onDemandStartTimeout 限制等待 on-demand 组件启动并 RegisterEndpoint 的时间,
-// 避免一次解析永久占住调用方
-const onDemandStartTimeout = 3 * time.Second
+// 避免一次解析永久占住调用方.
+//
+// # 为什么按 runtime 分档
+//
+// 曾经是统一的 3 秒, 而那对 JVM 组件【远远不够】: 一个带 Compose 窗口的应用要
+// 起 JVM, 载入 Skiko, 建 GL 上下文 (失败还要退回软件渲染), 实测约 20 秒才
+// RegisterEndpoint. 于是 Resolve 在它报到之前就超时, 调用方拿到一个尚未 live 的
+// endpoint, 第一次调用必然 NOT_FOUND —— 而组件其实【启动成功了】, 窗口随后就
+// 出现. 症状因此格外费解: "界面正常打开, 但每次都报错".
+//
+// native 那档保持 3 秒: 一个 Go 服务起来就是毫秒级, 给它 30 秒只会让真正的故障
+// (二进制损坏, 启动即崩) 多卡 27 秒才报出来.
+const (
+	onDemandStartTimeoutNative = 3 * time.Second
+	// 30 秒覆盖冷启动最坏情况 (实测约 20 秒, 留一倍余量给更慢的板子).
+	// 这是【上限而非固定等待】: RegisterEndpoint 一到就立刻唤醒, 正常情况下
+	// 没人会等满.
+	onDemandStartTimeoutJVM = 30 * time.Second
+)
+
+// onDemandStartTimeout 给出该组件的启动等待上限.
+//
+// 查不到组件时取保守的长档: 拿不准而等短了会把一个正在正常启动的组件判成失败,
+// 那个错误方向更糟 —— 它让功能看起来是坏的, 而多等几秒只是慢.
+func (m *Module) onDemandStartTimeout(pkg, comp string) time.Duration {
+	if m == nil || m.pkgs == nil {
+		return onDemandStartTimeoutJVM
+	}
+	entry, ok := m.pkgs.Lookup(pkg)
+	if !ok {
+		return onDemandStartTimeoutJVM
+	}
+	c, ok := entry.Manifest.Component(comp)
+	if !ok {
+		return onDemandStartTimeoutJVM
+	}
+	if c.Runtime == pkgregistry.RuntimeNative {
+		return onDemandStartTimeoutNative
+	}
+	return onDemandStartTimeoutJVM
+}
 
 // 诊断/审计用哨兵错误
 var (
@@ -272,7 +311,9 @@ func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, rejected stri
 	m.pendingStarts[key] = append(m.pendingStarts[key], ch)
 	m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), onDemandStartTimeout)
+	timeout := m.onDemandStartTimeout(pkg, comp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if serr := m.starter.EnsureStarted(ctx, pkg, comp); serr != nil {
@@ -285,7 +326,7 @@ func (m *Module) tryOnDemandStart(pkg, comp string) (started bool, rejected stri
 	select {
 	case <-ch:
 		return true, "", nil
-	case <-time.After(onDemandStartTimeout):
+	case <-time.After(timeout):
 		m.mu.Lock()
 		m.removeWaiterLocked(key, ch)
 		reason := ""

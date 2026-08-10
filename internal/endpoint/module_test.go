@@ -859,3 +859,57 @@ func assertResolveReason(
 		t.Fatalf("resolve reason = %v, want %v", detail.GetReason(), want)
 	}
 }
+
+// TestOnDemandStartTimeout_JVMGetsLongerBudget 钉住按 runtime 分档的启动预算.
+//
+// # 这条测试挡的是"界面正常打开, 但每次调用都报错"
+//
+// 统一 3 秒对 JVM 组件远远不够: 起 JVM + 载入 Skiko + 建 GL 上下文 (失败还要退回
+// 软件渲染) 实测约 20 秒才 RegisterEndpoint. Resolve 在它报到之前就超时, 于是
+// 调用方拿到失败, 而组件【启动成功了】—— 窗口随后就出现. 症状因此极难往回追:
+// 用户看到界面打开了, 却每次都收到一句 NOT_FOUND.
+//
+// native 那档必须保持短: 一个 Go 服务起来是毫秒级, 给它 30 秒只会让真正的故障
+// (二进制损坏, 启动即崩) 多卡 27 秒才报出来.
+func TestOnDemandStartTimeout_JVMGetsLongerBudget(t *testing.T) {
+	jvmEntry := pkgregistry.Entry{Manifest: pkgregistry.Manifest{
+		PackageID: "com.example.ui",
+		Components: []pkgregistry.Component{{
+			ID: "main", Type: pkgregistry.ComponentApp,
+			Runtime: pkgregistry.RuntimeJVM,
+		}},
+	}}
+	nativeEntry := pkgregistry.Entry{Manifest: pkgregistry.Manifest{
+		PackageID: "com.example.svc",
+		Components: []pkgregistry.Component{{
+			ID: "main", Type: pkgregistry.ComponentService,
+			Runtime: pkgregistry.RuntimeNative,
+		}},
+	}}
+	m := &Module{pkgs: newFakePkgs(jvmEntry, nativeEntry)}
+
+	if got := m.onDemandStartTimeout("com.example.ui", "main"); got != onDemandStartTimeoutJVM {
+		t.Errorf("JVM 组件的启动预算 = %v, want %v —— 太短会让第一次调用必然失败",
+			got, onDemandStartTimeoutJVM)
+	}
+	if got := m.onDemandStartTimeout("com.example.svc", "main"); got != onDemandStartTimeoutNative {
+		t.Errorf("native 组件的启动预算 = %v, want %v —— 太长会让真正的启动故障晚报",
+			got, onDemandStartTimeoutNative)
+	}
+}
+
+// TestOnDemandStartTimeout_UnknownFallsBackToLong: 查不到组件时取长档.
+//
+// 拿不准而等短了会把一个正在正常启动的组件判成失败 —— 那个错误方向更糟:
+// 它让功能看起来是坏的, 而多等几秒只是慢.
+func TestOnDemandStartTimeout_UnknownFallsBackToLong(t *testing.T) {
+	m := &Module{pkgs: newFakePkgs()}
+	if got := m.onDemandStartTimeout("com.absent", "main"); got != onDemandStartTimeoutJVM {
+		t.Fatalf("未知组件的启动预算 = %v, want %v (保守取长)", got, onDemandStartTimeoutJVM)
+	}
+	// pkgs 为 nil 时同样不能崩, 也取长档
+	var empty *Module
+	if got := empty.onDemandStartTimeout("x", "y"); got != onDemandStartTimeoutJVM {
+		t.Fatalf("nil Module 的启动预算 = %v, want %v", got, onDemandStartTimeoutJVM)
+	}
+}
