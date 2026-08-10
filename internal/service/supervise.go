@@ -185,10 +185,14 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 		backoff = m.backoffMin
 
 		// 起一个 goroutine 阻塞等退出; 主循环 select 退出/停止/关停
-		exitCh := make(chan error, 1)
+		//
+		// 退出信息【必须带出来】: 区分"应用正常退出"与"崩了"只能靠它. 曾经这里
+		// 丢掉 ExitInfo (写成 `_, werr :=`), 于是 app 用户关掉窗口被记成 crash
+		// 并按崩溃恢复策略重启 —— 症状是"应用关不掉".
+		exitCh := make(chan exitOutcome, 1)
 		go func(handle authority.ProcessHandle) {
-			_, werr := m.auth.WaitProcess(m.ctx, handle)
-			exitCh <- werr
+			info, werr := m.auth.WaitProcess(m.ctx, handle)
+			exitCh <- exitOutcome{info: info, err: werr}
 		}(h)
 
 		select {
@@ -206,7 +210,8 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 			m.drain(exitCh)
 			m.setState(inst, StateStopped)
 			return
-		case werr := <-exitCh:
+		case out := <-exitCh:
+			werr := out.err
 			// 自然退出. 先复核是否其实是预期停止/关停竞态
 			select {
 			case <-inst.stopCh:
@@ -215,6 +220,24 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 			default:
 			}
 			if m.ctx.Err() != nil {
+				m.setState(inst, StateStopped)
+				return
+			}
+			// ---- app 干净退出 = 用户关掉了它, 不是故障 ----
+			//
+			// 【本分支的存在理由】: 下面那句"service 不该自己退出"对 service 成立,
+			// 对 app 不成立 —— 一个有界面的应用被用户关掉窗口就该结束, 那是它正常
+			// 生命周期的终点.
+			//
+			// 不区分的后果是"应用关不掉": 用户点关闭 -> 进程退出 -> 内核记 crash ->
+			// 按崩溃恢复重启 -> 一秒后窗口又回来了. launch_mode=manual 也拦不住,
+			// 因为走的是崩溃恢复而不是按需启动.
+			//
+			// 判据是 systemd 自己的结论 (Result=="success", 即日志里那句
+			// "Deactivated successfully"), 而不是我们猜退出码: 被信号杀死,
+			// OOM, 非零退出都不是 success, 仍然按崩溃处理.
+			if out.info.Result == systemdResultSuccess && inst.Type == pkgregistry.ComponentApp {
+				m.audit(inst, "service.exited", false, nil)
 				m.setState(inst, StateStopped)
 				return
 			}
@@ -246,7 +269,7 @@ func (m *Manager) stopProc(h authority.ProcessHandle) {
 }
 
 // drain 等 exitCh 或关停信号, 避免 WaitProcess goroutine 泄漏也不永久阻塞
-func (m *Manager) drain(exitCh <-chan error) {
+func (m *Manager) drain(exitCh <-chan exitOutcome) {
 	select {
 	case <-exitCh:
 	case <-m.ctx.Done():
@@ -562,4 +585,18 @@ func codeDir(inv *authority.Invariants, e pkgregistry.Entry) string {
 		return filepath.Join(inv.SystemPackageRoot, e.Manifest.PackageID)
 	}
 	return filepath.Join(inv.PackageRoot, e.Manifest.PackageID, e.ActiveVersion)
+}
+
+// systemdResultSuccess 是 systemd 对"干净退出"的说法 (日志里那句
+// "Deactivated successfully"). 只有它算正常结束: signal / oom-kill / exit-code
+// 都是故障, 仍走崩溃恢复.
+const systemdResultSuccess = "success"
+
+// exitOutcome 把 WaitProcess 的两个返回值一起送过 channel.
+//
+// 需要它是因为要靠 ExitInfo.Result 区分"app 被用户关掉"与"进程崩了" —— 只传
+// error 的话两者长得一样 (都是 err == nil 的自然退出).
+type exitOutcome struct {
+	info authority.ExitInfo
+	err  error
 }

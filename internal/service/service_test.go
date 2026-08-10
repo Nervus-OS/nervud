@@ -733,3 +733,107 @@ func TestEnsureStarted_RestartsAfterCircuitBreak(t *testing.T) {
 	}
 	waitFor(t, time.Second, func() bool { return sp.starts(unit) > startsBeforeRetry })
 }
+
+// cleanExit 模拟"进程自己干净退出": systemd 的 Result 是 success
+// (日志里那句 "Deactivated successfully"), 用户关掉窗口走的正是这条.
+func (s *ctrlSpawner) cleanExit(name string) {
+	s.exitCh(name) <- systemd.ExitInfo{ActiveState: "inactive", Result: "success"}
+}
+
+// manualApp 造一个 app 形态, manual 启动的组件 —— 文件管理器/设置那一类.
+func manualApp(id string) pkgregistry.Component {
+	return pkgregistry.Component{
+		ID: id, Type: pkgregistry.ComponentApp,
+		Runtime: pkgregistry.RuntimeJVM, Entry: "lib/main.jar",
+		LaunchMode: pkgregistry.LaunchManual,
+	}
+}
+
+// TestAppCleanExit_NotRestarted 钉住"用户关掉应用之后它就该待着不动".
+//
+// # 这条测试挡的是"应用关不掉"
+//
+// supervisor 原来对任何自然退出都记 service.crash 并按崩溃恢复重启 —— 那句
+// "service 不该自己退出"对 service 成立, 对 app 不成立: 一个有界面的应用被用户
+// 关掉窗口就是正常终点. 不区分的后果是用户点关闭, 一秒后窗口又回来了,
+// 而 launch_mode=manual 拦不住 (走的是崩溃恢复, 不是按需启动).
+func TestAppCleanExit_NotRestarted(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20011, identity.TrustOrdinary, manualApp("main")),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	unit := unitName("com.example.app", "main")
+	// manual 组件不会随 Start 自动起, 手动拉起一次 (等价于用户从桌面点开)
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "main"); err != nil {
+		t.Fatalf("EnsureStarted: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 1 })
+
+	sp.cleanExit(unit)
+
+	// 状态收敛到 Stopped, 且【不再重启】
+	waitFor(t, 2*time.Second, func() bool {
+		inst, ok := m.LookupByUnit(unit)
+		return ok && inst.State == StateStopped
+	})
+	// 给 supervisor 足够时间做错事: 原来的实现会在退避后重启
+	time.Sleep(1500 * time.Millisecond)
+	if got := sp.starts(unit); got != 1 {
+		t.Fatalf("干净退出后被重启了: starts = %d, want 1", got)
+	}
+}
+
+// TestAppCrash_StillRestarts: 修复不能把崩溃恢复弄坏.
+//
+// 一个 app 真的崩了 (非零退出/被信号杀死) 仍要重启 —— 否则用户看到应用无声消失,
+// 而这与"他自己关掉的"是完全不同的两件事.
+func TestAppCrash_StillRestarts(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.app", 20012, identity.TrustOrdinary, manualApp("main")),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	unit := unitName("com.example.app", "main")
+	if err := m.EnsureStarted(context.Background(), "com.example.app", "main"); err != nil {
+		t.Fatalf("EnsureStarted: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 1 })
+
+	sp.crash(unit)
+	waitFor(t, 2*time.Second, func() bool { return sp.starts(unit) >= 2 })
+}
+
+// TestServiceCleanExit_StillRestarts 钉住豁免【只对 app】.
+//
+// 一个 service 自己退出就是故障: 它没有"窗口被关掉"这回事, 退出意味着它不再提供
+// 那个接口, 而调用方还在等它. 把 app 的豁免顺手扩到 service 会让一个静默退出的
+// Provider 永远不回来 —— 比反复重启难查得多.
+func TestServiceCleanExit_StillRestarts(t *testing.T) {
+	sp := newCtrlSpawner()
+	pkgs := &fakePkgs{entries: []pkgregistry.Entry{
+		makeEntry("com.example.svc", 20013, identity.TrustOrdinary,
+			alwaysOnService("worker", pkgregistry.CriticalityOptional)),
+	}}
+	m := newTestManager(t, sp, pkgs, &fakeSafety{})
+	defer func() { _ = m.Stop(context.Background()) }()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	unit := unitName("com.example.svc", "worker")
+	waitFor(t, time.Second, func() bool { return sp.starts(unit) >= 1 })
+
+	sp.cleanExit(unit)
+	waitFor(t, 2*time.Second, func() bool { return sp.starts(unit) >= 2 })
+}
