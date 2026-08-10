@@ -236,7 +236,7 @@ func (m *Manager) supervise(inst *Instance, e pkgregistry.Entry, c pkgregistry.C
 			// 判据是 systemd 自己的结论 (Result=="success", 即日志里那句
 			// "Deactivated successfully"), 而不是我们猜退出码: 被信号杀死,
 			// OOM, 非零退出都不是 success, 仍然按崩溃处理.
-			if out.info.Result == systemdResultSuccess && inst.Type == pkgregistry.ComponentApp {
+			if inst.Type == pkgregistry.ComponentApp && cleanExit(out.info) {
 				m.audit(inst, "service.exited", false, nil)
 				m.setState(inst, StateStopped)
 				return
@@ -588,9 +588,32 @@ func codeDir(inv *authority.Invariants, e pkgregistry.Entry) string {
 }
 
 // systemdResultSuccess 是 systemd 对"干净退出"的说法 (日志里那句
-// "Deactivated successfully"). 只有它算正常结束: signal / oom-kill / exit-code
-// 都是故障, 仍走崩溃恢复.
+// "Deactivated successfully").
 const systemdResultSuccess = "success"
+
+// cleanExit 判断一次退出是不是"进程自己正常结束".
+//
+// # 为什么不能只看 Result
+//
+// 瞬态 unit 退出后 systemd 会回收它, 于是 WaitUnit 很可能在"unit 已消失"那条
+// 路径上返回 —— 那里【没有】Result 可读 (只有上一次轮询留下的快照, 而轮询有
+// 间隔, 可能整个终态都没被看见). 只认 Result=="success" 的话这条路径永远判成
+// 崩溃, 症状就是应用关不掉.
+//
+// 因此两条都算干净退出:
+//
+//	Result == "success"                     systemd 明确说成功
+//	Result == "" 且 ExitStatus == 0         unit 已消失, 没有非零退出码的痕迹
+//
+// 反过来, 任何非零 ExitStatus 或明确的失败 Result (exit-code / signal /
+// oom-kill / timeout) 都是崩溃 —— fail closed: 拿不准时按崩溃处理, 因为漏判
+// 崩溃意味着一个应用无声消失再也不回来, 比多重启一次糟得多.
+func cleanExit(info authority.ExitInfo) bool {
+	if info.ExitStatus != 0 {
+		return false
+	}
+	return info.Result == systemdResultSuccess || info.Result == ""
+}
 
 // exitOutcome 把 WaitProcess 的两个返回值一起送过 channel.
 //

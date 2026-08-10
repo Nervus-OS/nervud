@@ -161,7 +161,16 @@ func (c *Conn) WaitUnit(ctx context.Context, name string) (ExitInfo, error) {
 	var last ExitInfo
 	err := c.pollUntil(ctx, name, waitPollInterval, func(info ExitInfo, exists bool) (bool, error) {
 		if !exists {
-			last = ExitInfo{ActiveState: "inactive"}
+			// unit 已消失 (瞬态 unit 退出后 systemd 会回收它).
+			//
+			// 【保留上一次读到的信息】而不是覆盖成一个空 ExitInfo: 那份快照里有
+			// Result 与 ExecMainStatus, 是判断"干净退出还是崩了"的唯一依据.
+			// 覆盖掉的话调用方只知道"它不在了", 于是被用户关掉的应用与崩溃的应用
+			// 长得一模一样 —— 这正是 app 关不掉的原因 (内核把前者也按崩溃重启).
+			//
+			// 第一次就不存在 (last 为零值) 时保持原样: 那种情况下确实没有任何
+			// 退出信息可言.
+			last.ActiveState = "inactive"
 			return true, nil
 		}
 		last = info
