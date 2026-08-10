@@ -18,11 +18,13 @@ func (m *Module) Route(
 	methodID uint32,
 ) (RouteInfo, RouteError) {
 	if m == nil {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "endpoint module is nil"}
 	}
 	snapshot := m.snapshot()
 	if snapshot == nil {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION}
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_FAILED_PRECONDITION, Reason: "catalog snapshot unavailable"}
 	}
 
 	m.mu.Lock()
@@ -30,24 +32,49 @@ func (m *Module) Route(
 
 	cs, ok := m.byConn[conn]
 	if !ok {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "caller connection has no endpoint state"}
 	}
 	b, ok := cs.bindings[endpointID]
-	if !ok || b.target == nil || !b.target.live ||
-		b.targetGeneration != b.target.generation {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+	if !ok {
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "endpoint_id not bound on this connection"}
+	}
+	if b.target == nil || !b.target.live {
+		// Provider 的注册已失效 (进程退出/连接断开), 而调用方还拿着上一次 Resolve
+		// 的 endpoint_id. 对 on-demand 组件, 它空闲退出后必然如此.
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "provider registration is no longer live"}
+	}
+	if b.targetGeneration != b.target.generation {
+		// Provider 重启过: 同一三元组又注册一次, 世代号递增. 旧 binding 必须失效,
+		// 否则调用会打到新进程上而调用方以为还是旧的.
+		return RouteInfo{}, RouteError{
+			Code:   ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+			Reason: "provider restarted (registration generation moved)"}
 	}
 	def, provider, valid := registrationInSnapshot(snapshot, b.target)
-	if !valid ||
-		def.DefinitionGeneration != b.definitionGeneration ||
-		provider.DefinitionGeneration != b.providerGeneration ||
-		b.interfaceID != b.target.interfaceID ||
+	if !valid {
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "provider registration not in current catalog"}
+	}
+	if def.DefinitionGeneration != b.definitionGeneration ||
+		provider.DefinitionGeneration != b.providerGeneration {
+		// Catalog 换了一版 (装/卸包会重建它), 绑定时的定义世代与现在不一致.
+		return RouteInfo{}, RouteError{
+			Code:   ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+			Reason: "catalog definition generation moved since bind"}
+	}
+	if b.interfaceID != b.target.interfaceID ||
 		b.interfaceMajor != b.target.ifaceMajor {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+		return RouteInfo{}, RouteError{
+			Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "binding interface does not match registration"}
 	}
 	if b.resourceHandle == "" {
 		if b.resourceGeneration != 0 || len(def.CompatibleResourceTypes) != 0 {
-			return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+			return RouteInfo{}, RouteError{
+				Code:   ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+				Reason: "interface needs a resource but binding has none"}
 		}
 	} else {
 		resource, exists := snapshot.ResourceByHandle(b.resourceHandle)
@@ -55,24 +82,37 @@ func (m *Module) Route(
 			resource.DefinitionGeneration != b.resourceGeneration ||
 			!compatibleResource(def, resource.ResourceType) ||
 			b.target.resourceHandle != b.resourceHandle {
-			return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+			return RouteInfo{}, RouteError{
+				Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND, Reason: "bound resource is gone or incompatible"}
 		}
 	}
 
 	if !m.allowedAt(snapshot, b.callerPackageID, def.RequiredPermission) {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED}
+		return RouteInfo{}, RouteError{
+			Code:   ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+			Reason: "caller lacks interface permission " + def.RequiredPermission}
 	}
 
 	method, ok := snapshot.ProviderMethod(
 		b.target.packageID, b.interfaceID, b.interfaceMajor, methodID)
-	if !ok || method.Meta == nil ||
-		method.DefinitionGeneration != b.definitionGeneration ||
+	if !ok || method.Meta == nil {
+		// 该 Provider 的这个接口里没有这个 method_id: 调用方写错编号, 或
+		// Provider 的 schema 与 Catalog 里的不是同一版.
+		return RouteInfo{}, RouteError{
+			Code:   ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+			Reason: "method_id not declared by this provider's interface"}
+	}
+	if method.DefinitionGeneration != b.definitionGeneration ||
 		method.ProviderGeneration != b.providerGeneration {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_NOT_FOUND}
+		return RouteInfo{}, RouteError{
+			Code:   ipcv1.StatusCode_STATUS_CODE_NOT_FOUND,
+			Reason: "method generation moved since bind"}
 	}
 	methodPermission := method.Meta.GetRequiredPermission()
 	if !m.allowedAt(snapshot, b.callerPackageID, methodPermission) {
-		return RouteInfo{}, RouteError{Code: ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED}
+		return RouteInfo{}, RouteError{
+			Code:   ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+			Reason: "caller lacks method permission " + methodPermission}
 	}
 	requiredPermissions := uniquePermissions(def.RequiredPermission, methodPermission)
 

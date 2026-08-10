@@ -634,6 +634,20 @@ func (co *conn) handleRequest(req *ipcv1.Request) bool {
 	dispatchEpoch := co.s.dispatch.snapshotEpoch()
 	route, rerr := co.s.endpoints.Route(co, req.GetEndpointId(), req.GetMethodId())
 	if rerr.Code != ipcv1.StatusCode_STATUS_CODE_UNSPECIFIED {
+		// 【必须记下来】: Route 的近十条失败路径在 wire 上全是同一个
+		// STATUS_CODE_NOT_FOUND, 调用方看到的那句话不指向任何具体原因. 不记的话
+		// 一次"调用失败"在内核侧【完全没有痕迹】—— 只能靠读代码猜是哪一条,
+		// 而猜错的代价是一整轮编译-刷机-复现.
+		//
+		// 走 log 而不是 audit: 它不是安全裁决 (真正的拒绝在 allowedAt 那两条,
+		// 它们本来就记审计), 而是诊断信息, 频率也可能很高.
+		co.log.Warn("ipc: route failed",
+			"pkg", co.caller.PackageID,
+			"comp", co.caller.ComponentID,
+			"endpoint_id", req.GetEndpointId(),
+			"method_id", req.GetMethodId(),
+			"code", rerr.Code.String(),
+			"reason", rerr.Reason)
 		return co.enqueue(responseEnvelope(failureResponse(req.GetRequestId(), rerr.Code)))
 	}
 	if err := protocheck.GateSupport(route.Method.Meta, co.s.operations != nil); err != nil {
