@@ -60,6 +60,19 @@ type RouteInfo struct {
 // 判空, 照抄 ipcv1.Failure 系列对 zero code 的既有处理约定
 type RouteError struct {
 	Code ipcv1.StatusCode
+	// Reason 是给【内核日志】的短语, 说明这次失败具体卡在哪一步.
+	//
+	// # 为什么必须有它
+	//
+	// Route 有近十处返回 NOT_FOUND (连接不认识, binding 不存在, 目标不 live,
+	// 世代漂移, 资源不符, 方法不在 Catalog...), 而它们在 wire 上【长得一模一样】:
+	// 调用方只看到一句 STATUS_CODE_NOT_FOUND. 此前 Route 又完全不记日志, 于是
+	// "调用失败了"这件事没有任何线索指向真正的原因 —— 只能读代码猜, 而猜错的
+	// 代价是一整轮编译-刷机-复现.
+	//
+	// 【不进 wire】: 只写内核日志. 这些短语描述的是内核内部状态 (世代号, binding
+	// 表), 回给调用方既没有可操作性, 又泄露实现细节.
+	Reason string
 }
 
 // componentKey 唯一标识一个组件实例, 供 on-demand 拉起等待队列使用
