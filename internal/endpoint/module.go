@@ -236,7 +236,7 @@ func (m *Module) manifestOnDemandCandidates(
 	out := make(map[componentKey]struct{})
 	for _, e := range m.pkgs.List() {
 		for _, c := range e.Manifest.Components {
-			if e.ComponentDisabled(c.ID) || c.Type != pkgregistry.ComponentService {
+			if e.ComponentDisabled(c.ID) || !c.Type.CanProvideInterfaces() {
 				continue
 			}
 			for _, exp := range c.Exports {

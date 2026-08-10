@@ -55,8 +55,11 @@ func (m *Module) RegisterEndpoint(conn ConnHandle, caller identity.Caller, req *
 	if entry.ComponentDisabled(caller.ComponentID) {
 		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "component disabled")
 	}
-	if comp.Type != pkgregistry.ComponentService {
-		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED, "only service components may register endpoints")
+	// app 也可以: 带界面的组件要能被别的包按接口唤起 (权限确认屏被设置唤起并回
+	// 一个答复). 授权判据一条没动 —— 见 ComponentType.CanProvideInterfaces.
+	if !comp.Type.CanProvideInterfaces() {
+		return fail(ipcv1.StatusCode_STATUS_CODE_PERMISSION_DENIED,
+			"this component type may not register endpoints")
 	}
 
 	var (

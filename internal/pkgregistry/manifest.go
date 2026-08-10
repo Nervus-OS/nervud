@@ -156,6 +156,36 @@ const (
 	ComponentService ComponentType = "service"
 )
 
+// CanProvideInterfaces 说明这种组件形态可不可以导出接口 (注册 endpoint,
+// 应答 Dispatch, 登记事件作用域, 上报事件).
+//
+// # 为什么 app 也可以
+//
+// 曾经只有 service 可以, 而那让"有界面且能被别的包按接口唤起的组件"无法存在:
+//
+//	app 是唯一能拿到 X11 的形态 (内核只为 app 绑 /tmp/.X11-unix 并注入
+//	DISPLAY, 见 service/supervise.go) —— 于是任何带窗口的组件都必须是 app;
+//	而注册 endpoint 曾要求 service —— 于是它又不能被按接口唤起.
+//
+// 两条约束合起来把一整类正当需求判成不可能: 权限确认屏要能被设置唤起并回一个
+// 结果 (用户点了同意还是拒绝), 安装确认屏同理. 这类"唤起一个界面, 等一个答复"
+// 正是 Android 用 Activity + Intent 表达的东西, 那些 Activity 也是有界面的.
+//
+// # 放开之后什么没有变
+//
+// 授权判据【一条都没动】: 仍要 manifest 声明 exports, 仍要 Catalog 认定本组件
+// 是该 interface major 的 Provider, 仍要 perm.service.register(.private),
+// schema hash 仍要与 Catalog 逐字节相等. 变的只是"哪种形态可以走这条路".
+//
+// # 生命周期差异由 EndpointDied 兜住
+//
+// app 的进程比 service 短命 —— 用户可以关掉窗口. 但这不是新问题: service 也会
+// 崩、也会被停用, 内核本来就要在连接断开时撤销该连接的 endpoint 并向调用方发
+// EndpointDied. app 只是让这条路径更常走.
+func (t ComponentType) CanProvideInterfaces() bool {
+	return t == ComponentService || t == ComponentApp
+}
+
 // Runtime 是 Component 的进程入口启动方式
 //
 // 注意: runtime 描述进程入口由谁启动, 不是能不能有原生代码 - 两种 runtime

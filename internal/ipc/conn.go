@@ -450,8 +450,8 @@ func (co *conn) handleReady(env *ipcv1.Envelope) bool {
 		return co.handleRequest(body.Request)
 
 	case *ipcv1.Envelope_DispatchResult:
-		if co.componentType != pkgregistry.ComponentService {
-			co.log.Warn("ipc: non-service sent DispatchResult, closing")
+		if !co.componentType.CanProvideInterfaces() {
+			co.log.Warn("ipc: component type may not send DispatchResult, closing")
 			co.s.auditViolation(co.caller, errUnexpectedBody)
 			return false
 		}
@@ -557,7 +557,7 @@ func (co *conn) handleRegisterEndpoint(env *ipcv1.Envelope, req *ipcv1.RegisterE
 	if co.s.endpoints == nil {
 		return co.unsupported(env)
 	}
-	if co.componentType != pkgregistry.ComponentService {
+	if !co.componentType.CanProvideInterfaces() {
 		result := &ipcv1.RegisterEndpointResult{
 			RequestId: req.GetRequestId(),
 			Outcome: &ipcv1.RegisterEndpointResult_Failure{Failure: &ipcv1.Failure{
@@ -579,7 +579,7 @@ func (co *conn) handleUnregisterEndpoint(env *ipcv1.Envelope, req *ipcv1.Unregis
 	if co.s.endpoints == nil {
 		return co.unsupported(env)
 	}
-	if co.componentType != pkgregistry.ComponentService {
+	if !co.componentType.CanProvideInterfaces() {
 		result := &ipcv1.UnregisterEndpointResult{
 			RequestId: req.GetRequestId(),
 			Outcome: &ipcv1.UnregisterEndpointResult_Failure{Failure: &ipcv1.Failure{

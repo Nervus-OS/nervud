@@ -121,9 +121,21 @@ func TestUnsubscribe_SecondTimeIsNotFound(t *testing.T) {
 	}
 }
 
-func TestPublishEvent_RejectedFromNonService(t *testing.T) {
+// TestPublishEvent_AcceptedFromApp: app 形态也能上报事件.
+//
+// 曾经这条断言的是"app 发 PublishEvent 就关连接". 那条约束与另一条合起来把一整类
+// 组件判成不可能: app 是唯一拿得到 X11 的形态 (内核只为 app 注入 DISPLAY), 而
+// 导出接口曾要求 service —— 于是"有界面且能被别的包按接口唤起"的组件无法存在,
+// 权限确认屏正是这种东西.
+//
+// 现在按 ComponentType.CanProvideInterfaces 判. 这【不放松任何授权判据】: 事件
+// 能不能上报仍由 endpoint 模块裁决 (endpoint 是否属于本连接, event_id 是否在契约
+// 里, 载荷是否超限). 这里只验证"没有因为形态是 app 就被关连接".
+//
+// endpoint_id=7 是 newSubscribeServer 装好的那条路由, 因此这次上报是合法的.
+func TestPublishEvent_AcceptedFromApp(t *testing.T) {
 	_, sock := newSubscribeServer(t, ipcv1.DeliveryClass_DELIVERY_CLASS_RELIABLE)
-	c := dialHandshaked(t, sock)
+	c := dialHandshaked(t, sock) // 握手成 ComponentApp
 
 	env := &ipcv1.Envelope{Body: &ipcv1.Envelope_PublishEvent{
 		PublishEvent: &ipcv1.PublishEvent{EndpointId: 7, EventId: 1},
@@ -131,7 +143,22 @@ func TestPublishEvent_RejectedFromNonService(t *testing.T) {
 	if err := WriteFrame(c, mustMarshal(t, env)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	expectClosed(t, c)
+
+	// PublishEvent 不回消息 (见 handlePublishEvent 的说明: 失败只记审计并丢弃).
+	// 因此这里验证的是【连接还活着】—— 之前的行为是立刻被关掉.
+	//
+	// 再发一个需要应答的 body 来确认: 连接被关的话这次读会拿到 EOF.
+	sub := &ipcv1.Envelope{Body: &ipcv1.Envelope_Subscribe{
+		Subscribe: &ipcv1.Subscribe{RequestId: 1, EndpointId: 7, EventId: 1},
+	}}
+	if err := WriteFrame(c, mustMarshal(t, sub)); err != nil {
+		t.Fatalf("write subscribe: %v", err)
+	}
+	// readEnv 在读失败时 t.Fatal, 因此走到这里就说明连接还活着 ——
+	// 之前的行为是 app 一发 PublishEvent 就被关掉, 这次读会拿到 EOF.
+	if res := readEnv(t, c).GetSubscribeResult(); res == nil {
+		t.Fatal("app 上报事件之后连接不可用: 没有收到 SubscribeResult")
+	}
 }
 
 //

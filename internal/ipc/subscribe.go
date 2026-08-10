@@ -12,7 +12,6 @@ import (
 	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 
 	"github.com/nervus-os/nervud/internal/endpoint"
-	"github.com/nervus-os/nervud/internal/pkgregistry"
 	"github.com/nervus-os/nervud/internal/subscription"
 )
 
@@ -156,9 +155,9 @@ func (co *conn) handleBindEventScope(req *ipcv1.BindEventScope) bool {
 	if co.s.endpoints == nil || co.s.eventScopes == nil {
 		return true
 	}
-	// 只有 Service 能登记: 普通 App 发这个 body 属于方向错误.
-	if co.componentType != pkgregistry.ComponentService {
-		co.log.Warn("ipc: non-service sent BindEventScope, closing")
+	// 只有导出接口的组件能登记: 一个纯消费者发这个 body 属于方向错误.
+	if !co.componentType.CanProvideInterfaces() {
+		co.log.Warn("ipc: component type may not send BindEventScope, closing")
 		co.s.auditViolation(co.caller, errUnexpectedBody)
 		return false
 	}
@@ -227,9 +226,9 @@ func (co *conn) handlePublishEvent(req *ipcv1.PublishEvent) bool {
 	if co.s.endpoints == nil || co.s.subscriptions == nil {
 		return true
 	}
-	// 只有 Service 能上报事件: 普通 App 发这个 body 属于方向错误
-	if co.componentType != pkgregistry.ComponentService {
-		co.log.Warn("ipc: non-service sent PublishEvent, closing")
+	// 只有导出接口的组件能上报事件: 一个纯消费者发这个 body 属于方向错误
+	if !co.componentType.CanProvideInterfaces() {
+		co.log.Warn("ipc: component type may not send PublishEvent, closing")
 		co.s.auditViolation(co.caller, errUnexpectedBody)
 		return false
 	}
