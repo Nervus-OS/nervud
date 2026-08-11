@@ -196,6 +196,16 @@ func (m *Module) consentGrantsOf(
 			},
 			RiskClass: definition.RiskClass,
 			State:     wireGrantState(m.grants.GrantStateOf(entry.Manifest.PackageID, permissionID)),
+			// EffectiveGranted 取 AllowedAt 而不是从 State 推.
+			//
+			// 【这两件事对系统软件不一致】: consent 豁免绕过的是"要不要问用户"
+			// 这一步本身, 它【不伪造一条授予记录】—— 所以系统软件的 State 恒为
+			// NOT_REQUESTED, 而 AllowedAt 恒为 true.
+			//
+			// 只报 State 的后果是界面与事实相反: 文件管理器的"用户文件"开关显示
+			// 关闭, 而它实际能读写用户目录. 这与 permission.self 的 granted 字段
+			// 用 AllowedAt 是同一个理由 —— 那里没踩到, 这里踩到了.
+			EffectiveGranted: m.grants.AllowedAt(snap, entry.Manifest.PackageID, permissionID),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

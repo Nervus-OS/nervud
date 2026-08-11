@@ -31,6 +31,12 @@ type fakeGrants struct {
 	states map[[2]string]permission.GrantState
 	setErr error
 	sets   [][3]string
+	// exempt 是"系统软件"集合, 对应 permission.Grant.ConsentExempt.
+	//
+	// 必须建模它, 不能只留运行期状态: 豁免与授予在 wire 上是两个字段
+	// (state 与 effective_granted), 而它们【只在豁免时不一致】—— 一个不建模
+	// 豁免的 fake 永远测不到那个分歧, 而那正是本包出过的 bug.
+	exempt map[string]struct{}
 }
 
 func (f *fakeGrants) GrantStateOf(pkg, perm string) permission.GrantState {
@@ -40,12 +46,19 @@ func (f *fakeGrants) GrantStateOf(pkg, perm string) permission.GrantState {
 	return f.states[[2]string{pkg, perm}]
 }
 
-// AllowedAt 是 permission.self 的 granted 字段来源.
+// AllowedAt 是 permission.self 的 granted 与 ListGrants 的 effective_granted
+// 两者共同的来源.
 //
-// fake 里只按运行期状态判定: 本包的测试用的权限都是 USER_CONSENT, 而真实
-// Registry 还会叠加安装期集合与授予模式那两道 —— 那两道的行为归
-// internal/permission 的测试管, 在这里复刻一份只会让 fake 与真实实现同时漂移.
+// fake 里按"豁免 or 运行期状态"判定, 与真实 Registry.AllowedAt 的 USER_CONSENT
+// 分支同构: 本包的测试用的权限都是 USER_CONSENT, 而安装期集合与授予模式那两道
+// 归 internal/permission 的测试管 —— 在这里复刻一份只会让 fake 与真实实现同时
+// 漂移.
+//
+// 【豁免这一支必须建模】: 它是 state 与 effective_granted 唯一会不一致的地方.
 func (f *fakeGrants) AllowedAt(_ *catalog.Snapshot, pkg, perm string) bool {
+	if _, ok := f.exempt[pkg]; ok {
+		return true
+	}
 	return f.GrantStateOf(pkg, perm) == permission.GrantStateGranted
 }
 
@@ -146,6 +159,74 @@ func TestListGrants_NeverRequestedIsNotUnspecified(t *testing.T) {
 	state := out.GetPackages()[0].GetPermissions()[0].GetState()
 	if state != permissionv1.GrantState_GRANT_STATE_NOT_REQUESTED {
 		t.Fatalf("state = %v, want NOT_REQUESTED", state)
+	}
+}
+
+// TestListGrants_SystemSoftwareIsEffectivelyGranted 钉住 state 与
+// effective_granted 对系统软件【必须不一致】.
+//
+// 这是本包出过的一个 bug: 界面只看 state, 而系统软件走 consent 豁免 ——
+// 豁免不伪造授予记录, 所以 state 恒为 NOT_REQUESTED, 而 AllowedAt 恒为 true.
+// 于是文件管理器的"用户文件"开关显示关闭, 它却实际能读写用户目录:
+// 开关与事实相反.
+//
+// 两个字段各自钉住, 不能只查一个: 只查 effective_granted 会漏掉"有人把 state
+// 也一起改成 GRANTED"这种修法 —— 那会让"用户做过什么决定"这个事实消失, 而
+// 普通应用要靠它区分"还没问过"与"问过被拒".
+func TestListGrants_SystemSoftwareIsEffectivelyGranted(t *testing.T) {
+	const systemPkg = "nervus.filemanager"
+	lister := &fakeLister{entries: []pkgregistry.Entry{
+		entry(systemPkg, "文件管理", permStorageUser),
+	}}
+	m := newTestModule(t, lister, &fakeGrants{
+		// 豁免, 且【没有】任何运行期授予记录 —— 正是真实系统软件的状态
+		exempt: map[string]struct{}{systemPkg: {}},
+	})
+
+	got := callList(t, m, &permissionv1.ListGrantsRequest{}).
+		GetPackages()[0].GetPermissions()[0]
+
+	if !got.GetEffectiveGranted() {
+		t.Fatalf("effective_granted = false, want true: " +
+			"系统软件走 consent 豁免, 实际能访问 —— 界面照这个字段显示开关")
+	}
+	if got.GetState() != permissionv1.GrantState_GRANT_STATE_NOT_REQUESTED {
+		t.Fatalf("state = %v, want NOT_REQUESTED: 豁免【不伪造授予记录】, "+
+			"改了这一点就丢掉了'用户做过什么决定'这个事实", got.GetState())
+	}
+}
+
+// TestListGrants_EffectiveGrantedTracksUserDecision: 非豁免的普通应用两个字段
+// 一致 —— 它没有豁免, 能不能用就等于用户同不同意
+func TestListGrants_EffectiveGrantedTracksUserDecision(t *testing.T) {
+	const appPkg = "com.example.cam"
+	lister := &fakeLister{entries: []pkgregistry.Entry{
+		entry(appPkg, "相机", permStorageUser),
+	}}
+
+	for _, tc := range []struct {
+		name  string
+		state permission.GrantState
+		want  bool
+	}{
+		{"从没问过", permission.GrantStateNotRequested, false},
+		{"用户同意", permission.GrantStateGranted, true},
+		{"用户拒绝", permission.GrantStateDenied, false},
+		{"永久拒绝", permission.GrantStateDeniedPermanent, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModule(t, lister, &fakeGrants{
+				states: map[[2]string]permission.GrantState{
+					{appPkg, permStorageUser}: tc.state,
+				},
+			})
+			got := callList(t, m, &permissionv1.ListGrantsRequest{}).
+				GetPackages()[0].GetPermissions()[0]
+			if got.GetEffectiveGranted() != tc.want {
+				t.Fatalf("effective_granted = %v, want %v",
+					got.GetEffectiveGranted(), tc.want)
+			}
+		})
 	}
 }
 
