@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -24,6 +25,8 @@ func (k *Kernel) Register(m Module) {
 }
 
 func (k *Kernel) Run(ctx context.Context) error {
+	slog.Debug("kernel run started", "module_count", len(k.modules))
+
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
@@ -36,6 +39,7 @@ func (k *Kernel) Run(ctx context.Context) error {
 
 		select {
 		case fatalCh <- err:
+			slog.Debug("fatal error reported by module", "error", err)
 		default:
 		}
 
@@ -50,11 +54,14 @@ func (k *Kernel) Run(ctx context.Context) error {
 			break
 		}
 
+		moduleName := m.Name()
+		slog.Debug("starting module", "module", moduleName)
 		if err := m.Start(runCtx, reportFatal); err != nil {
 			if !errors.Is(err, context.Canceled) || runCtx.Err() == nil {
+				slog.Debug("module failed to start", "module", moduleName, "error", err)
 				runErr = fmt.Errorf(
 					"start module %q: %w",
-					m.Name(),
+					moduleName,
 					err,
 				)
 			}
@@ -63,17 +70,23 @@ func (k *Kernel) Run(ctx context.Context) error {
 			break
 		}
 
+		slog.Debug("module started", "module", moduleName)
 		started = append(started, m)
 	}
 
-	if runErr == nil && runCtx.Err() == nil {
-		<-runCtx.Done()
+	if runErr == nil {
+		if runCtx.Err() == nil {
+			<-runCtx.Done()
+		}
+		slog.Debug("kernel shutdown requested", "error", runCtx.Err())
 	}
 
 	var stopErr error
 
 	for i := len(started) - 1; i >= 0; i-- {
 		m := started[i]
+		moduleName := m.Name()
+		slog.Debug("stopping module", "module", moduleName)
 
 		stopCtx, cancelStop := context.WithTimeout(
 			context.Background(),
@@ -84,14 +97,17 @@ func (k *Kernel) Run(ctx context.Context) error {
 		cancelStop()
 
 		if err != nil {
+			slog.Debug("module failed to stop", "module", moduleName, "error", err)
 			stopErr = errors.Join(
 				stopErr,
 				fmt.Errorf(
 					"stop module %q: %w",
-					m.Name(),
+					moduleName,
 					err,
 				),
 			)
+		} else {
+			slog.Debug("module stopped", "module", moduleName)
 		}
 	}
 
@@ -100,6 +116,10 @@ func (k *Kernel) Run(ctx context.Context) error {
 	select {
 	case fatalErr = <-fatalCh:
 	default:
+	}
+
+	if runErr == nil && stopErr == nil && fatalErr == nil {
+		slog.Debug("kernel run completed successfully")
 	}
 
 	return errors.Join(runErr, stopErr, fatalErr)

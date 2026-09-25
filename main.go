@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,12 @@ import (
 )
 
 func main() {
+	// Log level setting
+	slog.SetDefault(slog.New(slog.NewTextHandler(
+		os.Stderr,
+		&slog.HandlerOptions{Level: slog.LevelDebug},
+	)))
+
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

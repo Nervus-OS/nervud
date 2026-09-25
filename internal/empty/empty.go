@@ -9,6 +9,7 @@ func (e *EmptyModule) Name() string {
 }
 
 func (e *EmptyModule) Start(ctx context.Context, reportFatal func(error)) error {
+	<-ctx.Done()
 	return nil
 }
 
