@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"nervud/internal/empty"
 	"nervud/internal/kernel"
 )
 
@@ -20,7 +18,7 @@ func main() {
 	)))
 
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		slog.Error(err.Error())
 		os.Exit(1)
 	}
 }
@@ -35,7 +33,7 @@ func run() error {
 
 	k := &kernel.Kernel{}
 
-	k.Register(&empty.EmptyModule{})
+	// k.Register(&empty.EmptyModule{})
 
 	return k.Run(ctx)
 }
