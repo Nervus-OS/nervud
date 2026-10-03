@@ -7,18 +7,18 @@ Empty module:
 
     import "context"
 
-    type EmptyModule struct{}
+    type Module struct{}
 
-    func (e *EmptyModule) Name() string {
+    func (e *Module) Name() string {
         return "empty"
     }
 
-    func (e *EmptyModule) Start(ctx context.Context, reportFatal func(error)) error {
+    func (e *Module) Start(ctx context.Context, reportFatal func(error)) error {
         <-ctx.Done()
         return nil
     }
 
-    func (e *EmptyModule) Stop(ctx context.Context) error {
+    func (e *Module) Stop(ctx context.Context) error {
         return nil
     }
 */

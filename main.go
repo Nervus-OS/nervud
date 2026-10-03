@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"nervud/internal/socket"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,7 +34,7 @@ func run() error {
 
 	k := &kernel.Kernel{}
 
-	// k.Register(&empty.EmptyModule{})
+	k.Register(&socket.Module{})
 
 	return k.Run(ctx)
 }
