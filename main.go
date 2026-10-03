@@ -3,20 +3,22 @@ package main
 import (
 	"context"
 	"log/slog"
+	"nervud/internal/kernel"
 	"nervud/internal/socket"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"nervud/internal/kernel"
+	"github.com/lmittmann/tint"
 )
 
 func main() {
 	// Log level setting
-	slog.SetDefault(slog.New(slog.NewTextHandler(
-		os.Stderr,
-		&slog.HandlerOptions{Level: slog.LevelDebug},
-	)))
+	slog.SetDefault(slog.New(
+		tint.NewTextHandler(os.Stderr, &tint.Options{
+			Level: slog.LevelDebug,
+		}),
+	))
 
 	if err := run(); err != nil {
 		slog.Error(err.Error())

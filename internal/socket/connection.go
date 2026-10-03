@@ -98,6 +98,12 @@ func (c *Connection) Run() {
 }
 
 func (c *Connection) handleMessage(envelope *pb.Envelope) {
+	// Check protocol version
+	if envelope.ProtocolVersion != config.Get().ProtocolVersion {
+		c.Close()
+		return
+	}
+
 	// TODO: Dispatch handling based on message type
 	switch body := envelope.Body.(type) {
 	case *pb.Envelope_Request:
