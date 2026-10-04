@@ -4,12 +4,15 @@ package socket
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"nervud/internal/config"
 	"nervud/internal/registry"
 	"nervud/internal/virtual"
 	"net"
+	"sync"
 	"syscall"
 
 	pb "github.com/Nervus-OS/nervus-ipc/go/v2"
@@ -21,6 +24,7 @@ type Connection struct {
 	senderUID uint32
 	ctx       context.Context
 	cancel    context.CancelFunc
+	closeOnce sync.Once
 }
 
 // New Connection
@@ -86,7 +90,7 @@ func (c *Connection) Run() {
 		envelope, err := readFrame(c.conn)
 		if err != nil {
 			// Connection closed or read error
-			if err.Error() == "EOF" || isConnectionClosed(err) {
+			if errors.Is(err, io.EOF) || isConnectionClosed(err) {
 				slog.Info("connection closed by peer", "connID", c.id)
 			} else {
 				slog.Error("read frame failed", "connID", c.id, "error", err)

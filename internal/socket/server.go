@@ -112,11 +112,7 @@ func (s *Server) acceptLoop() {
 // handleConnection Handle single connection
 func (s *Server) handleConnection(connID uint64, conn *net.UnixConn) {
 	defer s.wg.Done()
-	defer func() {
-		if err := conn.Close(); err != nil {
-			slog.Error("close connection failed", "error", err)
-		}
-	}()
+	defer conn.Close()
 
 	slog.Info("new connection", "connID", connID, "remote", conn.RemoteAddr())
 
