@@ -12,7 +12,7 @@ func (s *Module) Name() string {
 	return "socket"
 }
 
-func (s *Module) Start(ctx context.Context, reportFatal func(error)) error {
+func (s *Module) Start(ctx context.Context) error {
 	s.server = &Server{}
 
 	if err := s.server.Start(ctx); err != nil {

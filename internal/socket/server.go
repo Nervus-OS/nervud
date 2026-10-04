@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"nervud/internal/config"
+	"nervud/internal/kernel"
 	"net"
 	"os"
 	"sync"
@@ -69,6 +70,11 @@ func (s *Server) Start(ctx context.Context) error {
 // acceptLoop Accept connection main loop
 func (s *Server) acceptLoop() {
 	defer s.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			kernel.ReportFatal(s.ctx, fmt.Errorf("accept loop panic: %v", r))
+		}
+	}()
 
 	for {
 		// Accept New Connection

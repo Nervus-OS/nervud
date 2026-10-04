@@ -46,7 +46,7 @@ func (c *Module) Name() string {
 	return "config"
 }
 
-func (c *Module) Start(ctx context.Context, reportFatal func(error)) error {
+func (c *Module) Start(ctx context.Context) error {
 	return nil
 }
 

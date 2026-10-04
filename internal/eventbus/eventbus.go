@@ -14,9 +14,9 @@ type Module struct {
 }
 
 // Start initializes and starts the EventBus with default 4 workers.
-func (m *Module) Start(ctx context.Context, reportFatal func(error)) error {
+func (m *Module) Start(ctx context.Context) error {
 	m.bus = New(4)
-	return m.bus.Start(ctx, reportFatal)
+	return m.bus.Start(ctx)
 }
 
 // Stop stops the EventBus.
@@ -207,7 +207,7 @@ func (eb *EventBus) PublishSync(event any) {
 }
 
 // Start starts the event bus workers.
-func (eb *EventBus) Start(ctx context.Context, reportFatal func(error)) error {
+func (eb *EventBus) Start(ctx context.Context) error {
 	eb.ctx, eb.cancel = context.WithCancel(ctx)
 
 	for i := 0; i < eb.workers; i++ {

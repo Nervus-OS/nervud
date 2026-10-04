@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"log/slog"
+	"nervud/internal/kernel"
 )
 
 var globalStore *ComponentStore
@@ -15,7 +16,7 @@ func (m *Module) Name() string {
 	return "registry"
 }
 
-func (m *Module) Start(ctx context.Context, reportFatal func(error)) error {
+func (m *Module) Start(ctx context.Context) error {
 	slog.Info("registry module starting")
 
 	// Initialize component store
@@ -24,7 +25,7 @@ func (m *Module) Start(ctx context.Context, reportFatal func(error)) error {
 	// Load registry
 	if err := m.store.Load(); err != nil {
 		slog.Error("failed to load component registry", "error", err)
-		reportFatal(err)
+		kernel.ReportFatal(ctx, err)
 		return err
 	}
 

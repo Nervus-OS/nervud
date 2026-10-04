@@ -9,7 +9,7 @@ Empty module:
 
     type Module struct{}
 
-	// Replace e with your module's abbreviation.
+	Replace e with your module's abbreviation.
     func (e *Module) Name() string {
         return "empty"
     }

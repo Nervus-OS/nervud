@@ -10,10 +10,23 @@ import (
 
 const moduleStopTimeout = 10 * time.Second
 
+type contextKey int
+
+const reportFatalKey contextKey = 0
+
 type Module interface {
 	Name() string
-	Start(ctx context.Context, reportFatal func(error)) error
+	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
+}
+
+func ReportFatal(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	if fn, ok := ctx.Value(reportFatalKey).(func(error)); ok {
+		fn(err)
+	}
 }
 
 type Kernel struct {
@@ -46,6 +59,8 @@ func (k *Kernel) Run(ctx context.Context) error {
 		cancelRun()
 	}
 
+	runCtx = context.WithValue(runCtx, reportFatalKey, reportFatal)
+
 	started := make([]Module, 0, len(k.modules))
 	var runErr error
 
@@ -61,10 +76,10 @@ func (k *Kernel) Run(ctx context.Context) error {
 			defer func() {
 				if r := recover(); r != nil {
 					err = fmt.Errorf("panic in module %q Start: %v", moduleName, r)
-					reportFatal(err)
+					ReportFatal(runCtx, err)
 				}
 			}()
-			return m.Start(runCtx, reportFatal)
+			return m.Start(runCtx)
 		}()
 
 		if err != nil {
