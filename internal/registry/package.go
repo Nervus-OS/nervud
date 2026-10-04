@@ -13,7 +13,7 @@ type Module struct {
 }
 
 func (m *Module) Name() string {
-	return "registry"
+	return "registry_package"
 }
 
 func (m *Module) Start(ctx context.Context) error {

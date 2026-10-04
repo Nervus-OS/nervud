@@ -8,6 +8,7 @@ import (
 	"nervud/internal/kernel"
 	"nervud/internal/registry"
 	"nervud/internal/socket"
+	"nervud/internal/virtual"
 	"os"
 	"os/signal"
 	"syscall"
@@ -41,8 +42,9 @@ func run() error {
 
 	k.Register(&config.Module{})
 	k.Register(&eventbus.Module{})
-	k.Register(&socket.Module{})
 	k.Register(&registry.Module{})
+	k.Register(&virtual.Module{})
+	k.Register(&socket.Module{})
 
 	return k.Run(ctx)
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"nervud/internal/config"
 	"nervud/internal/registry"
+	"nervud/internal/virtual"
 	"net"
 	"syscall"
 
@@ -117,7 +118,14 @@ func (c *Connection) handleMessage(envelope *pb.Envelope) {
 			"method", body.Request.Method,
 			"callerPerms", body.Request.CallerPermissions)
 
-		// TODO: Handle Request
+		// Handle virtual service request
+		if virtual.IsVirtualService(body.Request.TargetService) {
+			response := virtual.GetGlobalService().HandleRequest(body.Request, c.senderUID)
+
+			c.sendResponse(response)
+		} else {
+			// TODO: Other Handle Request
+		}
 
 	case *pb.Envelope_Subscribe:
 		c.fillSubscribePermissions(body.Subscribe)
@@ -143,6 +151,22 @@ func (c *Connection) handleMessage(envelope *pb.Envelope) {
 
 	default:
 		slog.Warn("unknown message type", "connID", c.id)
+	}
+}
+
+func (c *Connection) sendResponse(response *pb.Response) {
+	envelope := &pb.Envelope{
+		ProtocolVersion: config.Get().ProtocolVersion,
+		Body: &pb.Envelope_Response{
+			Response: response,
+		},
+	}
+
+	if err := writeFrame(c.conn, envelope); err != nil {
+		slog.Error("send response failed",
+			"connID", c.id,
+			"requestID", response.RequestId,
+			"error", err)
 	}
 }
 

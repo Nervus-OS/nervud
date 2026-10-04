@@ -102,6 +102,7 @@ func (k *Kernel) Run(ctx context.Context) error {
 
 	if runErr == nil {
 		if runCtx.Err() == nil {
+			slog.Debug("kernel started")
 			<-runCtx.Done()
 		}
 		slog.Debug("kernel shutdown requested", "error", runCtx.Err())
