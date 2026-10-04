@@ -8,9 +8,38 @@ import (
 	"sync"
 )
 
+// Module wraps EventBus to implement the kernel module interface.
+type Module struct {
+	bus *EventBus
+}
+
+// Start initializes and starts the EventBus with default 4 workers.
+func (m *Module) Start(ctx context.Context, reportFatal func(error)) error {
+	m.bus = New(4)
+	return m.bus.Start(ctx, reportFatal)
+}
+
+// Stop stops the EventBus.
+func (m *Module) Stop(ctx context.Context) error {
+	if m.bus != nil {
+		return m.bus.Stop(ctx)
+	}
+	return nil
+}
+
+// Name returns the module name.
+func (m *Module) Name() string {
+	return "eventbus"
+}
+
+// GetBus returns the underlying EventBus instance.
+func (m *Module) GetBus() *EventBus {
+	return m.bus
+}
+
 // EventBus dispatches events to subscribed handlers.
 type EventBus struct {
-	// handlers maps event types to their handler lists.
+	// handlers map event types to their handler lists.
 	handlers   map[reflect.Type]*handlerList
 	handlersMu sync.RWMutex
 
@@ -60,7 +89,7 @@ func New(workers int) *EventBus {
 //	    return nil
 //	})
 //	defer unsubscribe()
-func (eb *EventBus) Subscribe(handler interface{}) (func(), error) {
+func (eb *EventBus) Subscribe(handler any) (func(), error) {
 	handlerVal := reflect.ValueOf(handler)
 	handlerType := handlerVal.Type()
 
@@ -71,7 +100,7 @@ func (eb *EventBus) Subscribe(handler interface{}) (func(), error) {
 	if handlerType.NumIn() != 1 {
 		return nil, fmt.Errorf("handler must take exactly one argument, got %d", handlerType.NumIn())
 	}
-	if handlerType.NumOut() != 1 || handlerType.Out(0) != reflect.TypeOf((*error)(nil)).Elem() {
+	if handlerType.NumOut() != 1 || handlerType.Out(0) != reflect.TypeFor[error]() {
 		return nil, fmt.Errorf("handler must return error")
 	}
 
@@ -112,7 +141,7 @@ func (eb *EventBus) Subscribe(handler interface{}) (func(), error) {
 //	    // Process RequestEvent
 //	    return nil
 //	})
-func (eb *EventBus) SubscribeWithContext(ctx context.Context, handler interface{}) error {
+func (eb *EventBus) SubscribeWithContext(ctx context.Context, handler any) error {
 	unsubscribe, err := eb.Subscribe(handler)
 	if err != nil {
 		return err
@@ -132,8 +161,8 @@ func (eb *EventBus) SubscribeWithContext(ctx context.Context, handler interface{
 // Example:
 //
 //	bus.Publish(&RequestEvent{...})
-func (eb *EventBus) Publish(event interface{}) {
-	if event == nil {
+func (eb *EventBus) Publish(event any) {
+	if event == nil || eb.eventQueue == nil {
 		return
 	}
 
@@ -145,18 +174,23 @@ func (eb *EventBus) Publish(event interface{}) {
 		eventVal:  eventVal,
 	}
 
-	// Send without blocking; drop the event if the queue is full.
+	// Send it without blocking; drop the event if the queue is full.
 	select {
 	case eb.eventQueue <- wrapper:
-	case <-eb.ctx.Done():
 	default:
-		// The queue is full, so drop the event.
+		// The queue is full or context is done, so drop the event.
+		if eb.ctx != nil {
+			select {
+			case <-eb.ctx.Done():
+			default:
+			}
+		}
 	}
 }
 
 // PublishSync dispatches an event immediately and waits until all handlers
 // have been started.
-func (eb *EventBus) PublishSync(event interface{}) {
+func (eb *EventBus) PublishSync(event any) {
 	if event == nil {
 		return
 	}
@@ -191,7 +225,9 @@ func (eb *EventBus) Stop(ctx context.Context) error {
 		eb.cancel()
 	}
 
-	close(eb.eventQueue)
+	if eb.eventQueue != nil {
+		close(eb.eventQueue)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -248,7 +284,6 @@ func (eb *EventBus) dispatch(wrapper *eventWrapper) {
 	list.mu.RUnlock()
 
 	for _, handler := range handlers {
-		handler := handler // Avoid closure capture issues.
 		go func() {
 			args := []reflect.Value{wrapper.eventVal}
 			results := handler.Call(args)

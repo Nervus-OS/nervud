@@ -4,18 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"nervud/internal/config"
 	"net"
 	"os"
 	"sync"
 	"sync/atomic"
-)
-
-const (
-	// SocketPath Unix Domain Socket Path
-	SocketPath = "/run/nervus/nervud.sock"
-
-	// SocketPerm Socket Permission: 0666
-	SocketPerm = 0666
 )
 
 // Server Unix Domain Socket Server
@@ -33,6 +26,9 @@ type Server struct {
 
 // Start Socket Server
 func (s *Server) Start(ctx context.Context) error {
+	SocketPath := config.Get().SocketPath
+	SocketPerm := config.Get().SocketPerm
+
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	// Ensure /run/nervus directory exists
@@ -131,6 +127,8 @@ func (s *Server) handleConnection(connID uint64, conn *net.UnixConn) {
 // Stop the server
 func (s *Server) Stop() error {
 	slog.Info("stopping socket server")
+
+	SocketPath := config.Get().SocketPath
 
 	// Cancel context, stop Accept loop
 	s.cancel()

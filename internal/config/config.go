@@ -1,20 +1,38 @@
 package config
 
-import "context"
+import (
+	"context"
+	"io/fs"
+)
 
 const (
 	// ProtocolVersion is the NervusOS IPC protocol version
 	ProtocolVersion = 2
+
+	// SocketPath Unix Domain Socket Path
+	SocketPath = "/run/nervus/nervud.sock"
+
+	// SocketPerm Socket Permission
+	SocketPerm = 0666
+
+	// ComponentRegistryPath is the path to the component registry file
+	ComponentRegistryPath = "/run/nervus/components.json"
 )
 
 // Config holds nervud configuration values
 type Config struct {
-	ProtocolVersion uint32
+	ProtocolVersion       uint32
+	SocketPath            string
+	SocketPerm            fs.FileMode
+	ComponentRegistryPath string
 }
 
 // Global singleton config instance
 var global = &Config{
-	ProtocolVersion: ProtocolVersion,
+	ProtocolVersion:       ProtocolVersion,
+	SocketPath:            SocketPath,
+	SocketPerm:            SocketPerm,
+	ComponentRegistryPath: ComponentRegistryPath,
 }
 
 // Get returns the global config instance
@@ -24,15 +42,14 @@ func Get() *Config {
 
 type Module struct{}
 
-func (e *Module) Name() string {
+func (c *Module) Name() string {
 	return "config"
 }
 
-func (e *Module) Start(ctx context.Context, reportFatal func(error)) error {
-	<-ctx.Done()
+func (c *Module) Start(ctx context.Context, reportFatal func(error)) error {
 	return nil
 }
 
-func (e *Module) Stop(ctx context.Context) error {
+func (c *Module) Stop(ctx context.Context) error {
 	return nil
 }

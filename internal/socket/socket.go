@@ -19,8 +19,6 @@ func (s *Module) Start(ctx context.Context, reportFatal func(error)) error {
 		return err
 	}
 
-	// Block until context is canceled
-	<-ctx.Done()
 	return nil
 }
 

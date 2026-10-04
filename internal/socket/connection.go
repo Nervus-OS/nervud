@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"nervud/internal/config"
+	"nervud/internal/registry"
 	"net"
 	"syscall"
 
@@ -107,11 +108,24 @@ func (c *Connection) handleMessage(envelope *pb.Envelope) {
 	// TODO: Dispatch handling based on message type
 	switch body := envelope.Body.(type) {
 	case *pb.Envelope_Request:
-		slog.Debug("received request", "connID", c.id, "requestID", body.Request.RequestId)
+		c.fillCallerPermissions(body.Request)
+
+		slog.Debug("received request",
+			"connID", c.id,
+			"requestID", body.Request.RequestId,
+			"target", body.Request.TargetService,
+			"method", body.Request.Method,
+			"callerPerms", body.Request.CallerPermissions)
+
 		// TODO: Handle Request
 
 	case *pb.Envelope_Subscribe:
-		slog.Debug("received subscribe", "connID", c.id, "requestID", body.Subscribe.RequestId)
+		c.fillSubscribePermissions(body.Subscribe)
+
+		slog.Debug("received subscribe",
+			"connID", c.id,
+			"eventID", body.Subscribe.EventId)
+
 		// TODO: Handle Subscribe
 
 	case *pb.Envelope_PublishEvent:
@@ -130,6 +144,69 @@ func (c *Connection) handleMessage(envelope *pb.Envelope) {
 	default:
 		slog.Warn("unknown message type", "connID", c.id)
 	}
+}
+
+// fillCallerPermissions fills the CallerPermissions field in the request based on the caller's UID and the target service's permissions.
+func (c *Connection) fillCallerPermissions(req *pb.Request) {
+	// Get ComponentStore
+	store := registry.GetGlobalStore()
+	if store == nil {
+		slog.Warn("component store not initialized")
+		req.CallerPermissions = []string{}
+		return
+	}
+
+	// Query the caller component by UID
+	caller := store.GetComponentByUID(int32(c.senderUID))
+	if caller == nil {
+		slog.Warn("caller component not found", "uid", c.senderUID)
+		req.CallerPermissions = []string{}
+		return
+	}
+
+	// Query target service component
+	target := store.GetComponent(req.TargetService)
+	if target == nil {
+		slog.Warn("target service not found", "service", req.TargetService)
+		req.CallerPermissions = []string{}
+		return
+	}
+
+	// Filter permissions retaining the target service statement
+	var filteredPerms []string
+	for _, callerPerm := range caller.Permissions {
+		// Skip unconfirmed permissions
+		if !callerPerm.IsConfirmed {
+			continue
+		}
+
+		// Check if the caller's permission is in the target's permission additions
+		for _, addedPerm := range target.PermissionAdditions {
+			if addedPerm.ID == callerPerm.ID {
+				filteredPerms = append(filteredPerms, callerPerm.ID)
+				break
+			}
+		}
+	}
+
+	// Fill
+	req.CallerPermissions = filteredPerms
+}
+
+// fillSubscribePermissions fills the CallerPermissions field in the subscription message based on the caller's UID and the event's permissions.
+func (c *Connection) fillSubscribePermissions(sub *pb.Subscribe) {
+	// Get ComponentStore
+	store := registry.GetGlobalStore()
+	if store == nil {
+		slog.Warn("component store not initialized")
+		sub.CallerPermissions = []string{}
+		return
+	}
+
+	// TODO: Extract the service ID from the event_id.
+	// Format: com.example.service.event.battery_low → com.example.service
+	// Temporarily simplified handling
+	sub.CallerPermissions = []string{}
 }
 
 // sendPong sends a Pong response

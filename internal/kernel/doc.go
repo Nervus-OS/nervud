@@ -9,12 +9,13 @@ Empty module:
 
     type Module struct{}
 
+	// Replace e with your module's abbreviation.
     func (e *Module) Name() string {
         return "empty"
     }
 
     func (e *Module) Start(ctx context.Context, reportFatal func(error)) error {
-        <-ctx.Done()
+		Init your module here
         return nil
     }
 

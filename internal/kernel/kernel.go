@@ -56,7 +56,18 @@ func (k *Kernel) Run(ctx context.Context) error {
 
 		moduleName := m.Name()
 		slog.Debug("starting module", "module", moduleName)
-		if err := m.Start(runCtx, reportFatal); err != nil {
+
+		err := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("panic in module %q Start: %v", moduleName, r)
+					reportFatal(err)
+				}
+			}()
+			return m.Start(runCtx, reportFatal)
+		}()
+
+		if err != nil {
 			if !errors.Is(err, context.Canceled) || runCtx.Err() == nil {
 				slog.Debug("module failed to start", "module", moduleName, "error", err)
 				runErr = fmt.Errorf(
@@ -93,7 +104,15 @@ func (k *Kernel) Run(ctx context.Context) error {
 			moduleStopTimeout,
 		)
 
-		err := m.Stop(stopCtx)
+		err := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("panic in module %q Stop: %v", moduleName, r)
+				}
+			}()
+			return m.Stop(stopCtx)
+		}()
+
 		cancelStop()
 
 		if err != nil {
