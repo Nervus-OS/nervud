@@ -64,6 +64,7 @@ func getUIDFromConn(conn *net.UnixConn) (uint32, error) {
 	fd := int(file.Fd())
 
 	// Call GetsockoptUcred to get SO_PEERCRED
+	// 读取连接对端的进程凭据，用于获取其用户 ID
 	ucred, err := syscall.GetsockoptUcred(fd, syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	if err != nil {
 		return 0, fmt.Errorf("GetsockoptUcred SO_PEERCRED: %w", err)
@@ -105,12 +106,14 @@ func (c *Connection) Run() {
 
 func (c *Connection) handleMessage(envelope *pb.Envelope) {
 	// Check protocol version
+	// 暂时使用简单的版本检查，后续会使用更复杂的兼容性处理
 	if envelope.ProtocolVersion != config.Get().ProtocolVersion {
 		c.Close()
 		return
 	}
 
 	// TODO: Dispatch handling based on message type
+	// 待完善：按消息类型分发给对应的处理逻辑
 	switch body := envelope.Body.(type) {
 	case *pb.Envelope_Request:
 		c.fillCallerPermissions(body.Request)
@@ -175,58 +178,34 @@ func (c *Connection) sendResponse(response *pb.Response) {
 }
 
 // fillCallerPermissions fills the CallerPermissions field in the request based on the caller's UID and the target service's permissions.
+// 根据调用方的用户 ID 和目标服务的权限声明，填入请求的调用方权限
 func (c *Connection) fillCallerPermissions(req *pb.Request) {
-	// Get ComponentStore
-	store := registry.GetGlobalStore()
-	if store == nil {
-		slog.Warn("component store not initialized")
-		req.CallerPermissions = []string{}
-		return
-	}
+	req.CallerPermissions = []string{}
 
 	// Query the caller component by UID
-	caller := store.GetComponentByUID(int32(c.senderUID))
-	if caller == nil {
+	caller, exists := registry.GetComponentByUID(int32(c.senderUID))
+	if !exists {
 		slog.Warn("caller component not found", "uid", c.senderUID)
-		req.CallerPermissions = []string{}
 		return
 	}
 
-	// Query target service component
-	target := store.GetComponent(req.TargetService)
-	if target == nil {
+	// The target must be a known component; its declared permissions decide the list
+	// 目标必须是已注册的组件；列表由它声明的权限决定
+	if _, exists := registry.GetComponent(req.TargetService); !exists {
 		slog.Warn("target service not found", "service", req.TargetService)
-		req.CallerPermissions = []string{}
 		return
 	}
 
-	// Filter permissions retaining the target service statement
-	var filteredPerms []string
-	for _, callerPerm := range caller.Permissions {
-		// Skip unconfirmed permissions
-		if !callerPerm.IsConfirmed {
-			continue
-		}
-
-		// Check if the caller's permission is in the target's permission additions
-		for _, addedPerm := range target.PermissionAdditions {
-			if addedPerm.ID == callerPerm.ID {
-				filteredPerms = append(filteredPerms, callerPerm.ID)
-				break
-			}
-		}
-	}
-
-	// Fill
-	req.CallerPermissions = filteredPerms
+	req.CallerPermissions = registry.CallerPermissions(caller.ID, req.TargetService)
 }
 
 // fillSubscribePermissions fills the CallerPermissions field in the subscription message based on the caller's UID and the event's permissions.
+// 根据调用方的用户 ID 和事件权限填充订阅权限；目前尚未实现筛选
 func (c *Connection) fillSubscribePermissions(sub *pb.Subscribe) {
-	// Get ComponentStore
-	store := registry.GetGlobalStore()
-	if store == nil {
-		slog.Warn("component store not initialized")
+	// Drop subscriptions whose caller cannot be identified
+	// 无法识别调用方时丢弃订阅
+	if _, exists := registry.GetComponentByUID(int32(c.senderUID)); !exists {
+		slog.Warn("caller component not found", "uid", c.senderUID)
 		sub.CallerPermissions = []string{}
 		return
 	}
@@ -234,6 +213,7 @@ func (c *Connection) fillSubscribePermissions(sub *pb.Subscribe) {
 	// TODO: Extract the service ID from the event_id.
 	// Format: com.example.service.event.battery_low → com.example.service
 	// Temporarily simplified handling
+	// 待从事件 ID 提取服务 ID；目前先把订阅权限设为空
 	sub.CallerPermissions = []string{}
 }
 

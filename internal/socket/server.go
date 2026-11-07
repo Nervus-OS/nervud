@@ -39,6 +39,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Remove old socket file (if exists)
 	// Unix socket close will not automatically delete the file, need to delete it manually
+	// 这里先清理旧 socket 文件，避免影响重新监听
 	if err := os.Remove(SocketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove old socket: %w", err)
 	}
@@ -104,6 +105,7 @@ func (s *Server) acceptLoop() {
 		connID := s.nextConnID.Add(1)
 
 		// Start a goroutine to handle this connection
+		// 启动独立协程处理这条连接
 		s.wg.Add(1)
 		go s.handleConnection(connID, unixConn)
 	}

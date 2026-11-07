@@ -3,21 +3,16 @@ package virtual
 import (
 	"fmt"
 	"log/slog"
-	"nervud/internal/registry"
 
 	pb "github.com/Nervus-OS/nervus-ipc/go/v2"
 )
 
 const VirtualServiceID = "nervud.system.server"
 
-type Service struct {
-	componentStore *registry.ComponentStore
-}
+type Service struct{}
 
-func NewService(store *registry.ComponentStore) *Service {
-	return &Service{
-		componentStore: store,
-	}
+func NewService() *Service {
+	return &Service{}
 }
 
 // HandleRequest handles socket request to the virtual service
@@ -40,6 +35,8 @@ func (s *Service) HandleRequest(req *pb.Request, callerUID uint32) *pb.Response 
 	// Handle request based on method
 	switch req.Method {
 	// TODO: Implement the following methods in the virtual service
+	case "executeComponent":
+		return s.handleExecuteComponent(req, callerUID)
 
 	default:
 		slog.Warn("unknown virtual service method",

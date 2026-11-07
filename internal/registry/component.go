@@ -20,31 +20,39 @@ func (t ComponentType) String() string {
 	}
 }
 
+// Component roles, see manifest.sig signatures.role
+const (
+	RoleDeveloper = iota
+	RolePlatform
+)
+
+type ComponentRole int
+
+func (r ComponentRole) String() string {
+	switch r {
+	case RoleDeveloper:
+		return "developer"
+	case RolePlatform:
+		return "platform"
+	default:
+		return "unknown"
+	}
+}
+
 // Component represents a registered component in NervusOS
 type Component struct {
-	ID                  string                `json:"id"`
-	Type                ComponentType         `json:"type"`
-	Entry               string                `json:"entry"`
-	Permissions         []ComponentPermission `json:"permissions"`
-	WorkDir             string                `json:"work_dir"`
-	DataDir             string                `json:"data_dir"`
-	UID                 int32                 `json:"uid"`
-	Role                string                `json:"role"` // developer or platform
-	PermissionAdditions []AddedPermission     `json:"permission_additions"`
-	PackageID           string                `json:"package_id"`
-	IsAvailable         bool                  `json:"is_available"`
+	ID                   string            `json:"id"`
+	Type                 ComponentType     `json:"type"`
+	Entry                string            `json:"entry"`
+	WorkDir              string            `json:"work_dir"`
+	DataDir              string            `json:"data_dir"`
+	UID                  int32             `json:"uid"`
+	GID                  int32             `json:"gid"`
+	RequestedPermissions []string          `json:"requested_permissions"` // declared at install, never extended later / 安装时申请，之后不再增加
+	PermissionAdditions  []AddedPermission `json:"permission_additions"`  // services only / 仅服务组件
+	IsAvailable          bool              `json:"is_available"`
 }
 
-// ComponentPermission indicates whether component permissions are granted.
-type ComponentPermission struct {
-	ID          string `json:"id"`
-	IsConfirmed bool   `json:"is_confirmed"`
-}
-
-// AddedPermission represents a custom permission declared by a service component
-type AddedPermission struct {
-	ID               string `json:"id"`
-	SystemPermission bool   `json:"system_permission"`
-	NeedUserConfirm  bool   `json:"need_user_confirm"`
-	Description      string `json:"description"` // To user
-}
+// KernelReservedPrefix may not be used by any package or component id
+// 内核保留的命名空间，包和组件都不得使用
+const KernelReservedPrefix = "nervud."

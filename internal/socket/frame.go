@@ -21,6 +21,7 @@ const (
 
 // writeFrame writes an Envelope to conn as a framed message.
 // Frame format: [4-byte length in big-endian][protobuf message body]
+// 消息帧先写 4 字节长度（高位字节在前），再写 protobuf 消息内容
 func writeFrame(conn net.Conn, envelope *pb.Envelope) error {
 	// Serialize envelope to protobuf
 	data, err := proto.Marshal(envelope)
@@ -53,6 +54,7 @@ func writeFrame(conn net.Conn, envelope *pb.Envelope) error {
 }
 
 // readFrame reads a framed Envelope from conn.
+// 从连接读取一个完整消息帧，解析为消息封装
 func readFrame(conn net.Conn) (*pb.Envelope, error) {
 	// Set read deadline
 	if err := conn.SetReadDeadline(time.Now().Add(ioTimeout)); err != nil {

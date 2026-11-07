@@ -23,6 +23,7 @@ func ErrorResponse(requestID string, code pb.StatusCode, message string) *pb.Res
 
 // SuccessResponse Construct a successful response
 // payload will be serialized as JSON and placed in Response.Success.Payload
+// 将返回数据转为 JSON，放入成功响应的 Payload 字段
 func SuccessResponse(requestID string, payload any) *pb.Response {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -50,6 +51,7 @@ func SuccessResponse(requestID string, payload any) *pb.Response {
 }
 
 // AcceptedResponse Construct an accepted response (for asynchronous)
+// 构造异步请求已受理的响应，表示已接收，尚未完成
 func AcceptedResponse(requestID string, payload any) *pb.Response {
 	data, err := json.Marshal(payload)
 	if err != nil {

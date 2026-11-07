@@ -18,13 +18,13 @@ func (m *Module) Name() string {
 func (m *Module) Start(ctx context.Context) error {
 	slog.Info("virtual service module starting")
 
-	// Get the global component store from the registry module
-	store := registry.GetGlobalStore()
-	if store == nil {
-		return fmt.Errorf("component store not initialized, ensure registry module starts before virtual")
+	// The registry must be ready before the virtual service handles requests
+	// 虚拟服务处理请求前，注册表必须已经就绪
+	if registry.Current() == nil {
+		return fmt.Errorf("registry not initialized, ensure registry module starts before virtual")
 	}
 
-	m.service = NewService(store)
+	m.service = NewService()
 
 	globalModule = m
 
